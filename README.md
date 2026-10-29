@@ -58,7 +58,8 @@ Android 10+ 禁止后台应用读取剪贴板。KnotYup 采用能力分层：
 
 - [x] **M0 基础**：Rust core、桌面端、双机文本剪贴板互通
 - [x] **M1 群管理**：创建/加入、PIN、移出、局域网发现、AES-GCM 加密、i18n
-- [ ] **M2 Android**：加入群、剪贴板收发（Shizuku / IME / 悬浮窗降级链）
+- [x] **M2.1 Android**：加入群（发现列表/手动地址）、加密同步、前台剪贴板模式、分享发送、主题色/语言
+- [ ] **M2.2 Android 增强**：Shizuku 后台剪贴板（IClipboard binder 代理）、悬浮窗/快捷磁贴、内置 IME
 - [ ] **M3 触控板**：触摸采集 → 鼠标注入、手势、延迟调优
 - [ ] **M4 打磨**：图片/文件传输、断线重连、群主迁移、防休眠、打包分发
 
@@ -70,6 +71,16 @@ knot-yup/
 ├── knot-desktop/    Tauri 2 桌面客户端（Win/macOS）
 │   ├── src-tauri/   Rust 后端
 │   └── ui/          前端（无构建静态文件，含 i18n）
-├── knot-android/    Android 客户端（M2，规划中）
+├── knot-android/    Android 客户端（Kotlin + Compose）
 └── docs/            文档
 ```
+
+### Android 端
+
+```bash
+cd knot-android && ./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+手机与电脑连同一 Wi-Fi：电脑「创建群」→ 手机打开 KnotYup，发现的群点一下、输 PIN 加入。
+App 在前台时自动同步剪贴板；也可从任意 App 分享文本到 KnotYup 发送到群。

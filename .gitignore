@@ -8,6 +8,15 @@ node_modules/
 # Tauri
 knot-desktop/src-tauri/gen/
 
+# Android
+knot-android/local.properties
+knot-android/.gradle/
+knot-android/build/
+knot-android/app/build/
+knot-android/.idea/
+*.apk
+*.aab
+
 # macOS
 .DS_Store
 

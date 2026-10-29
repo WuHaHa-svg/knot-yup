@@ -58,6 +58,9 @@ Android 前台 Activity 采集 MotionEvent → 增量(dx/dy/按键/滚轮) → �
 
 - [x] M0 基础：协议 + 星型群 + 剪贴板轮询去重 + 桌面端 UI
 - [x] M1 群管理：PIN 入群 / 移出 / UDP 发现 / AES-256-GCM 加密 / i18n（简繁英）
-- [ ] M2 Android：Kotlin 客户端 + UniFFI + 剪贴板降级链
+- [x] M2.1 Android：Kotlin/Compose 客户端，Kotlin 实现 PROTOCOL.md（join/encrypted/发现），
+      前台剪贴板模式（ClipboardManager 焦点可用）+ 分享发送；Shizuku 能力探测已就绪
+- [ ] M2.2 Android：Shizuku IClipboard binder 代理（后台读写）、悬浮窗/磁贴、IME、
+      评估迁移到 UniFFI 复用 knot-core
 - [ ] M3 触控板
 - [ ] M4 文件传输 / ECDH+QR 配对 / 群主迁移

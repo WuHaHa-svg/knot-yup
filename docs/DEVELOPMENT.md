@@ -31,6 +31,18 @@ cargo install tauri-cli --version '^2'
 cargo tauri build
 ```
 
+### Android 端
+
+```bash
+cd knot-android
+./gradlew assembleDebug                      # 调试包
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+./gradlew assembleRelease                    # 发布包（需配签名）
+```
+
+依赖已配阿里云 Maven 镜像；gradle wrapper 用腾讯镜像分发。
+`local.properties`（sdk.dir）不入库。
+
 前端在 `knot-desktop/ui/`，纯静态文件（HTML/CSS/JS），改完刷新即生效（`cargo run` 下需重启应用，dev 模式热加载待接入）。
 
 ## 单机多实例调试
