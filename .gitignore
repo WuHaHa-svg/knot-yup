@@ -1,0 +1,16 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Node
+node_modules/
+
+# Tauri
+knot-desktop/src-tauri/gen/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/

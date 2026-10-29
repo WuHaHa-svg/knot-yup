@@ -1,0 +1,24 @@
+[package]
+name = "knot-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "KnotYup desktop client (Windows / macOS)"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+knot-core = { path = "../../knot-core" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rand = "0.8"
+whoami = "1"
+local-ip-address = "0.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lib]
+name = "knot_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
