@@ -5,10 +5,12 @@ import android.content.Context
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -62,7 +64,8 @@ class MainActivity : ComponentActivity() {
 
             KnotYupTheme(themeId) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    App(t, onTheme = { themeId = it; AppState.saveTheme(context, it) },
+                    App(t, lang = lang,
+                        onTheme = { themeId = it; AppState.saveTheme(context, it) },
                         onLang = { lang = it; AppState.saveLang(context, it) }, sharedText)
                 }
             }
@@ -73,6 +76,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun App(
     t: (String) -> String,
+    lang: String,
     onTheme: (String) -> Unit,
     onLang: (String) -> Unit,
     sharedText: String?,
@@ -150,7 +154,7 @@ private fun App(
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-            Header(onTheme, onLang)
+            Header(onTheme, onLang, lang)
             if (session.joined) {
                 GroupBody(t, session.members, history, sendText,
                     onSendText = { sendText = it },
@@ -217,7 +221,7 @@ private fun App(
 // —— UI 组件 ————————————————————————————
 
 @Composable
-private fun Header(onTheme: (String) -> Unit, onLang: (String) -> Unit) {
+private fun Header(onTheme: (String) -> Unit, onLang: (String) -> Unit, lang: String) {
     var themeOpen by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(vertical = 14.dp),
@@ -240,10 +244,15 @@ private fun Header(onTheme: (String) -> Unit, onLang: (String) -> Unit) {
             Spacer(Modifier.width(6.dp))
         }
         TextButton(onClick = { themeOpen = !themeOpen }, contentPadding = PaddingValues(6.dp)) {
-            Text("🎨", fontSize = 14.sp)
+            Image(
+                painter = painterResource(R.drawable.ic_palette),
+                contentDescription = "theme",
+                modifier = Modifier.size(18.dp),
+            )
         }
         TextButton(onClick = { onLang(Strings.nextLang()) }, contentPadding = PaddingValues(6.dp)) {
-            Text(Strings.langLabels[Strings.currentLang] ?: "简", fontSize = 13.sp)
+            // 标签来自 Compose 状态 lang，切换后自动重组刷新
+            Text(Strings.langLabels[lang] ?: "简", fontSize = 13.sp)
         }
     }
 }
@@ -385,7 +394,13 @@ private fun GroupBody(
                             }
                             if (i == 0) {
                                 Spacer(Modifier.width(6.dp))
-                                Text("👑 ${t("owner")}", fontSize = 10.sp, color = Color(0xFFB45309))
+                                Image(
+                                    painter = painterResource(R.drawable.ic_crown),
+                                    contentDescription = "owner",
+                                    modifier = Modifier.size(13.dp),
+                                )
+                                Spacer(Modifier.width(2.dp))
+                                Text(t("owner"), fontSize = 10.sp, color = Color(0xFFB45309))
                             }
                         }
                         Text(m.platform, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
