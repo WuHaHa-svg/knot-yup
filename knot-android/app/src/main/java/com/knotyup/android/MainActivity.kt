@@ -45,6 +45,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 
@@ -114,6 +115,14 @@ private fun App(
     var confirmLeave by remember { mutableStateOf(false) }
     var pendingKick by remember { mutableStateOf<String?>(null) }
     var pinDialogFor by remember { mutableStateOf<GroupAd?>(null) }
+    var showSplash by remember { mutableStateOf(true) }
+
+    // 启动页 → 主界面（Crossfade 优雅过渡）
+    androidx.compose.animation.Crossfade(targetState = showSplash, animationSpec = androidx.compose.animation.core.tween(500)) { splash ->
+        if (splash) {
+            SplashScreen { showSplash = false }
+            return@Crossfade
+        }
 
     // 返回键拦截：群页面 back 不退群，仅退到系统主界面（等同 Home 键），不触发任何 ws 操作
     val activity = androidx.compose.ui.platform.LocalContext.current as? ComponentActivity
@@ -193,12 +202,15 @@ private fun App(
         }
     }
 
-    // 发现监听：仅在首页（未入群）且页面处于 RESUMED 时扫描，离开即停
+    // 发现监听：过滤本机 IP 的群（自己广播的群不显示）；仅在首页且 RESUMED 时扫描
+    val myIp = Discovery.localIpAddress()
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     LaunchedEffect(session.joined, lifecycleOwner) {
         if (!session.joined) {
             lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
-                Discovery.listen(context).collect { discovered = it }
+                Discovery.listen(context).collect { list ->
+                    discovered = if (myIp == null) list else list.filter { !it.addr.startsWith("$myIp:") }
+                }
             }
         }
     }
@@ -366,7 +378,134 @@ private fun App(
             )
         }
     }
+    } // Crossfade
 }
+
+/**
+ * 启动页（纯白底，三幕动画）：
+ * 1) 黑色绳结逐笔「打出」
+ * 2) 打结完成后 KnotYup 文字浮现（黑色）
+ * 3) 绳结与文字一起染上品牌渐变色，随后关闭启动动画
+ */
+@Composable
+private fun SplashScreen(onFinish: () -> Unit) {
+    val draw = remember { androidx.compose.animation.core.Animatable(0f) }        // 打结进度
+    val brandAlpha = remember { androidx.compose.animation.core.Animatable(0f) }   // 文字浮现
+    val brandOffset = remember { androidx.compose.animation.core.Animatable(16f) } // 文字上浮
+    val colorPhase = remember { androidx.compose.animation.core.Animatable(0f) }   // 渐变上色
+
+    LaunchedEffect(Unit) {
+        // 第一幕：打结
+        draw.animateTo(
+            1f,
+            androidx.compose.animation.core.tween(1100, easing = androidx.compose.animation.core.CubicBezierEasing(.4f, 0f, .2f, 1f)),
+        )
+        // 第二幕：文字浮现
+        kotlinx.coroutines.coroutineScope {
+            launch { brandAlpha.animateTo(1f, androidx.compose.animation.core.tween(400)) }
+            launch { brandOffset.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.85f, stiffness = 220f)) }
+        }
+        kotlinx.coroutines.delay(250)
+        // 第三幕：渐变上色
+        colorPhase.animateTo(1f, androidx.compose.animation.core.tween(650))
+        kotlinx.coroutines.delay(400)
+        onFinish()
+    }
+
+    val accent = MaterialTheme.colorScheme.primary
+    val accent2 = androidx.compose.ui.graphics.lerp(accent, Color(0xFFA855F7), 0.45f)
+    val gradient = androidx.compose.ui.graphics.Brush.linearGradient(listOf(accent, accent2))
+    Box(Modifier.fillMaxSize().background(Color.White), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            // 绳结：4 条笔画独立 Path，按总长预算顺序截取；黑色描线 + 渐变叠层淡入
+            val strokes = remember {
+                listOf(
+                    androidx.compose.ui.graphics.Path().apply {
+                        moveTo(9f, 15f); lineTo(9f, 3f); cubicTo(9f, 3f, 4f, 5f, 4f, 10f)
+                    },
+                    androidx.compose.ui.graphics.Path().apply {
+                        moveTo(15f, 9f); lineTo(15f, 21f); cubicTo(15f, 21f, 20f, 19f, 20f, 14f)
+                    },
+                    androidx.compose.ui.graphics.Path().apply {
+                        moveTo(6f, 18f); cubicTo(6f, 18f, 9f, 20f, 12f, 18f)
+                    },
+                    androidx.compose.ui.graphics.Path().apply {
+                        moveTo(18f, 6f); cubicTo(18f, 6f, 15f, 4f, 12f, 6f)
+                    },
+                )
+            }
+            val measure = remember { androidx.compose.ui.graphics.PathMeasure() }
+            val segment = remember { androidx.compose.ui.graphics.Path() }
+            androidx.compose.foundation.Canvas(Modifier.size(150.dp)) {
+                segment.reset()
+                val lens = strokes.map { p ->
+                    measure.setPath(p, false)
+                    measure.length
+                }
+                val total = lens.sum()
+                var budget = total * draw.value
+                strokes.forEachIndexed { i, p ->
+                    if (budget <= 0f) return@forEachIndexed
+                    val take = kotlin.math.min(budget, lens[i])
+                    if (take > 0f) {
+                        measure.setPath(p, false)
+                        measure.getSegment(0f, take, segment, true)
+                        budget -= take
+                    }
+                }
+
+                val scale = size.minDimension / 24f * 0.9f
+                val dx = (size.width - 24f * scale) / 2f
+                val dy = (size.height - 24f * scale) / 2f
+                withTransform({
+                    translate(dx, dy)
+                    scale(scale, scale, androidx.compose.ui.geometry.Offset.Zero)
+                }) {
+                    val style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = 1.7f, cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                    )
+                    // 黑色基底
+                    drawPath(segment, color = Color.Black, style = style)
+                    // 渐变叠层（第三幕淡入）
+                    if (colorPhase.value > 0f) {
+                        drawPath(
+                            segment, brush = gradient, alpha = colorPhase.value, style = style,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(22.dp))
+            // 文字：黑色基底 + 渐变叠层
+            Box(
+                Modifier.graphicsLayer {
+                    alpha = brandAlpha.value
+                    translationY = brandOffset.value
+                },
+            ) {
+                Text(
+                    "KnotYup",
+                    color = Color.Black,
+                    fontSize = 30.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp,
+                )
+                if (colorPhase.value > 0f) {
+                    Text(
+                        "KnotYup",
+                        style = androidx.compose.ui.text.TextStyle(
+                            fontSize = 30.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp,
+                            brush = gradient,
+                        ),
+                        modifier = Modifier.graphicsLayer { alpha = colorPhase.value },
+                    )
+                }
+            }
+        }
+    }
+}
+
 
 /** 桌面端同款确认弹窗：半透明遮罩 + 白卡 + 主操作/危险操作按钮。可选成员勾选（群主转让）。 */
 @Composable

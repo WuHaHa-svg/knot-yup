@@ -272,7 +272,11 @@ function nameOf(deviceId) {
 function renderDiscovered() {
   const box = $('discoveredList');
   box.innerHTML = '';
-  const groups = state.discovered.filter((g) => !state.session || g.addr !== state.session.addr);
+  const groups = state.discovered.filter((g) => {
+    // 过滤本机 IP 的群（同机多实例测试时不显示自己）
+    if (state.localIp && g.addr.startsWith(state.localIp + ':')) return false;
+    return !state.session || g.addr !== state.session.addr;
+  });
   if (groups.length === 0) {
     box.innerHTML = `
       <div class="discovered-empty">
@@ -408,6 +412,7 @@ document.addEventListener('click', (e) => {
 async function refresh() {
   const s = await invoke('get_state', {});
   state.device = s.device;
+  state.localIp = s.local_ip;
   state.session = s.session;
   clipItems = s.history || [];
   renderSession();

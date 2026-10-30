@@ -327,6 +327,7 @@ async fn get_state(state: State<'_, SharedState>) -> Result<serde_json::Value, S
     let s = state.session.lock().await;
     Ok(serde_json::json!({
         "device": dev,
+        "local_ip": local_ip(),
         "session": s.as_ref().map(|s| serde_json::json!({
             "role": s.role,
             "addr": s.addr,

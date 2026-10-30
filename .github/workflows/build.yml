@@ -1,0 +1,61 @@
+name: Build Desktop Releases
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: knot-desktop/src-tauri
+      - name: Build Windows installers (NSIS + MSI)
+        working-directory: knot-desktop/src-tauri
+        run: cargo install tauri-cli --version "^2" --locked ; cargo tauri build --target x86_64-pc-windows-msvc
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            knot-desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            knot-desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: knot-desktop/src-tauri
+      - name: Build macOS dmg (aarch64)
+        working-directory: knot-desktop/src-tauri
+        run: |
+          rustup target add aarch64-apple-darwin
+          cargo install tauri-cli --version "^2" --locked
+          cargo tauri build --target aarch64-apple-darwin
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: knot-desktop/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+
+  release:
+    needs: [build-windows, build-macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { merge-multiple: true, path: dist }
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

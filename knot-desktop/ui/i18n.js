@@ -4,7 +4,7 @@
 const MESSAGES = {
   'zh-Hans': {
     tagline_1: '把设备', tagline_2: '打成一个结',
-    tagline_sub: '在同一局域网内共享剪贴板，让手机成为电脑的触控板。',
+    tagline_sub: '局域网内·共享剪切板·共享文件·安卓触控板',
     create_group: '创建群', create_desc: '成为群主，生成 PIN 码供其他设备加入。',
     join_group: '加入群', join_desc: '输入群主的地址与 PIN 码。',
     btn_create: '创建群', btn_join: '加入',
@@ -35,7 +35,7 @@ const MESSAGES = {
   },
   'zh-Hant': {
     tagline_1: '把裝置', tagline_2: '打成一個結',
-    tagline_sub: '在同一區域網路內共享剪貼板，讓手機成為電腦的觸控板。',
+    tagline_sub: '區域網路內·共享剪貼板·共享檔案·安卓觸控板',
     create_group: '建立群', create_desc: '成為群主，產生 PIN 碼供其他裝置加入。',
     join_group: '加入群', join_desc: '輸入群主的位址與 PIN 碼。',
     btn_create: '建立群', btn_join: '加入',
@@ -66,7 +66,7 @@ const MESSAGES = {
   },
   'en': {
     tagline_1: 'Tie your devices', tagline_2: 'into one knot',
-    tagline_sub: 'Share clipboard across your local network. Use your phone as a trackpad.',
+    tagline_sub: 'Local network · Clipboard · File sharing · Android trackpad',
     create_group: 'Create a Group', create_desc: 'Become the owner and generate a PIN for others to join.',
     join_group: 'Join a Group', join_desc: 'Enter the owner’s address and PIN.',
     btn_create: 'Create Group', btn_join: 'Join',

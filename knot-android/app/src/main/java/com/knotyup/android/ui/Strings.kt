@@ -16,7 +16,7 @@ object Strings {
     private val dict = mapOf(
         "zh-Hans" to mapOf(
             "tagline_1" to "把设备", "tagline_2" to "打成一个结",
-            "tagline_sub" to "在同一局域网内共享剪贴板，让手机成为电脑的触控板。",
+            "tagline_sub" to "局域网内·共享剪切板·共享文件·安卓触控板",
             "join_group" to "加入群",
             "join_desc" to "输入群主的地址与 PIN 码",
             "btn_join" to "加入",
@@ -62,7 +62,7 @@ object Strings {
 ),
         "zh-Hant" to mapOf(
             "tagline_1" to "把裝置", "tagline_2" to "打成一個結",
-            "tagline_sub" to "在同一區域網路內共享剪貼板，讓手機成為電腦的觸控板。",
+            "tagline_sub" to "區域網路內·共享剪貼板·共享檔案·安卓觸控板",
             "join_group" to "加入群",
             "join_desc" to "輸入群主的位址與 PIN 碼",
             "btn_join" to "加入",
@@ -108,7 +108,7 @@ object Strings {
         ),
         "en" to mapOf(
             "tagline_1" to "Tie your devices ", "tagline_2" to "into one knot",
-            "tagline_sub" to "Share clipboard across your local network. Use your phone as a trackpad.",
+            "tagline_sub" to "Local network · Clipboard · File sharing · Android trackpad",
             "join_group" to "Join a Group",
             "join_desc" to "Enter the owner’s address and PIN",
             "btn_join" to "Join",
