@@ -21,6 +21,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -42,7 +43,12 @@ import com.knotyup.android.ui.THEMES
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.coroutineScope
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 
+@OptIn(androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi::class)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,6 +57,10 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val context = LocalContext.current
+            // 窗口宽度分级：Compact 手机竖屏；Medium/Expanded（平板/横屏）首页双栏对齐桌面端
+            val windowSizeClass = androidx.compose.material3.windowsizeclass.calculateWindowSizeClass(this)
+            val wide = windowSizeClass.widthSizeClass !=
+                androidx.compose.material3.windowsizeclass.WindowWidthSizeClass.Compact
             var themeId by remember { mutableStateOf(AppState.loadTheme(context) ?: "indigo") }
             var lang by remember {
                 mutableStateOf(AppState.loadLang(context) ?: run {
@@ -72,7 +82,7 @@ class MainActivity : ComponentActivity() {
                         .isAppearanceLightStatusBars = !dark
                 }
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    App(t, lang = lang,
+                    App(t, lang = lang, wide = wide, themeId = themeId,
                         onTheme = { themeId = it; AppState.saveTheme(context, it) },
                         onLang = { lang = it; AppState.saveLang(context, it) }, sharedText)
                 }
@@ -85,6 +95,8 @@ class MainActivity : ComponentActivity() {
 private fun App(
     t: (String) -> String,
     lang: String,
+    wide: Boolean,
+    themeId: String,
     onTheme: (String) -> Unit,
     onLang: (String) -> Unit,
     sharedText: String?,
@@ -101,6 +113,41 @@ private fun App(
     var sendText by remember { mutableStateOf(sharedText ?: "") }
     var confirmLeave by remember { mutableStateOf(false) }
     var pendingKick by remember { mutableStateOf<String?>(null) }
+    var pinDialogFor by remember { mutableStateOf<GroupAd?>(null) }
+
+    // 返回键拦截：群页面 back 不退群，仅退到系统主界面（等同 Home 键），不触发任何 ws 操作
+    val activity = androidx.compose.ui.platform.LocalContext.current as? ComponentActivity
+    androidx.activity.compose.BackHandler(enabled = session.joined) {
+        activity?.moveTaskToBack(true)
+    }
+
+    // 手动/弹窗共用的入群流程
+    fun startJoin(addrValue: String, pinValue: String) {
+        joining = true
+        scope.launch {
+            // 记录会话（重连/承接群主需要同 PIN），预留端口并随 join 上报地址
+            AppState.onJoining(addrValue, pinValue)
+            AppState.setStandby(java.net.ServerSocket(0))
+            AppState.client.join(addrValue, pinValue, AppState.deviceWithStandbyAddr()).collect { result ->
+                result.fold({ event ->
+                    AppState.emit(event)
+                    when (event) {
+                        is GroupEvent.Members -> joining = false
+                        is GroupEvent.Kicked, GroupEvent.Disconnected -> joining = false
+                        else -> {}
+                    }
+                }, { e ->
+                    AppState.toast(
+                        when (e.message) {
+                            "WRONG_PIN" -> t("wrong_pin")
+                            else -> "${t("join_failed")}\n${e.message ?: ""}"
+                        }
+                    )
+                    joining = false
+                })
+            }
+        }
+    }
     // 剪贴板指纹闸门[0]：最近一次同步的内容指纹（收/发都记录），防止「写入被当成本机复制」回环
     val clipGuard = remember { arrayOf("") }
 
@@ -194,7 +241,7 @@ private fun App(
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-            Header(onTheme, onLang, lang)
+            Header(onTheme, onLang, lang, themeId)
             if (session.joined) {
                 GroupBody(t, session.members, history, sendText,
                     role = session.role,
@@ -224,9 +271,13 @@ private fun App(
                     },
                     onLeave = { confirmLeave = true })
             } else {
-                JoinBody(t, discovered, addr, pin, joining,
+                // key：从群页面返回首页时重新挂载，重播入场动画
+                key(session.joined) {
+                    HomeBody(
+                    t = t, wide = wide, discovered = discovered,
+                    addr = addr, pin = pin, joining = joining,
                     onAddr = { addr = it }, onPin = { pin = it },
-                    onPick = { addr = it.addr },
+                    onPickGroup = { pinDialogFor = it },
                     onCreate = {
                         val port = AppState.reservePort()
                         val pin2 = java.security.SecureRandom().nextInt(900_000) + 100_000
@@ -237,32 +288,11 @@ private fun App(
                         if (addr.isBlank() || pin.isBlank()) {
                             AppState.toast(t("fill_addr_pin"))
                         } else {
-                            joining = true
-                            scope.launch {
-                                // 记录会话（重连/承接群主需要同 PIN），预留端口并随 join 上报地址
-                                AppState.onJoining(addr, pin)
-                                AppState.setStandby(java.net.ServerSocket(0))
-                                AppState.client.join(addr, pin, AppState.deviceWithStandbyAddr()).collect { result ->
-                                    result.fold({ event ->
-                                        AppState.emit(event)
-                                        when (event) {
-                                            is GroupEvent.Members -> joining = false
-                                            is GroupEvent.Kicked, GroupEvent.Disconnected -> joining = false
-                                            else -> {}
-                                        }
-                                    }, { e ->
-                                        AppState.toast(
-                                            when (e.message) {
-                                                "WRONG_PIN" -> t("wrong_pin")
-                                                else -> "${t("join_failed")}\n${e.message ?: ""}"
-                                            }
-                                        )
-                                        joining = false
-                                    })
-                                }
-                            }
+                            startJoin(addr, pin)
                         }
-                    })
+                    },
+                    )
+                }
             }
         }
 
@@ -320,6 +350,19 @@ private fun App(
                     pendingKick = null
                 },
                 onCancel = { pendingKick = null },
+            )
+        }
+
+        // 加入群（PIN）弹窗：点击发现的群直接弹起
+        pinDialogFor?.let { group ->
+            PinDialog(
+                t = t,
+                group = group,
+                onJoin = { pinValue ->
+                    pinDialogFor = null
+                    startJoin(group.addr, pinValue)
+                },
+                onDismiss = { pinDialogFor = null },
             )
         }
     }
@@ -380,13 +423,15 @@ private fun KnotConfirm(
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
                             onClick = onCancel,
-                            modifier = Modifier.weight(1f).height(42.dp),
+                            modifier = Modifier.weight(1f).heightIn(min = 42.dp),
                             shape = RoundedCornerShape(10.dp),
-                        ) { Text(cancelText) }
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        ) { Text(cancelText, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                         Button(
                             onClick = { onOk(selected) },
-                            modifier = Modifier.weight(1f).height(42.dp),
+                            modifier = Modifier.weight(1f).heightIn(min = 42.dp),
                             shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                             colors = if (danger) ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFFFDEEF0),
                                 contentColor = Color(0xFFD94559),
@@ -459,99 +504,361 @@ private fun handleOwnerLost(
 }
 
 @Composable
-private fun Header(onTheme: (String) -> Unit, onLang: (String) -> Unit, lang: String) {
+private fun Header(onTheme: (String) -> Unit, onLang: (String) -> Unit, lang: String, themeId: String) {
     var themeOpen by remember { mutableStateOf(false) }
+    var langOpen by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().padding(vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // 品牌：渐变方块 + 绳结图标（对齐桌面端顶栏）
+        val accent = MaterialTheme.colorScheme.primary
+        val accent2 = androidx.compose.ui.graphics.lerp(accent, Color(0xFFA855F7), 0.45f)
+        Box(
+            Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(androidx.compose.ui.graphics.Brush.linearGradient(listOf(accent, accent2))),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painter = painterResource(R.drawable.ic_knot),
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+            )
+        }
+        Spacer(Modifier.width(10.dp))
         Text("KnotYup", fontWeight = FontWeight.Bold, fontSize = 18.sp)
         Spacer(Modifier.weight(1f))
-        if (themeOpen) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                THEMES.forEach { (id, color) ->
-                    Box(
-                        Modifier
-                            .padding(3.dp)
-                            .size(20.dp)
-                            .background(color, androidx.compose.foundation.shape.CircleShape)
-                            .clickable { onTheme(id); themeOpen = false },
+
+        // 主题色：点击弹出锚定色板（与桌面端 pop 一致）
+        Box {
+            HeaderIconBtn(onClick = { themeOpen = true }) {
+                Image(painterResource(R.drawable.ic_palette), "theme", Modifier.size(18.dp))
+            }
+            DropdownMenu(
+                expanded = themeOpen,
+                onDismissRequest = { themeOpen = false },
+                shape = RoundedCornerShape(14.dp),
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = 0.dp,
+                shadowElevation = 12.dp,
+            ) {
+                // 4×2 色板网格，当前主题带描边圈标识（对齐桌面端 .swatch.active）
+                Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                    THEMES.chunked(4).forEach { rowThemes ->
+                        Row {
+                            rowThemes.forEach { (id, color) ->
+                                val active = id == themeId
+                                Box(
+                                    Modifier
+                                        .padding(5.dp)
+                                        .size(if (active) 30.dp else 24.dp)
+                                        .then(
+                                            if (active) Modifier
+                                                .clip(androidx.compose.foundation.shape.CircleShape)
+                                                .border(
+                                                    2.dp,
+                                                    MaterialTheme.colorScheme.primary,
+                                                    androidx.compose.foundation.shape.CircleShape,
+                                                )
+                                                .padding(3.dp)
+                                            else Modifier
+                                        ),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Box(
+                                        Modifier
+                                            .fillMaxSize()
+                                            .background(color, androidx.compose.foundation.shape.CircleShape)
+                                            .clickable { onTheme(id); themeOpen = false },
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(Modifier.width(8.dp))
+
+        // 语言：点击弹出菜单，当前语言高亮
+        Box {
+            HeaderIconBtn(onClick = { langOpen = true }) {
+                Text(Strings.langLabels[lang] ?: "简", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+            DropdownMenu(
+                expanded = langOpen,
+                onDismissRequest = { langOpen = false },
+                shape = RoundedCornerShape(14.dp),
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = 0.dp,
+                shadowElevation = 12.dp,
+            ) {
+                Strings.langs.forEach { l ->
+                    val active = l == lang
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                Strings.langLabels[l] ?: l,
+                                fontSize = 13.sp,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
+                                color = if (active) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        },
+                        trailingIcon = if (active) {
+                            { Text("✓", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                        } else null,
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 8.dp),
+                        onClick = { onLang(l); langOpen = false },
                     )
                 }
             }
-            Spacer(Modifier.width(6.dp))
-        }
-        TextButton(onClick = { themeOpen = !themeOpen }, contentPadding = PaddingValues(6.dp)) {
-            Image(
-                painter = painterResource(R.drawable.ic_palette),
-                contentDescription = "theme",
-                modifier = Modifier.size(18.dp),
-            )
-        }
-        TextButton(onClick = { onLang(Strings.nextLang()) }, contentPadding = PaddingValues(6.dp)) {
-            // 标签来自 Compose 状态 lang，切换后自动重组刷新
-            Text(Strings.langLabels[lang] ?: "简", fontSize = 13.sp)
         }
     }
 }
 
+/** 顶栏小圆钮（30dp 圆角、描边、居中内容），对应桌面端 .icon-btn。 */
 @Composable
-private fun JoinBody(
+private fun HeaderIconBtn(onClick: () -> Unit, content: @Composable () -> Unit) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(9.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        modifier = Modifier.size(30.dp),
+    ) {
+        Box(contentAlignment = Alignment.Center) { content() }
+    }
+}
+
+/** 挂载动画：上浮（弹性 spring）+ 淡入，交错紧密、连贯柔和；key() 重新进入组合即重播。 */
+@Composable
+fun Modifier.riseIn(delayMillis: Int = 0): Modifier {
+    val alpha = remember { androidx.compose.animation.core.Animatable(0f) }
+    val offset = remember { androidx.compose.animation.core.Animatable(30f) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        kotlinx.coroutines.coroutineScope {
+            launch {
+                kotlinx.coroutines.delay(delayMillis.toLong())
+                // 缓入淡入，与位移时长相近，避免"先亮后动"的割裂感
+                alpha.animateTo(
+                    1f,
+                    androidx.compose.animation.core.tween(520, easing = androidx.compose.animation.core.CubicBezierEasing(.35f, 0f, .25f, 1f)),
+                )
+            }
+            launch {
+                kotlinx.coroutines.delay(delayMillis.toLong())
+                // 无过冲弹性：起步快、收尾柔，链条感强
+                offset.animateTo(
+                    0f,
+                    androidx.compose.animation.core.spring(
+                        dampingRatio = 0.9f,
+                        stiffness = 130f,
+                        visibilityThreshold = 0.1f,
+                    ),
+                )
+            }
+        }
+    }
+    return this.then(
+        Modifier.graphicsLayer {
+            translationY = offset.value
+            this.alpha = alpha.value
+        }
+    )
+}
+
+/** 首页：Hero + 双卡片（对齐桌面端布局逻辑；窄屏上下、宽屏左右）。 */
+@Composable
+private fun HomeBody(
     t: (String) -> String,
+    wide: Boolean,
     discovered: List<GroupAd>,
     addr: String, pin: String, joining: Boolean,
     onAddr: (String) -> Unit, onPin: (String) -> Unit,
-    onPick: (GroupAd) -> Unit, onJoin: () -> Unit, onCreate: () -> Unit,
+    onPickGroup: (GroupAd) -> Unit,
+    onJoin: () -> Unit, onCreate: () -> Unit,
 ) {
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        // 创建群卡片
-        Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp),
+        // Hero：主标题（第二段渐变）+ 副标题
+        val accent = MaterialTheme.colorScheme.primary
+        val accent2 = androidx.compose.ui.graphics.lerp(accent, Color(0xFFA855F7), 0.45f)
+        Text(
+            buildAnnotatedString {
+                withStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold, fontSize = 26.sp)) { append(t("tagline_1")) }
+                withStyle(
+                    androidx.compose.ui.text.SpanStyle(
+                        fontWeight = FontWeight.Bold, fontSize = 26.sp,
+                        brush = androidx.compose.ui.graphics.Brush.linearGradient(listOf(accent, accent2)),
+                    )
+                ) { append(t("tagline_2")) }
+            },
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.riseIn(0),
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            t("tagline_sub"), fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.riseIn(70),
+        )
+        Spacer(Modifier.height(24.dp))
+
+        if (wide) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 24.dp).riseIn(140),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                JoinCard(t, addr, pin, joining, Modifier.weight(1f), onAddr, onPin, onJoin, onCreate)
+                DiscoveredCard(t, discovered, Modifier.weight(1f), onPickGroup)
+            }
+        } else {
+            JoinCard(t, addr, pin, joining, Modifier.fillMaxWidth().padding(horizontal = 24.dp).riseIn(140), onAddr, onPin, onJoin, onCreate)
+            Spacer(Modifier.height(16.dp))
+            DiscoveredCard(t, discovered, Modifier.fillMaxWidth().padding(horizontal = 24.dp).riseIn(210), onPickGroup)
+        }
+    }
+}
+
+/** 卡片头：彩色图标 + 标题 + 副文字（对齐桌面端卡片结构）。 */
+@Composable
+private fun CardHead(iconRes: Int, iconBg: Color, title: String, subtitle: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(iconBg),
+            contentAlignment = Alignment.Center,
         ) {
-            Column(Modifier.padding(20.dp)) {
-                Text(t("create_group"), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                Text(t("create_desc"), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(14.dp))
-                Button(
+            Image(
+                painter = painterResource(iconRes),
+                contentDescription = null,
+                modifier = Modifier.size(22.dp),
+            )
+        }
+    }
+    Spacer(Modifier.height(10.dp))
+    Text(title, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+    Text(subtitle, fontSize = 12.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Spacer(Modifier.height(12.dp))
+}
+
+/** 左卡：加入 / 创建。 */
+@Composable
+private fun JoinCard(
+    t: (String) -> String,
+    addr: String, pin: String, joining: Boolean,
+    modifier: Modifier,
+    onAddr: (String) -> Unit, onPin: (String) -> Unit,
+    onJoin: () -> Unit, onCreate: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 2.dp,
+        modifier = modifier,
+    ) {
+        Column(Modifier.padding(20.dp)) {
+            CardHead(
+                iconRes = R.drawable.ic_link,
+                iconBg = Color(0xFFF0FDF4),
+                title = t("join_group"),
+                subtitle = t("join_desc"),
+            )
+            OutlinedTextField(
+                value = addr, onValueChange = onAddr, modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text(t("addr_hint"), fontSize = 13.sp) }, singleLine = true,
+                shape = RoundedCornerShape(10.dp),
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = pin, onValueChange = onPin, modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text(t("pin_hint"), fontSize = 13.sp) }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                shape = RoundedCornerShape(10.dp),
+            )
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedButton(
                     onClick = onCreate,
-                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp),
                     shape = RoundedCornerShape(10.dp),
-                ) { Text(t("btn_create")) }
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                ) {
+                    Image(
+                        painterResource(R.drawable.ic_plus), null, Modifier.size(14.dp),
+                        colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(MaterialTheme.colorScheme.primary),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    // 通用处理：单行不换行（固定高度 + 换行会被裁切），宽度不足时省略号
+                    Text(t("btn_create"), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                }
+                Button(
+                    onClick = onJoin, enabled = !joining,
+                    modifier = Modifier.weight(1f).heightIn(min = 44.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                ) {
+                    Text(t("btn_join"), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
-        Text(t("tagline"), fontSize = 26.sp, fontWeight = FontWeight.Bold)
-        Text(t("tagline_sub"), fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.height(28.dp))
-        Card(
-            shape = RoundedCornerShape(16.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Column(Modifier.padding(20.dp)) {
-                Text(t("join_group"), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                Text(t("join_desc"), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(14.dp))
+    }
+}
 
-                Text(t("discovered"), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (discovered.isEmpty()) {
-                    Text(
-                        t("no_discovered"), fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        modifier = Modifier.padding(vertical = 6.dp),
-                    )
-                } else {
+/** 右卡：局域网发现的群（上下结构列表项，点击弹 PIN）。 */
+@Composable
+private fun DiscoveredCard(
+    t: (String) -> String,
+    discovered: List<GroupAd>,
+    modifier: Modifier,
+    onPickGroup: (GroupAd) -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 2.dp,
+        modifier = modifier,
+    ) {
+        Column(Modifier.padding(20.dp)) {
+            CardHead(
+                iconRes = R.drawable.ic_devices,
+                iconBg = Color(0xFFEFF6FF),
+                title = t("discovered"),
+                subtitle = t("discovering"),
+            )
+            if (discovered.isEmpty()) {
+                Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Image(
+                            painterResource(R.drawable.ic_devices), null,
+                            Modifier.size(28.dp).then(Modifier),
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            t("no_discovered"), fontSize = 12.5.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            } else {
+                Column(
+                    Modifier.fillMaxWidth().heightIn(max = 220.dp).verticalScroll(rememberScrollState()),
+                ) {
                     discovered.forEach { g ->
                         Row(
                             Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp)
                                 .clip(RoundedCornerShape(10.dp))
-                                .clickable { onPick(g) }
+                                .clickable { onPickGroup(g) }
                                 .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
@@ -562,39 +869,79 @@ private fun JoinBody(
                                     androidx.compose.foundation.shape.CircleShape,
                                 )
                             )
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                g.name, fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                                maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            )
-                            Spacer(Modifier.weight(1f))
-                            Text(g.addr, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Spacer(Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    g.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    g.addr, fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                )
+                            }
                         }
                     }
                 }
-                Spacer(Modifier.height(10.dp))
-
-                OutlinedTextField(
-                    value = addr, onValueChange = onAddr, modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text(t("addr_hint"), fontSize = 13.sp) }, singleLine = true,
-                    shape = RoundedCornerShape(10.dp),
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = pin, onValueChange = onPin, modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text(t("pin_hint"), fontSize = 13.sp) }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    shape = RoundedCornerShape(10.dp),
-                )
-                Spacer(Modifier.height(14.dp))
-                Button(
-                    onClick = onJoin, enabled = !joining,
-                    modifier = Modifier.fillMaxWidth().height(44.dp),
-                    shape = RoundedCornerShape(10.dp),
-                ) { Text(t("btn_join")) }
             }
         }
-        Spacer(Modifier.height(20.dp))
+    }
+}
+
+/** 加入群（PIN）弹窗，风格与桌面端一致。 */
+@Composable
+private fun PinDialog(
+    t: (String) -> String,
+    group: GroupAd,
+    onJoin: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var pinValue by remember { mutableStateOf("") }
+    Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().background(Color(0x52101216)).clickable(enabled = false) {})
+        Box(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 24.dp,
+            ) {
+                Column(Modifier.padding(24.dp)) {
+                    Text(t("join_group"), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "${group.name} · ${group.addr}",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = pinValue, onValueChange = { pinValue = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        placeholder = { Text(t("pin_hint"), fontSize = 13.sp) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        shape = RoundedCornerShape(10.dp),
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.weight(1f).heightIn(min = 42.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        ) { Text(t("confirm_cancel"), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
+                        Button(
+                            onClick = { if (pinValue.isNotBlank()) onJoin(pinValue.trim()) },
+                            modifier = Modifier.weight(1f).heightIn(min = 42.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        ) { Text(t("btn_join"), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
+                    }
+                }
+            }
+        }
     }
 }
 

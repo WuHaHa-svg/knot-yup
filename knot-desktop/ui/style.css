@@ -105,11 +105,16 @@ body {
 
 .cards { display: flex; gap: 20px; align-items: stretch; }
 
-/* 加入/创建并排按钮 */
+/* 加入/创建并排按钮（创建按钮与安卓端一致：主题色文字/图标） */
 .btn-row { display: flex; gap: 10px; }
 .btn-row .btn { flex: 1; }
 .btn-row .btn:not(.primary) {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  color: var(--accent);
+}
+.btn-row .btn:not(.primary):hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
 }
 
 /* 刷新扫描动画（副标题省略号呼吸） */
