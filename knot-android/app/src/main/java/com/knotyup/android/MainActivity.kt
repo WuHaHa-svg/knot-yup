@@ -87,6 +87,8 @@ private fun App(
     var pin by remember { mutableStateOf("") }
     var joining by remember { mutableStateOf(false) }
     var sendText by remember { mutableStateOf(sharedText ?: "") }
+    // 剪贴板指纹闸门[0]：最近一次同步的内容指纹（收/发都记录），防止「写入被当成本机复制」回环
+    val clipGuard = remember { arrayOf("") }
 
     // 事件处理（含写本机剪贴板，需要 context）
     LaunchedEffect(Unit) {
@@ -94,6 +96,7 @@ private fun App(
             when (event) {
                 is GroupEvent.Members -> AppState.applyEvent(event)
                 is GroupEvent.Clipboard -> {
+                    clipGuard[0] = event.payload.hash
                     AppState.applyEvent(event)
                     ClipboardCapability.setText(context, event.payload.text)
                 }
@@ -119,12 +122,12 @@ private fun App(
     LaunchedEffect(session.joined) {
         if (session.joined) {
             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            var lastHash = ClipboardCapability.getText(context)?.let { textHash(it) } ?: ""
             val listener = ClipboardManager.OnPrimaryClipChangedListener {
                 val text = ClipboardCapability.getText(context) ?: return@OnPrimaryClipChangedListener
                 val hash = textHash(text)
-                if (text.isNotEmpty() && hash != lastHash) {
-                    lastHash = hash
+                // 跳过刚写入的远端同步内容（指纹相同）
+                if (text.isNotEmpty() && hash != clipGuard[0]) {
+                    clipGuard[0] = hash
                     if (AppState.client.sendClipboard(text)) AppState.addLocalHistory(text)
                 }
             }
@@ -182,7 +185,10 @@ private fun App(
                                         }
                                     }, { e ->
                                         AppState.toast(
-                                            if (e.message == "WRONG_PIN") t("wrong_pin") else t("join_failed")
+                                            when (e.message) {
+                                                "WRONG_PIN" -> t("wrong_pin")
+                                                else -> "${t("join_failed")}\n${e.message ?: ""}"
+                                            }
                                         )
                                         joining = false
                                     })

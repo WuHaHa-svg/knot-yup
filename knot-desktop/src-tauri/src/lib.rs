@@ -49,6 +49,8 @@ struct AppState {
     core_tx: Mutex<Option<broadcast::Sender<CoreEvent>>>,
     history: Mutex<Vec<HistoryItem>>,
     discovered: Mutex<Vec<GroupAd>>,
+    /// 最近一次同步的剪贴板指纹（防回环：忽略同指纹的远端回声）
+    last_clip_hash: Mutex<String>,
 }
 
 fn now_ms() -> u64 {
@@ -126,6 +128,13 @@ async fn forward_core_events(
                 let _ = app.emit("knot://members", &members);
             }
             Ok(CoreEvent::Clipboard { from, payload }) => {
+                // 防回环：成员把同步内容当作本机复制再发回来时，指纹相同，直接忽略
+                let mut guard = state.last_clip_hash.lock().await;
+                if *guard == payload.hash {
+                    continue;
+                }
+                *guard = payload.hash.clone();
+                drop(guard);
                 if let Some(tx) = state.clip_tx.lock().await.as_ref() {
                     let _ = tx.send(ClipCmd::Set(payload.clone())).await;
                 }
@@ -194,12 +203,12 @@ async fn create_group(
     }
     let pin = pin.unwrap_or_else(gen_pin);
     let core_tx = state.core_tx.lock().await.clone().ok_or("core 未初始化")?;
-    let (server, port) = GroupServer::start(port.unwrap_or(0), pin.clone(), core_tx)
+    let device = state.device.lock().await.clone().unwrap();
+    let (server, port) = GroupServer::start(port.unwrap_or(0), pin.clone(), device.clone(), core_tx)
         .await
         .map_err(|e| format!("启动服务失败: {e}"))?;
 
     let addr = format!("{}:{}", local_ip(), port);
-    let device = state.device.lock().await.clone().unwrap();
     let _ = app.emit("knot://members", vec![device.clone()]);
 
     // 组主在局域网内广播本组（供其他设备发现；PIN 不随广播发布）
@@ -361,6 +370,8 @@ pub fn run() {
                         .as_ref()
                         .map(|d| d.id.clone())
                         .unwrap_or_default();
+                    // 记录本机指纹：成员回声同指纹时会被忽略
+                    *shared_clip.last_clip_hash.lock().await = payload.hash.clone();
                     {
                         let s = shared_clip.session.lock().await;
                         if let Some(session) = &*s {

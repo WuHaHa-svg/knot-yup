@@ -30,6 +30,8 @@ type MemberMap = Arc<RwLock<HashMap<String, (DeviceInfo, Tx)>>>;
 
 /// 组主（WebSocket 服务端）。
 pub struct GroupServer {
+    /// 群主自身设备信息（始终位于成员表首位）
+    owner: DeviceInfo,
     members: MemberMap,
     pin: Arc<String>,
     cipher: Arc<Cipher>,
@@ -38,10 +40,11 @@ pub struct GroupServer {
 }
 
 impl GroupServer {
-    /// 启动组主。返回 (句柄, 实际监听端口)；端口传 0 时由系统分配。
+    /// 启动组主。owner 为群主设备信息，计入成员表首位。返回 (句柄, 实际监听端口)。
     pub async fn start(
         port: u16,
         pin: String,
+        owner: DeviceInfo,
         event_tx: broadcast::Sender<CoreEvent>,
     ) -> std::io::Result<(Arc<Self>, u16)> {
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;
@@ -51,6 +54,7 @@ impl GroupServer {
         let (shutdown, mut shutdown_rx) = mpsc::channel::<WsMessage>(1);
 
         let server = Arc::new(Self {
+            owner,
             members: members.clone(),
             pin: Arc::new(pin.clone()),
             cipher: Arc::new(Cipher::from_pin(&pin)),
@@ -174,7 +178,9 @@ impl GroupServer {
     }
 
     async fn member_infos(&self) -> Vec<DeviceInfo> {
-        self.members.read().await.values().map(|(info, _)| info.clone()).collect()
+        let mut list = vec![self.owner.clone()];
+        list.extend(self.members.read().await.values().map(|(info, _)| info.clone()));
+        list
     }
 
     pub async fn members(&self) -> Vec<DeviceInfo> {
@@ -208,8 +214,11 @@ impl GroupServer {
         }
     }
 
-    /// 剔除成员。
+    /// 剔除成员（群主自身不可被移出）。
     pub async fn kick(&self, device_id: &str) {
+        if device_id == self.owner.id {
+            return;
+        }
         {
             let mut map = self.members.write().await;
             if let Some((_, tx)) = map.remove(device_id) {
