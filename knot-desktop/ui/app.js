@@ -506,6 +506,17 @@ async function main() {
   initThemePicker();
   initLangMenu();
 
+  // 开屏层淡出时才挂载主界面（display:none 期间 CSS 挂载动画不会提前播放）
+  setTimeout(() => {
+    const root = document.getElementById('appRoot');
+    if (root) root.style.display = ''; // 恢复 .app 的 flex，挂载动画此刻开始
+    const boot = document.getElementById('boot-splash');
+    if (boot) {
+      boot.classList.add('out');
+      setTimeout(() => boot.remove(), 500);
+    }
+  }, 1400);
+
   await listen('knot://members', (e) => {
     if (state.session) {
       state.session.members = e.payload;
