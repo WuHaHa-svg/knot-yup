@@ -84,9 +84,17 @@ body {
 /* ── 首页 ─────────────────────────── */
 .home {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 44px; padding: 0 40px 48px;
+  gap: 18px; padding: 0 40px 40px;
 }
-.hero { text-align: center; animation: viewIn .6s var(--ease); }
+/* 挂载编排：标题 → 副标题 → 卡片，同一曲线交错浮现（轻微模糊淡入，连贯优雅） */
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(18px) scale(.985); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+.hero { text-align: center; margin-bottom: 14px; }
+.hero > * { animation: riseIn .55s var(--ease) backwards; }
+.hero h1 { animation-delay: 30ms; }
+.hero p { animation-delay: 110ms; }
 .hero h1 { font-size: 34px; font-weight: 700; letter-spacing: -.5px; }
 .hero h1 em {
   font-style: normal;
@@ -95,27 +103,56 @@ body {
 }
 .hero p { margin-top: 10px; color: var(--text-2); font-size: 14.5px; }
 
-.cards { display: flex; gap: 20px; }
+.cards { display: flex; gap: 20px; align-items: stretch; }
+
+/* 加入/创建并排按钮 */
+.btn-row { display: flex; gap: 10px; }
+.btn-row .btn { flex: 1; }
+.btn-row .btn:not(.primary) {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}
+
+/* 刷新扫描动画（副标题省略号呼吸） */
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* 局域网发现卡片：布局与加入卡一致 */
+.discovered-card { padding: 26px; }
+.discovered-card .discovered-list {
+  flex: 1; min-height: 120px; max-height: 220px;
+  display: flex; flex-direction: column; gap: 6px; margin-top: 4px;
+  overflow-x: hidden; overflow-y: auto;
+}
+.discovered-card .discovered-empty {
+  margin: auto; text-align: center; color: var(--text-3);
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.discovered-empty .icon { width: 30px; height: 30px; opacity: .5; }
+.discovered-empty span { font-size: 12.5px; }
+
+.pin-addr {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 13px; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 7px 10px; margin-top: 4px;
+}
+#pinModal .input { margin-top: 12px; }
 .card {
   width: 280px; padding: 26px;
   background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); box-shadow: var(--shadow);
   display: flex; flex-direction: column; gap: 10px;
-  animation: cardIn .6s var(--ease) backwards;
-  animation-delay: calc(var(--i) * 90ms + 120ms);
+  animation: riseIn .55s var(--ease) backwards;
+  animation-delay: calc(180ms + var(--i) * 100ms);
   transition: transform .35s var(--ease), box-shadow .35s var(--ease);
 }
 .card:hover { transform: translateY(-4px); box-shadow: 0 2px 4px rgba(16,24,40,.04), 0 16px 36px rgba(16,24,40,.10); }
-@keyframes cardIn {
-  from { opacity: 0; transform: translateY(18px); }
-  to { opacity: 1; transform: none; }
-}
 .card-icon {
   width: 42px; height: 42px; border-radius: 12px;
   display: grid; place-items: center; margin-bottom: 4px;
 }
 .create .card-icon { background: var(--accent-soft); color: var(--accent); }
 .join .card-icon { background: #f0fdf4; color: #16a34a; }
+.discovered-card .card-icon { background: #eff6ff; color: #3b82f6; }
 .card h2 { font-size: 17px; font-weight: 650; }
 .card p { font-size: 13px; color: var(--text-2); line-height: 1.55; flex: 1; }
 
@@ -321,7 +358,25 @@ body {
 .modal-actions { display: flex; gap: 10px; margin-top: 20px; }
 .modal-actions .btn { flex: 1; }
 
-/* 语言切换 */
+#btnLang { font-size: 12px; font-weight: 600; }
+
+/* 语言菜单（与主题色板一致的弹出交互） */
+.lang-menu {
+  position: absolute; top: 38px; right: 0; z-index: 20;
+  display: flex; flex-direction: column; padding: 6px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; box-shadow: var(--shadow);
+  animation: viewIn .3s var(--ease);
+}
+.lang-menu.hidden { display: none; }
+.lang-item {
+  appearance: none; border: none; background: none; cursor: pointer;
+  font-family: inherit; font-size: 12.5px; font-weight: 500; color: var(--text-2);
+  padding: 7px 14px; border-radius: 8px; text-align: center;
+  transition: all .2s var(--ease);
+}
+.lang-item:hover { background: var(--accent-soft); color: var(--accent); }
+.lang-item.active { color: var(--accent); background: var(--accent-soft); font-weight: 650; }
 .topbar-right { display: flex; align-items: center; gap: 10px; }
 .lang-btn {
   appearance: none; border: 1px solid var(--border); background: var(--surface);
@@ -348,10 +403,11 @@ body {
   animation: memberIn .4s var(--ease) backwards;
   animation-delay: calc(var(--i, 0) * 60ms);
 }
-.discovered-item:hover { border-color: var(--accent); background: var(--accent-soft); transform: translateX(3px); }
+.discovered-item:hover { border-color: var(--accent); background: var(--accent-soft); }
 .discovered-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
-.discovered-name { font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.discovered-addr { margin-left: auto; color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.discovered-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.discovered-name { font-weight: 600; color: var(--text); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.discovered-addr { color: var(--text-3); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .discovered-empty { font-size: 11.5px; color: var(--text-3); padding: 2px 0; }
 
 

@@ -40,6 +40,14 @@
       <path d="M9 4.5V3.8A1.8 1.8 0 0 1 10.8 2h2.4A1.8 1.8 0 0 1 15 3.8v.7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
       <path d="M9 10h6M9 14h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
     </symbol>
+    <symbol id="i-flip" viewBox="0 0 24 24" fill="none">
+      <path d="M4 9a8 8 0 0 1 13.6-3.4L20 8M20 4v4h-4M20 15a8 8 0 0 1-13.6 3.4L4 16M4 20v-4h4"
+        stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24" fill="none">
+      <path d="M20 11a8 8 0 0 0-14-4.5L4 9M4 4v5h5M4 13a8 8 0 0 0 14 4.5l2-2.5M20 20v-5h-5"
+        stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </symbol>
     <symbol id="i-palette" viewBox="0 0 24 24" fill="none">
       <path d="M12 21a9 9 0 1 1 9-9c0 2.2-1.8 3-3.5 3H16a2 2 0 0 0-1.5 3.3c.4.5.5 1.2.1 1.7-.4.6-1.2 1-2.6 1z"
         stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
@@ -65,10 +73,9 @@
           </button>
           <div id="themeSwatches" class="theme-swatches hidden"></div>
         </div>
-        <button id="btnLang" class="lang-btn" title="Language">简</button>
-        <div id="statusChip" class="status-chip offline">
-          <span class="dot"></span>
-          <span id="statusText">未连接</span>
+        <div class="theme-picker">
+          <button id="btnLang" class="icon-btn" title="Language">简</button>
+          <div id="langMenu" class="lang-menu hidden"></div>
         </div>
       </div>
     </header>
@@ -80,27 +87,32 @@
         <p data-i18n="tagline_sub"></p>
       </div>
       <div class="cards">
-        <section class="card create" style="--i:0">
-          <div class="card-icon">
-            <svg class="icon lg"><use href="#i-plus"/></svg>
-          </div>
-          <h2 data-i18n="create_group"></h2>
-          <p data-i18n="create_desc"></p>
-          <button class="btn primary" id="btnCreate" data-i18n="btn_create"></button>
-        </section>
-        <section class="card join" style="--i:1">
+        <!-- 左卡：加入 / 创建 -->
+        <section class="card join" style="--i:0">
           <div class="card-icon">
             <svg class="icon lg"><use href="#i-link"/></svg>
           </div>
           <h2 data-i18n="join_group"></h2>
           <p data-i18n="join_desc"></p>
-          <div class="discovered" id="discoveredBox">
-            <div class="discovered-label" data-i18n="discovered"></div>
-            <div class="discovered-list" id="discoveredList"></div>
-          </div>
           <input id="inputAddr" class="input" data-i18n-placeholder="addr_placeholder" spellcheck="false" />
           <input id="inputPin" class="input" data-i18n-placeholder="pin_placeholder" maxlength="6" inputmode="numeric" spellcheck="false" />
-          <button class="btn" id="btnJoin" data-i18n="btn_join"></button>
+          <div class="btn-row">
+            <button class="btn" id="btnCreate">
+              <svg class="icon sm"><use href="#i-plus"/></svg>
+              <span data-i18n="btn_create"></span>
+            </button>
+            <button class="btn primary" id="btnJoin" data-i18n="btn_join"></button>
+          </div>
+        </section>
+
+        <!-- 右卡：局域网发现的群 -->
+        <section class="card discovered-card" style="--i:1">
+          <div class="card-icon">
+            <svg class="icon lg"><use href="#i-devices"/></svg>
+          </div>
+          <h2 data-i18n="discovered"></h2>
+          <p data-i18n="discovering"></p>
+          <div class="discovered-list" id="discoveredList"></div>
         </section>
       </div>
     </main>
@@ -143,6 +155,19 @@
         <div class="modal-actions">
           <button class="btn" id="confirmCancel"></button>
           <button class="btn danger" id="confirmOk"></button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 加入群（PIN）弹窗 -->
+    <div id="pinModal" class="modal-overlay hidden">
+      <div class="modal">
+        <h3 id="pinTitle"></h3>
+        <p id="pinAddr" class="pin-addr"></p>
+        <input id="pinInput" class="input" maxlength="6" inputmode="numeric" spellcheck="false" />
+        <div class="modal-actions">
+          <button class="btn" id="pinCancel"></button>
+          <button class="btn primary" id="pinJoin"></button>
         </div>
       </div>
     </div>

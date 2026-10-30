@@ -153,17 +153,11 @@ function renderSession() {
   const s = state.session;
   $('viewHome').classList.toggle('hidden', !!s);
   $('viewGroup').classList.toggle('hidden', !s);
-  const chip = $('statusChip');
   if (s) {
-    chip.classList.add('online');
-    $('statusText').textContent = t(s.role === 'owner' ? 'status_owner' : 'status_member');
     // 群主显示「解散群」，成员显示「退出群」
     $('btnLeave').textContent = t(s.role === 'owner' ? 'dissolve' : 'leave');
     renderMembers();
     renderGroupInfo();
-  } else {
-    chip.classList.remove('online');
-    $('statusText').textContent = t('status_offline');
   }
 }
 
@@ -280,23 +274,66 @@ function renderDiscovered() {
   box.innerHTML = '';
   const groups = state.discovered.filter((g) => !state.session || g.addr !== state.session.addr);
   if (groups.length === 0) {
-    box.innerHTML = `<div class="discovered-empty">${state.discoveredScanning ? t('discovering') : t('no_discovered')}</div>`;
+    box.innerHTML = `
+      <div class="discovered-empty">
+        <svg class="icon"><use href="#i-devices"/></svg>
+        <span>${t('no_discovered')}</span>
+      </div>`;
     return;
   }
-  groups.forEach((g) => {
+  groups.forEach((g, i) => {
     const el = document.createElement('button');
     el.className = 'discovered-item';
+    el.style.setProperty('--i', i);
     el.innerHTML = `
       <span class="discovered-dot"></span>
-      <span class="discovered-name">${escapeHtml(g.name)}</span>
-      <span class="discovered-addr">${escapeHtml(g.addr)}</span>
+      <div class="discovered-meta">
+        <span class="discovered-name">${escapeHtml(g.name)}</span>
+        <span class="discovered-addr">${escapeHtml(g.addr)}</span>
+      </div>
     `;
-    el.onclick = () => {
-      $('inputAddr').value = g.addr;
-      $('inputPin').focus();
-    };
+    el.onclick = () => openPinDialog(g);
     box.appendChild(el);
   });
+}
+
+// ── 加入群（PIN）弹窗：点击发现的群直接弹起 ──
+
+function openPinDialog(group) {
+  const modal = $('pinModal');
+  const input = $('pinInput');
+  $('pinTitle').textContent = t('join_group');
+  $('pinAddr').textContent = `${group.name} · ${group.addr}`;
+  input.value = '';
+  modal.classList.remove('hidden');
+  input.focus();
+  const close = () => {
+    modal.classList.add('hidden');
+    $('pinJoin').onclick = $('pinCancel').onclick = modal.onclick = null;
+  };
+  $('pinJoin').textContent = t('btn_join');
+  $('pinCancel').textContent = t('confirm_cancel');
+  const doJoin = async () => {
+    const pin = input.value.trim();
+    if (!pin) return toast(t('fill_addr_pin'));
+    $('pinJoin').disabled = true;
+    try {
+      await invoke('join_group', { addr: group.addr, pin });
+      close();
+      toast(t('joined'));
+      await refresh();
+    } catch (e) {
+      toast(String(e));
+    } finally {
+      $('pinJoin').disabled = false;
+    }
+  };
+  $('pinJoin').onclick = doJoin;
+  $('pinCancel').onclick = close;
+  modal.onclick = (e) => {
+    if (e.target === modal) close();
+  };
+  input.onkeydown = (e) => e.key === 'Enter' && doJoin();
 }
 
 // ── 动作 ─────────────────────────────────
@@ -359,13 +396,14 @@ $('btnLeave').onclick = async () => {
   }
 };
 
-$('btnLang').onclick = () => {
-  nextLang();
-  $('btnLang').textContent = LANG_LABEL[currentLang];
-  renderSession();
-  renderClipboard();
-  renderDiscovered();
+$('btnLang').onclick = (e) => {
+  e.stopPropagation();
+  $('langMenu').classList.toggle('hidden');
 };
+document.addEventListener('click', (e) => {
+  const menu = $('langMenu');
+  if (!menu.classList.contains('hidden') && !menu.contains(e.target)) menu.classList.add('hidden');
+});
 
 async function refresh() {
   const s = await invoke('get_state', {});
@@ -379,10 +417,39 @@ async function refresh() {
 
 // ── 事件订阅 ─────────────────────────────
 
+// ── 语言菜单（与主题色板一致的弹出交互） ──
+
+function applyLang(lang) {
+  currentLang = lang;
+  localStorage.setItem('knotyup-lang', lang);
+  applyI18n();
+  $('btnLang').textContent = LANG_LABEL[lang] || '简';
+  document.querySelectorAll('.lang-item').forEach((b) => b.classList.toggle('active', b.dataset.lang === lang));
+  renderSession();
+  renderClipboard();
+  renderDiscovered();
+}
+
+function initLangMenu() {
+  const menu = $('langMenu');
+  LANGS.forEach((lang) => {
+    const b = document.createElement('button');
+    b.className = 'lang-item';
+    b.dataset.lang = lang;
+    b.textContent = LANG_LABEL[lang] || lang;
+    b.onclick = () => {
+      applyLang(lang);
+      menu.classList.add('hidden');
+    };
+    menu.appendChild(b);
+  });
+  applyLang(LANGS.includes(currentLang) ? currentLang : 'zh-Hans');
+}
+
 async function main() {
-  $('btnLang').textContent = LANG_LABEL[currentLang];
   applyI18n();
   initThemePicker();
+  initLangMenu();
 
   await listen('knot://members', (e) => {
     if (state.session) {
