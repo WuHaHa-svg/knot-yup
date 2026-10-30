@@ -19,18 +19,21 @@ data class GroupAd(val id: String, val name: String, val addr: String)
 /**
  * UDP 广播发现（端口 45691，与桌面端 discovery.rs 一致）。
  *
- * 生命周期约定：Flow 被 collect 时开始扫描，取消时停止。
- * - 持有 MulticastLock（多数安卓设备省电时会丢弃广播包，必须持有才能稳定接收）
- * - 收到广播立即按「最近 5 秒窗口」全量刷新列表
- * - 每 5 秒超时修剪一次：过期的群从列表移除（同样全量刷新）
+ * 模型（killStep 渐进剔除）：
+ * - 群主每 2.5s 广播一次
+ * - 监听端每 1s 一个扫描周期：周期内收到的群命中（killStep 清零/新增），
+ *   未命中的 killStep +1，连续累积到 5（约 5s 无广播）才正式剔除；
+ *   再收到即复活并清零——应对 Wi-Fi 广播丢包导致的误剔除
  *
- * 健壮性：扫描取消后旧 socket 最多滞后 ~1s 才释放，新扫描绑定端口时带重试；
- * 任何异常都不向上抛（避免 UI 崩溃），静默结束并释放资源。
+ * 生命周期约定：Flow 被 collect 时开始扫描，取消时停止。
+ * 持有 MulticastLock（多数安卓设备省电时会丢弃广播包）。
+ * 健壮性：旧 socket 释放滞后时绑定端口带重试；异常不上抛（避免 UI 崩溃）。
  */
 object Discovery {
     const val PORT = 45691
-    private const val WINDOW_MS = 5_000L
-    private const val ANNOUNCE_INTERVAL_MS = 1_500L
+    private const val ANNOUNCE_INTERVAL_MS = 2_500L
+    private const val SCAN_INTERVAL_MS = 1_000L
+    private const val KILL_THRESHOLD = 5
 
     /** 本机局域网 IPv4（无则 null）。 */
     fun localIpAddress(): String? {
@@ -49,17 +52,44 @@ object Discovery {
         return null
     }
 
-    /** 群主：周期广播本群（collect 开始，取消停止）。 */
+    /** 广播目标：全局广播 + 本机各网卡的子网广播地址（应对多网卡/热点下全局广播不可达）。 */
+    private fun broadcastTargets(): List<java.net.InetAddress> {
+        val targets = mutableListOf(java.net.InetAddress.getByName("255.255.255.255"))
+        runCatching {
+            java.net.NetworkInterface.getNetworkInterfaces()?.toList()?.forEach { nif ->
+                if (nif.isUp && !nif.isLoopback) {
+                    nif.interfaceAddresses.forEach { ia ->
+                        ia.broadcast?.let { targets.add(it) }
+                    }
+                }
+            }
+        }
+        return targets.distinct()
+    }
+
+    /** 群主：周期广播本群（建群初期密集突发，快速建立可见性；collect 开始，取消停止）。 */
     fun announce(ad: GroupAd): Flow<Unit> = flow<Unit> {
         val socket = DatagramSocket().apply { broadcast = true }
         val json = org.json.JSONObject()
         json.put("id", ad.id); json.put("name", ad.name); json.put("addr", ad.addr)
         val bytes = "KNOTYUP1|$json".toByteArray(Charsets.UTF_8)
+
+        fun sendAll() {
+            broadcastTargets().forEach { target ->
+                runCatching { socket.send(DatagramPacket(bytes, bytes.size, target, PORT)) }
+            }
+        }
+
         try {
+            // 突发期：前 2s 内每 400ms 一发
+            for (d in listOf(0L, 400L, 800L, 1200L, 1600L)) {
+                if (!currentCoroutineContext().isActive) return@flow
+                if (d > 0) delay(d)
+                sendAll()
+            }
+            // 常规期：每 2.5s 一发
             while (currentCoroutineContext().isActive) {
-                runCatching {
-                    socket.send(DatagramPacket(bytes, bytes.size, java.net.InetAddress.getByName("255.255.255.255"), PORT))
-                }
+                sendAll()
                 delay(ANNOUNCE_INTERVAL_MS)
             }
         } finally {
@@ -75,20 +105,24 @@ object Discovery {
             setReferenceCounted(false)
             acquire()
         }
+        // 保持射频清醒，避免省电模式丢广播
+        @Suppress("DEPRECATION")
+        val wifiLock = wifi?.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "knotyup-scan")?.apply {
+            setReferenceCounted(false)
+            acquire()
+        }
 
         // 绑定端口（带重试：上一次扫描的 socket 可能尚未完全释放）
         var socket: DatagramSocket? = null
         var attempt = 0
         while (socket == null) {
             if (!currentCoroutineContext().isActive) {
-                lock?.release()
+                runCatching { lock?.release() }
+                runCatching { wifiLock?.release() }
                 return@flow
             }
             try {
-                socket = DatagramSocket(PORT).apply {
-                    broadcast = true
-                    soTimeout = 1000
-                }
+                socket = DatagramSocket(PORT).apply { broadcast = true }
             } catch (_: SocketException) {
                 attempt += 1
                 if (attempt >= 20) {
@@ -101,34 +135,75 @@ object Discovery {
         }
 
         val buf = ByteArray(1024)
-        val seen = HashMap<String, Pair<GroupAd, Long>>() // id -> (ad, lastSeen)
+        // id -> (群信息, killStep)
+        val seen = HashMap<String, Pair<GroupAd, Int>>()
         var emitted: List<GroupAd> = emptyList()
         try {
             while (currentCoroutineContext().isActive) {
-                val packet = DatagramPacket(buf, buf.size)
-                try {
-                    socket.receive(packet)
-                    val text = String(packet.data, 0, packet.length, Charsets.UTF_8)
-                    if (text.startsWith("KNOTYUP1|")) {
-                        val o = JSONObject(text.removePrefix("KNOTYUP1|"))
-                        val ad = GroupAd(o.getString("id"), o.getString("name"), o.getString("addr"))
-                        seen[ad.id] = ad to System.currentTimeMillis()
+                // —— 一个扫描周期：收集周期内收到的广播 ——
+                val cycleStart = System.currentTimeMillis()
+                val got = HashMap<String, GroupAd>()
+                while (true) {
+                    val remain = SCAN_INTERVAL_MS - (System.currentTimeMillis() - cycleStart)
+                    if (remain <= 0) break
+                    socket.soTimeout = remain.toInt()
+                    val packet = DatagramPacket(buf, buf.size)
+                    try {
+                        socket.receive(packet)
+                        val text = String(packet.data, 0, packet.length, Charsets.UTF_8)
+                        if (text.startsWith("KNOTYUP1|")) {
+                            val o = JSONObject(text.removePrefix("KNOTYUP1|"))
+                            got[o.getString("id")] =
+                                GroupAd(o.getString("id"), o.getString("name"), o.getString("addr"))
+                        }
+                    } catch (_: java.net.SocketTimeoutException) {
+                        break // 周期结束
                     }
-                } catch (_: java.net.SocketTimeoutException) {
-                    // 周期修剪
                 }
-                // 全量重建：最近 WINDOW_MS 内可见的群
-                val now = System.currentTimeMillis()
-                seen.entries.removeAll { (_, v) -> now - v.second > WINDOW_MS }
-                val list = seen.values.map { it.first }.sortedBy { it.name }
-                if (list != emitted) {
-                    emitted = list
-                    emit(list)
+
+                // —— 周期末结算 ——
+                var changed = false
+                // 命中：新增或清零（信息变化时更新）
+                for ((id, ad) in got) {
+                    val cur = seen[id]
+                    if (cur == null) {
+                        seen[id] = ad to 0
+                        changed = true
+                    } else {
+                        if (cur.first.addr != ad.addr || cur.first.name != ad.name) {
+                            seen[id] = ad to 0
+                            changed = true
+                        } else {
+                            seen[id] = cur.first to 0
+                        }
+                    }
+                }
+                // 未命中：killStep 累积，达到阈值正式剔除
+                val missed = seen.filterKeys { it !in got }.keys.toList()
+                for (id in missed) {
+                    val (ad, kill) = seen.getValue(id)
+                    if (kill + 1 >= KILL_THRESHOLD) {
+                        seen.remove(id)
+                        changed = true
+                    } else {
+                        seen[id] = ad to kill + 1
+                    }
+                }
+
+                if (changed) {
+                    val list = seen.values.map { it.first }.sortedBy { it.name }
+                    if (list != emitted) {
+                        emitted = list
+                        emit(list)
+                    } else {
+                        changed = false
+                    }
                 }
             }
         } finally {
             socket.close()
-            lock?.release()
+            runCatching { lock?.release() }
+            runCatching { wifiLock?.release() }
         }
     }.flowOn(Dispatchers.IO)
 }

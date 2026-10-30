@@ -494,18 +494,40 @@ pub fn run() {
             // core 事件总线
             let (core_tx, core_rx) = broadcast::channel::<CoreEvent>(128);
 
-            // 局域网发现：常驻监听广播
+            // 局域网发现：仅在首页（无会话）时扫描，进群即停、退群即恢复
             let (disc_tx, mut disc_rx) = broadcast::channel::<Vec<GroupAd>>(16);
-            let shared_disc = shared.clone();
-            let handle_disc = handle.clone();
+            let (scan_tx, mut scan_rx) = tokio::sync::watch::channel(true);
+            let shared_watch = shared.clone();
             tauri::async_runtime::spawn(async move {
+                // 轮询会话状态 → 扫描开关（覆盖建群/入群/退群/被踢/转让/选主全部路径）
                 loop {
-                    // 端口被占用（例如本机开了两个实例）时稍后重试
-                    if discovery::listen(disc_tx.clone()).await.is_err() {
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                    }
+                    let active = shared_watch.session.lock().await.is_none();
+                    let _ = scan_tx.send(active);
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 }
             });
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    // 等待激活（首页）
+                    while !*scan_rx.borrow() {
+                        if scan_rx.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                    let listener =
+                        tauri::async_runtime::spawn(discovery::listen(disc_tx.clone()));
+                    // 等待暂停（进群）
+                    while *scan_rx.borrow() {
+                        if scan_rx.changed().await.is_err() {
+                            listener.abort();
+                            return;
+                        }
+                    }
+                    listener.abort();
+                }
+            });
+            let shared_disc = shared.clone();
+            let handle_disc = handle.clone();
             tauri::async_runtime::spawn(async move {
                 loop {
                     match disc_rx.recv().await {
