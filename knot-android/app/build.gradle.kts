@@ -49,4 +49,12 @@ dependencies {
     // Shizuku：shell uid 代理（后台剪贴板，M2.2 启用 IClipboard 代理）
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
+
+    // 扫码加群：CameraX + ZXing
+    implementation("com.google.zxing:core:3.5.3")
+    val camerax = "1.3.4"
+    implementation("androidx.camera:camera-core:$camerax")
+    implementation("androidx.camera:camera-camera2:$camerax")
+    implementation("androidx.camera:camera-lifecycle:$camerax")
+    implementation("androidx.camera:camera-view:$camerax")
 }

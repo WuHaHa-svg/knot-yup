@@ -59,12 +59,12 @@ function avatarColor(id) {
   return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }
 
-const PLATFORM_LABEL = () => ({
-  macos: { 'zh-Hans': 'macOS', 'zh-Hant': 'macOS', en: 'macOS' },
-  windows: { 'zh-Hans': 'Windows', 'zh-Hant': 'Windows', en: 'Windows' },
-  android: { 'zh-Hans': '安卓', 'zh-Hant': '安卓', en: 'Android' },
-  linux: { 'zh-Hans': 'Linux', 'zh-Hant': 'Linux', en: 'Linux' },
-});
+const PLATFORM_META = {
+  macos: { icon: 'i-os-mac', cls: 'mac', label: 'macOS' },
+  windows: { icon: 'i-os-win', cls: 'win', label: 'Windows' },
+  android: { icon: 'i-os-android', cls: 'droid', label: 'Android' },
+  linux: { icon: 'i-devices', cls: 'linux', label: 'Linux' },
+};
 
 // ── 确认弹窗（Promise 化） ────────────────
 
@@ -153,12 +153,70 @@ function renderSession() {
   const s = state.session;
   $('viewHome').classList.toggle('hidden', !!s);
   $('viewGroup').classList.toggle('hidden', !s);
+  // 群信息分享按钮：仅群页面显示（不分角色）；离开时同时收起弹层
+  $('sharePicker').classList.toggle('hidden', !s);
+  if (!s) $('sharePop').classList.add('hidden');
   if (s) {
     // 群主显示「解散群」，成员显示「退出群」
     $('btnLeave').textContent = t(s.role === 'owner' ? 'dissolve' : 'leave');
     renderMembers();
-    renderGroupInfo();
+    renderSharePop();
   }
+}
+
+// ── 群信息分享弹层 ───────────────────────
+
+// ── 群信息分享弹层（上：入群二维码；下：地址/PIN） ──
+
+function groupQrPayload(s) {
+  return JSON.stringify({ v: 1, app: 'knotyup', addr: s.addr, pin: s.pin });
+}
+
+function renderSharePop() {
+  const s = state.session;
+  const pop = $('sharePop');
+  if (!s) {
+    pop.innerHTML = '';
+    return;
+  }
+  pop.innerHTML = `
+    <div class="share-qr"><canvas id="qrCanvas" width="196" height="196"></canvas></div>
+    <div class="share-row">
+      <span class="share-label">${t('group_addr')}</span>
+      <span class="share-value">${escapeHtml(s.addr)}</span>
+      <button class="share-copy" data-copy="${escapeHtml(s.addr)}" title="${t('copy')}"><svg class="icon sm"><use href="#i-copy"/></svg></button>
+    </div>
+    <div class="share-row">
+      <span class="share-label">${t('group_pin')}</span>
+      <span class="share-value">${escapeHtml(s.pin)}</span>
+      <button class="share-copy" data-copy="${escapeHtml(s.pin)}" title="${t('copy')}"><svg class="icon sm"><use href="#i-copy"/></svg></button>
+    </div>
+    <div class="share-hint">${t('qr_hint')}</div>
+  `;
+  // 绘制二维码
+  try {
+    const qr = qrcode(0, 'M');
+    qr.addData(groupQrPayload(s));
+    qr.make();
+    const canvas = $('qrCanvas');
+    const ctx = canvas.getContext('2d');
+    const n = qr.getModuleCount();
+    const cell = Math.floor(canvas.width / (n + 4)); // 含 2 模块静区
+    const offset = Math.floor((canvas.width - cell * n) / 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#1d2129';
+    for (let y = 0; y < n; y++) {
+      for (let x = 0; x < n; x++) {
+        if (qr.isDark(y, x)) ctx.fillRect(offset + x * cell, offset + y * cell, cell, cell);
+      }
+    }
+  } catch (e) {
+    console.error('qr render failed', e);
+  }
+  pop.querySelectorAll('.share-copy').forEach((btn) => {
+    btn.onclick = () => navigator.clipboard.writeText(btn.dataset.copy).then(() => toast(t('copied')));
+  });
 }
 
 function renderMembers() {
@@ -169,18 +227,21 @@ function renderMembers() {
   const isOwner = s.role === 'owner';
   s.members.forEach((m, i) => {
     const isSelf = state.device && m.id === state.device.id;
+    const meta = PLATFORM_META[m.platform] || PLATFORM_META.linux;
     const li = document.createElement('li');
     li.className = 'member-item';
     li.style.setProperty('--i', i);
     li.innerHTML = `
-      <div class="avatar" style="background:${avatarColor(m.id)}">${escapeHtml(m.name.charAt(0).toUpperCase())}</div>
+      <div class="avatar os-${meta.cls}">
+        <svg class="icon"><use href="#${meta.icon}"/></svg>
+      </div>
       <div class="member-meta">
-        <div class="member-name">
-          ${escapeHtml(m.name)}
-          ${isSelf ? `<span class="you">${t('you')}</span>` : ''}
+        <div class="member-name" title="${escapeHtml(m.name)}">
+          <span class="name-text">${escapeHtml(m.name)}</span>
+          ${isSelf ? '<svg class="icon sm self-mark" title="This device"><use href="#i-devices"/></svg>' : ''}
           ${i === 0 ? '<span class="owner" title="Owner"><svg class="icon sm"><use href="#i-crown"/></svg></span>' : ''}
         </div>
-        <div class="member-sub">${(PLATFORM_LABEL()[m.platform] || {})[currentLang] || m.platform}</div>
+        <div class="member-sub">${meta.label}</div>
       </div>
       ${isOwner && !isSelf ? `<button class="kick" data-id="${m.id}">${t('kick')}</button>` : ''}
     `;
@@ -202,29 +263,6 @@ function renderMembers() {
       } catch (e) {
         toast(String(e));
       }
-    };
-  });
-}
-
-function renderGroupInfo() {
-  const s = state.session;
-  if (!s) return;
-  const info = $('groupInfo');
-  if (s.role === 'owner') {
-    info.innerHTML = `
-      <div class="info-row"><span>${t('group_addr')}</span><b>${escapeHtml(s.addr)}</b><button class="copy-link" data-copy="${escapeHtml(s.addr)}"><svg class="icon sm"><use href="#i-copy"/></svg>${t('copy')}</button></div>
-      <div class="info-row"><span>${t('group_pin')}</span><b>${escapeHtml(s.pin)}</b><button class="copy-link" data-copy="${escapeHtml(s.pin)}"><svg class="icon sm"><use href="#i-copy"/></svg>${t('copy')}</button></div>
-      <div class="info-row" style="color:var(--text-3)"><span>${t('join_hint')}</span></div>
-    `;
-  } else {
-    info.innerHTML = `
-      <div class="info-row"><span>${t('owner_addr')}</span><b>${escapeHtml(s.addr)}</b></div>
-      <div class="info-row" style="color:var(--text-3)"><span>${t('member_hint')}</span></div>
-    `;
-  }
-  info.querySelectorAll('.copy-link').forEach((btn) => {
-    btn.onclick = () => {
-      navigator.clipboard.writeText(btn.dataset.copy).then(() => toast(t('copied')));
     };
   });
 }
@@ -399,6 +437,18 @@ $('btnLeave').onclick = async () => {
     toast(String(e));
   }
 };
+
+// 群信息分享弹层开合
+$('btnShare').onclick = (e) => {
+  e.stopPropagation();
+  $('sharePop').classList.toggle('hidden');
+};
+document.addEventListener('click', (e) => {
+  const pop = $('sharePop');
+  if (!pop.classList.contains('hidden') && !pop.contains(e.target) && e.target !== $('btnShare')) {
+    pop.classList.add('hidden');
+  }
+});
 
 $('btnLang').onclick = (e) => {
   e.stopPropagation();

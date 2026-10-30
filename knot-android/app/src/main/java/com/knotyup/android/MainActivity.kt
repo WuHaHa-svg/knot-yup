@@ -45,6 +45,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
@@ -115,6 +116,8 @@ private fun App(
     var confirmLeave by remember { mutableStateOf(false) }
     var pendingKick by remember { mutableStateOf<String?>(null) }
     var pinDialogFor by remember { mutableStateOf<GroupAd?>(null) }
+    var showScanner by remember { mutableStateOf(false) }
+    var showQr by remember { mutableStateOf(false) }
     var showSplash by remember { mutableStateOf(true) }
 
     // 启动页 → 主界面（Crossfade 优雅过渡）
@@ -253,7 +256,11 @@ private fun App(
 
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
-            Header(onTheme, onLang, lang, themeId)
+            Header(
+                onTheme, onLang, lang, themeId,
+                onScan = { showScanner = true }, showScan = !session.joined,
+                showShare = session.joined, onShare = { showQr = true },
+            )
             if (session.joined) {
                 GroupBody(t, session.members, history, sendText,
                     role = session.role,
@@ -377,8 +384,198 @@ private fun App(
                 onDismiss = { pinDialogFor = null },
             )
         }
+
+        // 群信息二维码弹窗
+        if (showQr && session.joined) {
+            QrDialog(
+                addr = session.addr,
+                pin = session.pin,
+                onClose = { showQr = false },
+            )
+        }
+
+        // 扫码加群（全屏）
+        if (showScanner) {            ScannerScreen(
+                t = t,
+                onResult = { addrValue, pinValue ->
+                    showScanner = false
+                    if (addrValue.isNotBlank()) {
+                        startJoin(addrValue, pinValue)
+                    }
+                },
+                onClose = { showScanner = false },
+            )
+        }
     }
     } // Crossfade
+}
+
+/** 群信息二维码弹窗：白卡居中直接展示入群二维码。 */
+@Composable
+private fun QrDialog(addr: String, pin: String, onClose: () -> Unit) {
+    val payload = org.json.JSONObject().apply {
+        put("v", 1); put("app", "knotyup"); put("addr", addr); put("pin", pin)
+    }.toString()
+    val qrBitmap = remember(payload) { generateQrBitmap(payload, 512) }
+    androidx.activity.compose.BackHandler { onClose() }
+    Box(Modifier.fillMaxSize()) {
+        Box(Modifier.fillMaxSize().background(Color(0x52101216)).clickable(enabled = false) {})
+        Box(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 24.dp,
+                onClick = onClose,
+            ) {
+                Column(
+                    Modifier.padding(20.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    qrBitmap?.let {
+                        Image(
+                            it.asImageBitmap(),
+                            null,
+                            Modifier.size(240.dp).clip(RoundedCornerShape(10.dp)),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** ZXing 生成二维码 Bitmap（含白底）。 */
+private fun generateQrBitmap(text: String, size: Int): android.graphics.Bitmap? {
+    return runCatching {
+        val matrix = com.google.zxing.qrcode.QRCodeWriter().encode(
+            text, com.google.zxing.BarcodeFormat.QR_CODE, size, size,
+            mapOf(com.google.zxing.EncodeHintType.MARGIN to 1),
+        )
+        val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.RGB_565)
+        for (x in 0 until size) {
+            for (y in 0 until size) {
+                bmp.setPixel(x, y, if (matrix[x, y]) 0xFF1D2129.toInt() else 0xFFFFFFFF.toInt())
+            }
+        }
+        bmp
+    }.getOrNull()
+}
+
+/** 扫码加群：CameraX 预览 + ZXing 解析二维码（knotyup 入群载荷）。 */
+@Composable
+private fun ScannerScreen(
+    t: (String) -> String,
+    onResult: (addr: String, pin: String) -> Unit,
+    onClose: () -> Unit,
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    var hasPermission by remember {
+        mutableStateOf(
+            androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.CAMERA) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()
+    ) { hasPermission = it }
+
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        if (!hasPermission) permissionLauncher.launch(android.Manifest.permission.CAMERA)
+        onDispose { }
+    }
+    // 扫码页返回键 = 关闭扫码
+    androidx.activity.compose.BackHandler { onClose() }
+
+    Box(Modifier.fillMaxSize().background(Color.Black)) {
+        if (hasPermission) {
+            androidx.compose.ui.viewinterop.AndroidView(
+                factory = { ctx ->
+                    val previewView = androidx.camera.view.PreviewView(ctx)
+                    val providerFuture = androidx.camera.lifecycle.ProcessCameraProvider.getInstance(ctx)
+                    providerFuture.addListener({
+                        val provider = providerFuture.get()
+                        val preview = androidx.camera.core.Preview.Builder().build().apply {
+                            setSurfaceProvider(previewView.surfaceProvider)
+                        }
+                        val analysis = androidx.camera.core.ImageAnalysis.Builder()
+                            .setBackpressureStrategy(androidx.camera.core.ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                        analysis.setAnalyzer(ctx.mainExecutor) { image ->
+                            decodeQr(image)?.let { payload ->
+                                val (addr, pin) = parseJoinPayload(payload)
+                                if (addr != null) {
+                                    analysis.clearAnalyzer()
+                                    onResult(addr, pin ?: "")
+                                }
+                            }
+                            image.close()
+                        }
+                        runCatching {
+                            provider.unbindAll()
+                            provider.bindToLifecycle(lifecycleOwner, androidx.camera.core.CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                        }
+                    }, ctx.mainExecutor)
+                    previewView
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        // 取景框 + 提示
+        Column(
+            Modifier.fillMaxSize().padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Spacer(Modifier.weight(1f))
+            Box(
+                Modifier
+                    .size(240.dp)
+                    .border(2.dp, Color.White.copy(alpha = 0.9f), RoundedCornerShape(18.dp)),
+            )
+            Spacer(Modifier.height(20.dp))
+            Text(t("scan_hint"), color = Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
+            Spacer(Modifier.weight(1f))
+        }
+
+        // 关闭按钮
+        Surface(
+            onClick = onClose,
+            shape = RoundedCornerShape(9.dp),
+            color = Color.White.copy(alpha = 0.15f),
+            modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).size(34.dp),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text("✕", color = Color.White, fontSize = 15.sp)
+            }
+        }
+    }
+}
+
+/** YUV → ZXing 解码；命中返回二维码文本。 */
+private fun decodeQr(image: androidx.camera.core.ImageProxy): String? {
+    return runCatching {
+        val plane = image.planes[0]
+        val buffer = plane.buffer
+        val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
+        val source = com.google.zxing.PlanarYUVLuminanceSource(
+            bytes, plane.rowStride, image.height, 0, 0, image.width, image.height, false,
+        )
+        val bitmap = com.google.zxing.BinaryBitmap(com.google.zxing.common.HybridBinarizer(source))
+        com.google.zxing.MultiFormatReader().apply {
+            setHints(mapOf(com.google.zxing.DecodeHintType.POSSIBLE_FORMATS to listOf(com.google.zxing.BarcodeFormat.QR_CODE)))
+        }.decodeWithState(bitmap).text
+    }.getOrNull()
+}
+
+/** knotyup 入群载荷解析：{"v":1,"app":"knotyup","addr":"ip:port","pin":"..."} */
+private fun parseJoinPayload(text: String): Pair<String?, String?> {
+    return runCatching {
+        val o = org.json.JSONObject(text)
+        if (o.optString("app") == "knotyup") {
+            o.getString("addr") to o.optString("pin")
+        } else null to null
+    }.getOrDefault(null to null)
 }
 
 /**
@@ -643,7 +840,16 @@ private fun handleOwnerLost(
 }
 
 @Composable
-private fun Header(onTheme: (String) -> Unit, onLang: (String) -> Unit, lang: String, themeId: String) {
+private fun Header(
+    onTheme: (String) -> Unit,
+    onLang: (String) -> Unit,
+    lang: String,
+    themeId: String,
+    onScan: () -> Unit,
+    showScan: Boolean,
+    showShare: Boolean,
+    onShare: () -> Unit,
+) {
     var themeOpen by remember { mutableStateOf(false) }
     var langOpen by remember { mutableStateOf(false) }
     Row(
@@ -670,6 +876,22 @@ private fun Header(onTheme: (String) -> Unit, onLang: (String) -> Unit, lang: St
         Spacer(Modifier.width(10.dp))
         Text("KnotYup", fontWeight = FontWeight.Bold, fontSize = 18.sp)
         Spacer(Modifier.weight(1f))
+
+        // 扫码加群（仅首页显示）
+        if (showScan) {
+            HeaderIconBtn(onClick = onScan) {
+                Image(painterResource(R.drawable.ic_camera), "scan", Modifier.size(18.dp))
+            }
+            Spacer(Modifier.width(8.dp))
+        }
+
+        // 群信息二维码（仅群页面显示）
+        if (showShare) {
+            HeaderIconBtn(onClick = onShare) {
+                Image(painterResource(R.drawable.ic_qr), "qr", Modifier.size(18.dp))
+            }
+            Spacer(Modifier.width(8.dp))
+        }
 
         // 主题色：点击弹出锚定色板（与桌面端 pop 一致）
         Box {
@@ -1134,6 +1356,13 @@ private fun GroupBody(
             Spacer(Modifier.height(6.dp))
             members.forEachIndexed { i, m ->
                 val self = m.id == AppState.device.id
+                // 平台头像：macOS / Windows / Android 各自的图标与配色
+                val (iconRes, bg) = when (m.platform) {
+                    "macos" -> R.drawable.ic_os_mac to Color(0xFFECECF1)
+                    "windows" -> R.drawable.ic_os_win to Color(0xFFE7F0FB)
+                    "android" -> R.drawable.ic_os_android to Color(0xFFE6F4EA)
+                    else -> R.drawable.ic_devices to MaterialTheme.colorScheme.surfaceVariant
+                }
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 4.dp)
                         .clip(RoundedCornerShape(12.dp))
@@ -1142,22 +1371,27 @@ private fun GroupBody(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(
-                        Modifier.size(32.dp)
-                            .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(9.dp)),
+                        Modifier.size(32.dp).background(bg, RoundedCornerShape(9.dp)),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            m.name.take(1).uppercase(), color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold, fontSize = 13.sp,
-                        )
+                        Image(painterResource(iconRes), null, Modifier.size(18.dp))
                     }
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(m.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                m.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                                maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+                            )
                             if (self) {
                                 Spacer(Modifier.width(6.dp))
-                                Text(t("you"), fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                                // 本机标识：小图标（设备图形，主题色）
+                                Image(
+                                    painter = painterResource(R.drawable.ic_devices),
+                                    contentDescription = "self",
+                                    modifier = Modifier.size(12.dp),
+                                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(MaterialTheme.colorScheme.primary),
+                                )
                             }
                             if (i == 0) {
                                 Spacer(Modifier.width(6.dp))

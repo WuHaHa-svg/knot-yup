@@ -26,6 +26,9 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+/* 通用隐藏：任何元素加 .hidden 即不渲染（各组件不再需要单独定义） */
+.hidden { display: none !important; }
+
 html, body { height: 100%; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -227,8 +230,22 @@ body {
   display: grid; place-items: center;
   font-size: 13px; font-weight: 700; color: #fff;
 }
+/* 平台头像：按系统着色 */
+.avatar .icon { width: 18px; height: 18px; }
+.avatar.os-mac { background: #ececf1; color: #1d1d1f; }
+.avatar.os-win { background: #e7f0fb; color: #0078d4; }
+.avatar.os-droid { background: #e6f4ea; color: #34a853; }
+.avatar.os-linux { background: var(--surface-2); color: var(--text-2); }
+.self-mark { color: var(--accent); flex-shrink: 0; }
 .member-meta { flex: 1; min-width: 0; }
-.member-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.member-name {
+  font-size: 13px; font-weight: 600;
+  display: flex; align-items: center; gap: 6px;
+  min-width: 0;
+}
+.member-name .name-text {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .member-name .you { font-size: 10px; color: var(--accent); background: var(--accent-soft); padding: 1px 6px; border-radius: 5px; font-weight: 600; }
 .member-name .owner { color: #eab308; display: inline-flex; }
 .member-sub { font-size: 11px; color: var(--text-3); margin-top: 1px; }
@@ -364,6 +381,41 @@ body {
 .modal-actions .btn { flex: 1; }
 
 #btnLang { font-size: 12px; font-weight: 600; }
+
+/* 群信息分享弹层 */
+.share-pop {
+  position: absolute; top: 38px; right: 0; z-index: 20;
+  width: 252px; padding: 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: var(--shadow);
+  animation: viewIn .3s var(--ease);
+}
+.share-pop.hidden { display: none; }
+.share-qr {
+  display: grid; place-items: center;
+  padding: 10px; margin-bottom: 10px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.share-qr canvas { border-radius: 8px; image-rendering: pixelated; }
+.share-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+.share-row + .share-row { margin-top: 6px; }
+.share-label { font-size: 11.5px; color: var(--text-3); width: 48px; flex-shrink: 0; }
+.share-value {
+  flex: 1; font-size: 13px; font-weight: 600; color: var(--text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.share-copy {
+  appearance: none; border: none; background: none; cursor: pointer;
+  color: var(--accent); padding: 4px 8px; border-radius: 6px;
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11.5px; font-weight: 600; font-family: inherit;
+  flex-shrink: 0;
+}
+.share-copy:hover { background: var(--accent-soft); }
+.share-divider { height: 1px; background: var(--border); margin: 8px 0; }
+.share-hint { font-size: 11px; color: var(--text-3); margin-top: 8px; }
 
 /* 语言菜单（与主题色板一致的弹出交互） */
 .lang-menu {
