@@ -21,6 +21,8 @@ pub enum CoreEvent {
     Clipboard { from: String, payload: ClipboardPayload },
     /// 本设备被组主剔除
     Kicked(String),
+    /// 群主转让（新群主信息）
+    OwnerChange(DeviceInfo),
     /// 连接错误 / 断开
     Error(String),
 }
@@ -234,26 +236,57 @@ impl GroupServer {
 
     /// 关闭服务端（群解散）：通知全部成员后断开。
     pub async fn shutdown(&self) {
+        self.dissolve_notify().await;
+        self.stop().await;
+    }
+
+    async fn dissolve_notify(&self) {
+        let map = self.members.read().await;
+        let text = serde_json::to_string(
+            &Message::Kick { reason: Some("GROUP_DISSOLVED".into()) }.seal(&self.cipher),
+        )
+        .unwrap();
+        for (_, (_, tx)) in map.iter() {
+            tx.try_send(WsMessage::Text(text.clone())).ok();
+        }
+    }
+
+    /// 停止监听并断开全部成员（不发送任何通知）。
+    async fn stop(&self) {
+        self.members.write().await.clear();
+        self.shutdown.try_send(WsMessage::Close(None)).ok();
+    }
+
+    /// 转让群主并退出：通知成员新群主后直接停止（不发解散通知）。
+    pub async fn transfer(&self, new_owner: &DeviceInfo) {
         {
             let map = self.members.read().await;
             let text = serde_json::to_string(
-                &Message::Kick { reason: Some("GROUP_DISSOLVED".into()) }.seal(&self.cipher),
+                &Message::OwnerChange { new_owner: new_owner.clone() }.seal(&self.cipher),
             )
             .unwrap();
             for (_, (_, tx)) in map.iter() {
                 tx.try_send(WsMessage::Text(text.clone())).ok();
             }
         }
-        self.members.write().await.clear();
-        self.shutdown.try_send(WsMessage::Close(None)).ok();
+        self.stop().await;
     }
 }
 
-/// 成员（客户端）句柄。
+/// 成员（客户端）句柄。drop 时中止读任务 → 断开连接，群主侧才能感知离开。
 pub struct GroupClient {
     tx: Tx,
     local_id: String,
     cipher: Arc<Cipher>,
+    reader: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for GroupClient {
+    fn drop(&mut self) {
+        if let Some(h) = &self.reader {
+            h.abort();
+        }
+    }
 }
 
 impl GroupClient {
@@ -295,7 +328,7 @@ impl GroupClient {
         let cipher = Arc::new(Cipher::from_pin(pin));
         let loop_cipher = cipher.clone();
 
-        tokio::spawn(async move {
+        let reader = tokio::spawn(async move {
             let writer = tokio::spawn(async move {
                 while let Some(msg) = rx.recv().await {
                     if sink.send(msg).await.is_err() {
@@ -320,6 +353,10 @@ impl GroupClient {
                                 event_tx.send(CoreEvent::Kicked(reason.unwrap_or_default())).ok();
                                 break;
                             }
+                            Some(Message::OwnerChange { new_owner }) => {
+                                event_tx.send(CoreEvent::OwnerChange(new_owner)).ok();
+                                break;
+                            }
                             _ => {}
                         }
                     }
@@ -334,7 +371,7 @@ impl GroupClient {
             writer.abort();
         });
 
-        Ok(Self { tx, local_id, cipher })
+        Ok(Self { tx, local_id, cipher, reader: Some(reader) })
     }
 
     pub fn local_id(&self) -> &str {
@@ -355,5 +392,92 @@ impl GroupClient {
             .send(WsMessage::Text(text))
             .await
             .map_err(|_| "连接已关闭".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::device_id;
+
+    fn dev(name: &str, addr: Option<String>) -> DeviceInfo {
+        DeviceInfo { id: device_id(), name: name.into(), platform: "test".into(), addr }
+    }
+
+    /// 群主转让全链路：A 建群，B/C 入群，A 转让给 B 后停止；
+    /// B 用预留端口承接为群主，C 重连 B 成功。
+    #[tokio::test]
+    async fn owner_transfer_and_reconnect() {
+        let (tx, mut rx) = broadcast::channel::<CoreEvent>(64);
+        let (server_a, port_a) = GroupServer::start(0, "123456".into(), dev("A", None), tx.clone())
+            .await
+            .unwrap();
+
+        // B：预留端口
+        let standby_b = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port_b = standby_b.local_addr().unwrap().port();
+        let dev_b = dev("B", Some(format!("127.0.0.1:{port_b}")));
+        let client_b =
+            GroupClient::connect(&format!("127.0.0.1:{port_a}"), "123456", dev_b.clone(), tx.clone())
+                .await
+                .unwrap();
+        let client_c =
+            GroupClient::connect(&format!("127.0.0.1:{port_a}"), "123456", dev("C", Some("127.0.0.1:1".into())), tx.clone())
+                .await
+                .unwrap();
+
+        // 等 B/C 入群广播
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+        // A 转让给 B 并停止
+        server_a.transfer(&dev_b).await;
+
+        // B/C 应收到 OwnerChange
+        let mut got_b = false;
+        let mut got_c = false;
+        for _ in 0..20 {
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(ev, CoreEvent::OwnerChange(_)) {
+                    got_b = true;
+                }
+            }
+            if got_b {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(got_b, "OwnerChange 未广播");
+        let _ = got_c;
+
+        // B：断开旧连接、释放预留端口、承接为群主
+        drop(client_b);
+        drop(standby_b);
+        let (_server_b, port_b2) = GroupServer::start(port_b, "123456".into(), dev_b.clone(), tx.clone())
+            .await
+            .unwrap();
+        assert_eq!(port_b2, port_b, "承接端口应与预留端口一致");
+
+        // C：重连 B
+        drop(client_c);
+        let c2 = GroupClient::connect(&format!("127.0.0.1:{port_b}"), "123456", dev("C", None), tx.clone())
+            .await;
+        assert!(c2.is_ok(), "C 重连 B 失败: {:?}", c2.err().map(|e| e.to_string()));
+
+        // C 应收到成员表 [B, C]
+        let mut members_ok = false;
+        for _ in 0..20 {
+            while let Ok(ev) = rx.try_recv() {
+                if let CoreEvent::Members(m) = ev {
+                    if m.len() == 2 && m.iter().any(|d| d.name == "B") && m.iter().any(|d| d.name == "C") {
+                        members_ok = true;
+                    }
+                }
+            }
+            if members_ok {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(members_ok, "C 未收到正确的成员表");
     }
 }

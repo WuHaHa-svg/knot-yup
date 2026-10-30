@@ -68,23 +68,50 @@ const PLATFORM_LABEL = () => ({
 
 // ── 确认弹窗（Promise 化） ────────────────
 
-function showConfirm(title, msg, okText, cancelText) {
+function showConfirm(title, msg, okText, cancelText, members = null) {
   return new Promise((resolve) => {
     const modal = $('confirmModal');
+    const list = $('confirmList');
     $('confirmTitle').textContent = title;
     $('confirmMsg').textContent = msg;
     $('confirmOk').textContent = okText;
     $('confirmCancel').textContent = cancelText;
+    // 可选设备勾选列表（群主转让）
+    let selected = null;
+    list.innerHTML = '';
+    if (members && members.length) {
+      list.classList.remove('hidden');
+      members.forEach((m) => {
+        const label = document.createElement('label');
+        label.innerHTML = `<input type="checkbox" value="${m.id}"><span>${escapeHtml(m.name)}</span>`;
+        const box = label.querySelector('input');
+        box.onchange = () => {
+          if (box.checked) {
+            list.querySelectorAll('input').forEach((b) => {
+              if (b !== box) b.checked = false;
+            });
+            selected = m.id;
+            $('confirmOk').textContent = t('transfer_leave');
+          } else {
+            selected = null;
+            $('confirmOk').textContent = okText;
+          }
+        };
+        list.appendChild(label);
+      });
+    } else {
+      list.classList.add('hidden');
+    }
     modal.classList.remove('hidden');
     const close = (val) => {
       modal.classList.add('hidden');
       $('confirmOk').onclick = $('confirmCancel').onclick = modal.onclick = null;
       resolve(val);
     };
-    $('confirmOk').onclick = () => close(true);
-    $('confirmCancel').onclick = () => close(false);
+    $('confirmOk').onclick = () => close(selected === null ? true : { transfer: selected });
+    $('confirmCancel').onclick = () => close(null);
     modal.onclick = (e) => {
-      if (e.target === modal) close(false);
+      if (e.target === modal) close(null);
     };
   });
 }
@@ -95,6 +122,9 @@ function toast(msg) {
     ALREADY_IN_GROUP: t('already_in_group'),
     OWNER_ONLY: t('owner_only'),
     WRONG_PIN: t('wrong_pin'),
+    PROMOTED: t('promoted'),
+    RECONNECTING: t('reconnecting'),
+    RECONNECTED: t('reconnected'),
   };
   if (codeMap[msg]) msg = codeMap[msg];
   else if (/^连接失败|^Connection|^协议错误/.test(msg)) msg = t('join_failed');
@@ -304,14 +334,23 @@ $('inputAddr').addEventListener('keydown', (e) => e.key === 'Enter' && $('btnJoi
 
 $('btnLeave').onclick = async () => {
   const isOwner = state.session && state.session.role === 'owner';
-  const ok = await showConfirm(
-    isOwner ? t('dissolve') : t('leave'),
-    isOwner ? t('confirm_dissolve_msg') : t('confirm_leave_msg'),
-    t('confirm_ok'), t('confirm_cancel')
-  );
-  if (!ok) return;
+  let transferTo = null;
+  if (isOwner) {
+    const others = (state.session.members || []).filter((m) => !state.device || m.id !== state.device.id);
+    const r = await showConfirm(
+      t('dissolve'),
+      t('transfer_hint'),
+      t('confirm_ok'), t('confirm_cancel'),
+      others
+    );
+    if (!r) return;
+    if (r !== true) transferTo = r.transfer;
+  } else {
+    const ok = await showConfirm(t('leave'), t('confirm_leave_msg'), t('confirm_ok'), t('confirm_cancel'));
+    if (!ok) return;
+  }
   try {
-    await invoke('leave_group', {});
+    await invoke('leave_group', { transferTo });
     toast(t('left'));
     clipItems = [];
     await refresh();
@@ -356,13 +395,19 @@ async function main() {
     renderClipboard();
   });
   await listen('knot://kicked', (e) => {
-    toast(e.payload === 'GROUP_DISSOLVED' ? t('group_dissolved') : t('kicked'));
+    const p = e.payload;
+    toast(p === 'GROUP_DISSOLVED' ? t('group_dissolved') : p === 'GROUP_LOST' ? t('group_lost') : t('kicked'));
     state.session = null;
     clipItems = [];
     renderSession();
     renderClipboard();
   });
   await listen('knot://error', (e) => toast(e.payload));
+  await listen('knot://toast', (e) => {
+    toast(String(e.payload));
+    // 升主/重连成功后会话已换新，需要刷新视图
+    if (e.payload === 'RECONNECTED' || e.payload === 'PROMOTED') refresh();
+  });
   await listen('knot://member-change', (e) => {
     toast(t(e.payload.type === 'joined' ? 'member_joined' : 'member_left', { name: e.payload.name }));
   });

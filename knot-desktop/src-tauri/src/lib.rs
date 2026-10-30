@@ -39,6 +39,8 @@ struct Session {
     pin: String,
     /// 组主停止广播的句柄
     announce_stop: Option<mpsc::Sender<()>>,
+    /// 成员期预留的 TcpListener（承接群主用），端口即 DeviceInfo.addr 中的端口
+    standby: Option<tokio::net::TcpListener>,
 }
 
 #[derive(Default)]
@@ -181,12 +183,124 @@ async fn forward_core_events(
                 *state.session.lock().await = None;
                 let _ = app.emit("knot://kicked", reason);
             }
+            Ok(CoreEvent::OwnerChange(new_owner)) => {
+                // 群主主动转让：new_owner 升为主，其余重连
+                handle_owner_lost(app.clone(), state.clone(), Some(new_owner)).await;
+            }
             Ok(CoreEvent::Error(e)) => {
-                let _ = app.emit("knot://error", e);
+                let is_member = {
+                    let s = state.session.lock().await;
+                    matches!(&*s, Some(Session { role: Role::Member, .. }))
+                };
+                if is_member && e.starts_with("connection closed") {
+                    // 群主意外离开 → 选主
+                    handle_owner_lost(app.clone(), state.clone(), None).await;
+                } else if !e.starts_with("connection closed") {
+                    let _ = app.emit("knot://error", e);
+                }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => continue,
             Err(broadcast::error::RecvError::Closed) => break,
         }
+    }
+}
+
+/// 群主消失（意外断开或主动转让）后的选主与重连。
+/// explicit = 转让时指定的新群主；None = 按 members[1] 顺位确定选主。
+async fn handle_owner_lost(app: AppHandle, state: Arc<AppState>, explicit: Option<DeviceInfo>) {
+    let Some(mut s) = state.session.lock().await.take() else {
+        return;
+    };
+    let candidates: Vec<DeviceInfo> = match &explicit {
+        Some(d) => vec![d.clone()],
+        None => s.members.iter().skip(1).cloned().collect(), // [0] 是旧群主
+    };
+    let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+    let pin = s.pin.clone();
+    let core_tx = state.core_tx.lock().await.clone().unwrap_or_else(|| {
+        // 理论上 setup 已初始化；兜底新建（事件转发只订阅原通道，此分支仅保编译）
+        broadcast::channel::<CoreEvent>(128).0
+    });
+
+    if candidates.is_empty() {
+        let _ = app.emit("knot://kicked", "GROUP_LOST");
+        return;
+    }
+
+    if candidates[0].id == my_id {
+        // 当选：用预留端口升为群主
+        let standby_port = s
+            .standby
+            .as_ref()
+            .and_then(|l| l.local_addr().ok())
+            .map(|a| a.port())
+            .unwrap_or(0);
+        s.standby = None; // 释放端口
+        drop(s);
+        let device = state.device.lock().await.clone().unwrap_or_else(|| candidates[0].clone());
+        match GroupServer::start(standby_port, pin.clone(), device.clone(), core_tx).await {
+            Ok((server, port)) => {
+                let addr = format!("{}:{}", local_ip(), port);
+                let announce_stop = discovery::announce(GroupAd {
+                    id: device.id.clone(),
+                    name: device.name.clone(),
+                    addr: addr.clone(),
+                })
+                .await
+                .ok();
+                *state.session.lock().await = Some(Session {
+                    role: Role::Owner,
+                    server: Some(server),
+                    client: None,
+                    members: vec![device.clone()],
+                    addr,
+                    pin,
+                    announce_stop,
+                    standby: None,
+                });
+                let _ = app.emit("knot://members", vec![device]);
+                let _ = app.emit("knot://toast", "PROMOTED");
+            }
+            Err(_) => {
+                let _ = app.emit("knot://kicked", "GROUP_LOST");
+            }
+        }
+    } else {
+        // 重连：依次尝试候选地址（当选者未就绪时退避重试）
+        drop(s);
+        let _ = app.emit("knot://toast", "RECONNECTING");
+        tauri::async_runtime::spawn(async move {
+            for _attempt in 0..10 {
+                for c in &candidates {
+                    let Some(addr) = &c.addr else { continue };
+                    if c.id == my_id {
+                        continue;
+                    }
+                    let device = state.device.lock().await.clone().unwrap();
+                    if let Ok(client) = GroupClient::connect(addr, &pin, device, core_tx.clone()).await {
+                        let mut guard = state.session.lock().await;
+                        if guard.is_some() {
+                            return; // 已经被其他路径处理
+                        }
+                        *guard = Some(Session {
+                            role: Role::Member,
+                            server: None,
+                            client: Some(client),
+                            members: vec![],
+                            addr: addr.clone(),
+                            pin: pin.clone(),
+                            announce_stop: None,
+                            standby: None,
+                        });
+                        drop(guard);
+                        let _ = app.emit("knot://toast", "RECONNECTED");
+                        return;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            }
+            let _ = app.emit("knot://kicked", "GROUP_LOST");
+        });
     }
 }
 
@@ -261,6 +375,7 @@ async fn create_group(
         addr: addr.clone(),
         pin: pin.clone(),
         announce_stop,
+        standby: None,
     });
     Ok(serde_json::json!({ "addr": addr, "pin": pin, "port": port }))
 }
@@ -275,8 +390,13 @@ async fn join_group(
         return Err("ALREADY_IN_GROUP".into());
     }
     let core_tx = state.core_tx.lock().await.clone().ok_or("CORE_INIT")?;
-    let device = state.device.lock().await.clone().unwrap();
-    let client = GroupClient::connect(&addr, &pin, device, core_tx).await?;
+    let mut device = state.device.lock().await.clone().unwrap();
+    // 预留端口：群主意外离开时本机可能需要承接为群主
+    let standby = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.map_err(|e| format!("{e}"))?;
+    if let Ok(p) = standby.local_addr() {
+        device.addr = Some(format!("{}:{}", local_ip(), p.port()));
+    }
+    let client = GroupClient::connect(&addr, &pin, device.clone(), core_tx).await?;
 
     *state.session.lock().await = Some(Session {
         role: Role::Member,
@@ -286,15 +406,28 @@ async fn join_group(
         addr,
         pin,
         announce_stop: None,
+        standby: Some(standby),
     });
     Ok(serde_json::json!({ "ok": true }))
 }
 
 #[tauri::command]
-async fn leave_group(state: State<'_, SharedState>) -> Result<(), String> {
+async fn leave_group(
+    state: State<'_, SharedState>,
+    transfer_to: Option<String>,
+) -> Result<(), String> {
     if let Some(s) = state.session.lock().await.take() {
         if let Some(server) = s.server {
-            server.shutdown().await;
+            if let Some(target) = transfer_to {
+                // 转让给指定成员后退群
+                if let Some(info) = s.members.iter().find(|m| m.id == target) {
+                    server.transfer(info).await;
+                } else {
+                    server.shutdown().await;
+                }
+            } else {
+                server.shutdown().await;
+            }
         }
         if let Some(stop) = s.announce_stop {
             stop.send(()).await.ok();
@@ -350,6 +483,7 @@ pub fn run() {
                 id: knot_core::protocol::device_id(),
                 name: format!("{} 的 {}", whoami::devicename(), match std::env::consts::OS { "macos" => "Mac", "windows" => "PC", other => other }),
                 platform: std::env::consts::OS.to_string(),
+                addr: None,
             };
 
             // 剪贴板监视线程 + 本机变化通道

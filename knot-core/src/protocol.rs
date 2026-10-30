@@ -8,6 +8,9 @@ pub struct DeviceInfo {
     pub id: String,
     pub name: String,
     pub platform: String, // windows / macos / android
+    /// 本机可承接群主的地址（ip:port）。成员入组时携带预留端口；群主为服务地址。
+    #[serde(default)]
+    pub addr: Option<String>,
 }
 
 /// 剪贴板内容。M0 仅支持文本；图片/文件走 M4 的分块直传通道。
@@ -56,6 +59,11 @@ pub enum Message {
     /// 剔除成员（组主 → 目标设备）
     Kick {
         reason: Option<String>,
+    },
+    /// 群主转让：群主退出前指定新群主，成员收到后重连新群主
+    /// （当选者 = new_owner 的那台设备自己升为主）
+    OwnerChange {
+        new_owner: DeviceInfo,
     },
     Ping,
     Pong,

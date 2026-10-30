@@ -308,6 +308,16 @@ body {
 }
 .modal h3 { font-size: 16px; font-weight: 650; margin-bottom: 8px; }
 .modal p { font-size: 13.5px; color: var(--text-2); line-height: 1.6; }
+.confirm-list { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.confirm-list.hidden { display: none; }
+.confirm-list label {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border: 1px solid var(--border); border-radius: 10px;
+  font-size: 13px; cursor: pointer; user-select: none;
+  transition: all .2s var(--ease);
+}
+.confirm-list label:hover { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); background: var(--accent-soft); }
+.confirm-list input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
 .modal-actions { display: flex; gap: 10px; margin-top: 20px; }
 .modal-actions .btn { flex: 1; }
 

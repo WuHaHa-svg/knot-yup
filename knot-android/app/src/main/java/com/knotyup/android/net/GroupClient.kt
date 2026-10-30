@@ -14,6 +14,7 @@ sealed class GroupEvent {
     data class Members(val members: List<DeviceInfo>) : GroupEvent()
     data class Clipboard(val from: String, val payload: ClipboardPayload) : GroupEvent()
     data class Kicked(val reason: String) : GroupEvent()
+    data class OwnerChange(val newOwner: DeviceInfo) : GroupEvent()
     data class Error(val message: String) : GroupEvent()
     data object Disconnected : GroupEvent()
 }
@@ -65,6 +66,10 @@ class GroupClient(
                     is Msg.Clipboard -> trySend(Result.success(GroupEvent.Clipboard(msg.from, msg.payload)))
                     is Msg.Kick -> {
                         trySend(Result.success(GroupEvent.Kicked(msg.reason ?: "")))
+                        close()
+                    }
+                    is Msg.OwnerChange -> {
+                        trySend(Result.success(GroupEvent.OwnerChange(msg.newOwner)))
                         close()
                     }
                     else -> {}

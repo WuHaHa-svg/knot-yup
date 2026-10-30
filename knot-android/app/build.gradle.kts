@@ -42,6 +42,9 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
+    // WebSocket 服务端（Android 作为群主/承接群主）
+    implementation("org.java-websocket:Java-WebSocket:1.5.7")
+
     // Shizuku：shell uid 代理（后台剪贴板，M2.2 启用 IClipboard 代理）
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")

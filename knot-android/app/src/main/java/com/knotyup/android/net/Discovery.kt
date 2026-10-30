@@ -30,6 +30,42 @@ data class GroupAd(val id: String, val name: String, val addr: String)
 object Discovery {
     const val PORT = 45691
     private const val WINDOW_MS = 5_000L
+    private const val ANNOUNCE_INTERVAL_MS = 1_500L
+
+    /** 本机局域网 IPv4（无则 null）。 */
+    fun localIpAddress(): String? {
+        try {
+            java.net.NetworkInterface.getNetworkInterfaces().toList().forEach { nif ->
+                if (nif.isUp && !nif.isLoopback) {
+                    nif.inetAddresses.toList().forEach { addr ->
+                        if (!addr.isLoopbackAddress && addr is java.net.Inet4Address && !addr.isLinkLocalAddress) {
+                            return addr.hostAddress
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return null
+    }
+
+    /** 群主：周期广播本群（collect 开始，取消停止）。 */
+    fun announce(ad: GroupAd): Flow<Unit> = flow<Unit> {
+        val socket = DatagramSocket().apply { broadcast = true }
+        val json = org.json.JSONObject()
+        json.put("id", ad.id); json.put("name", ad.name); json.put("addr", ad.addr)
+        val bytes = "KNOTYUP1|$json".toByteArray(Charsets.UTF_8)
+        try {
+            while (currentCoroutineContext().isActive) {
+                runCatching {
+                    socket.send(DatagramPacket(bytes, bytes.size, java.net.InetAddress.getByName("255.255.255.255"), PORT))
+                }
+                delay(ANNOUNCE_INTERVAL_MS)
+            }
+        } finally {
+            socket.close()
+        }
+    }.flowOn(Dispatchers.IO)
 
     fun listen(context: Context): Flow<List<GroupAd>> = flow {
         // applicationContext 防止 Activity 泄漏

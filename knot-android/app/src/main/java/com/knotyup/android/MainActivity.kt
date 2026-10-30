@@ -100,6 +100,7 @@ private fun App(
     var joining by remember { mutableStateOf(false) }
     var sendText by remember { mutableStateOf(sharedText ?: "") }
     var confirmLeave by remember { mutableStateOf(false) }
+    var pendingKick by remember { mutableStateOf<String?>(null) }
     // 剪贴板指纹闸门[0]：最近一次同步的内容指纹（收/发都记录），防止「写入被当成本机复制」回环
     val clipGuard = remember { arrayOf("") }
 
@@ -129,11 +130,18 @@ private fun App(
                     AppState.reset()
                     AppState.toast(if (event.reason == "GROUP_DISSOLVED") t("group_dissolved") else t("kicked"))
                 }
-                GroupEvent.Disconnected -> {
-                    AppState.reset()
-                    AppState.toast(t("disconnected"))
+                is GroupEvent.OwnerChange -> handleOwnerLost(t, scope, event.newOwner)
+                GroupEvent.Disconnected -> handleOwnerLost(t, scope, null)
+                is GroupEvent.Error -> {
+                    // 成员期连接错误（如未收到转让通知即断开）→ 同样走选主
+                    val s = AppState.session.value
+                    android.util.Log.w("KnotYup", "ws error: ${event.message}")
+                    if (s.joined && s.role == "member") {
+                        handleOwnerLost(t, scope, null)
+                    } else {
+                        AppState.toast(event.message)
+                    }
                 }
-                is GroupEvent.Error -> AppState.toast(event.message)
             }
         }
     }
@@ -158,7 +166,13 @@ private fun App(
                 // 跳过刚写入的远端同步内容（指纹相同）
                 if (text.isNotEmpty() && hash != clipGuard[0]) {
                     clipGuard[0] = hash
-                    if (AppState.client.sendClipboard(text)) AppState.addLocalHistory(text)
+                    val sent = if (AppState.isOwner()) {
+                        AppState.server?.broadcastClipboard(text)
+                        AppState.server != null
+                    } else {
+                        AppState.client.sendClipboard(text)
+                    }
+                    if (sent) AppState.addLocalHistory(text)
                 }
             }
             cm.addPrimaryClipChangedListener(listener)
@@ -183,6 +197,9 @@ private fun App(
             Header(onTheme, onLang, lang)
             if (session.joined) {
                 GroupBody(t, session.members, history, sendText,
+                    role = session.role,
+                    groupAddr = session.addr, groupPin = session.pin,
+                    onKick = { pendingKick = it },
                     onCopy = { text ->
                         // 点击历史复制：先同步指纹闸门，避免被监听器当作本机复制再发回群
                         clipGuard[0] = textHash(text)
@@ -191,10 +208,18 @@ private fun App(
                     },
                     onSendText = { sendText = it },
                     onSend = {
-                        if (sendText.isNotBlank() && AppState.client.sendClipboard(sendText)) {
-                            AppState.addLocalHistory(sendText)
-                            AppState.toast(t("sent"))
-                            sendText = ""
+                        if (sendText.isNotBlank()) {
+                            val sent = if (AppState.isOwner()) {
+                                AppState.server?.broadcastClipboard(sendText)
+                                AppState.server != null
+                            } else {
+                                AppState.client.sendClipboard(sendText)
+                            }
+                            if (sent) {
+                                AppState.addLocalHistory(sendText)
+                                AppState.toast(t("sent"))
+                                sendText = ""
+                            }
                         }
                     },
                     onLeave = { confirmLeave = true })
@@ -202,13 +227,22 @@ private fun App(
                 JoinBody(t, discovered, addr, pin, joining,
                     onAddr = { addr = it }, onPin = { pin = it },
                     onPick = { addr = it.addr },
+                    onCreate = {
+                        val port = AppState.reservePort()
+                        val pin2 = java.security.SecureRandom().nextInt(900_000) + 100_000
+                        AppState.becomeOwner(pin2.toString(), port)
+                        AppState.toast(t("group_created").replace("{pin}", pin2.toString()))
+                    },
                     onJoin = {
                         if (addr.isBlank() || pin.isBlank()) {
                             AppState.toast(t("fill_addr_pin"))
                         } else {
                             joining = true
                             scope.launch {
-                                AppState.client.join(addr, pin, AppState.device).collect { result ->
+                                // 记录会话（重连/承接群主需要同 PIN），预留端口并随 join 上报地址
+                                AppState.onJoining(addr, pin)
+                                AppState.setStandby(java.net.ServerSocket(0))
+                                AppState.client.join(addr, pin, AppState.deviceWithStandbyAddr()).collect { result ->
                                     result.fold({ event ->
                                         AppState.emit(event)
                                         when (event) {
@@ -247,23 +281,51 @@ private fun App(
 
         // 退出群二次确认（自绘弹窗，风格与桌面端一致）
         if (confirmLeave) {
+            val ownerLeave = AppState.isOwner()
             KnotConfirm(
-                title = t("confirm_leave_title"),
-                message = t("confirm_leave_msg"),
+                title = t(if (ownerLeave) "dissolve" else "confirm_leave_title"),
+                message = t(if (ownerLeave) "transfer_hint" else "confirm_leave_msg"),
                 okText = t("confirm_ok"),
                 cancelText = t("confirm_cancel"),
-                onOk = {
+                members = if (ownerLeave) {
+                    AppState.session.value.members.filter { it.id != AppState.device.id }
+                } else emptyList(),
+                onOk = { selected ->
                     confirmLeave = false
-                    AppState.reset()
+                    if (ownerLeave) {
+                        if (selected != null) {
+                            AppState.transferOwner(selected)
+                        } else {
+                            AppState.dissolveOwner()
+                        }
+                    } else {
+                        AppState.reset()
+                    }
                     AppState.toast(t("left"))
                 },
                 onCancel = { confirmLeave = false },
             )
         }
+
+        // 移出成员二次确认
+        pendingKick?.let { kickId ->
+            val m = AppState.session.value.members.firstOrNull { it.id == kickId }
+            KnotConfirm(
+                title = t("kick"),
+                message = t("confirm_kick_msg").replace("{name}", m?.name ?: ""),
+                okText = t("confirm_ok"),
+                cancelText = t("confirm_cancel"),
+                onOk = {
+                    AppState.server?.kick(kickId)
+                    pendingKick = null
+                },
+                onCancel = { pendingKick = null },
+            )
+        }
     }
 }
 
-/** 桌面端同款确认弹窗：半透明遮罩 + 白卡 + 主操作/危险操作按钮。 */
+/** 桌面端同款确认弹窗：半透明遮罩 + 白卡 + 主操作/危险操作按钮。可选成员勾选（群主转让）。 */
 @Composable
 private fun KnotConfirm(
     title: String,
@@ -271,9 +333,11 @@ private fun KnotConfirm(
     okText: String,
     cancelText: String,
     danger: Boolean = true,
-    onOk: () -> Unit,
+    members: List<DeviceInfo> = emptyList(),
+    onOk: (String?) -> Unit,
     onCancel: () -> Unit,
 ) {
+    var selected by remember { mutableStateOf<String?>(null) }
     Box(Modifier.fillMaxSize()) {
         // 遮罩
         Box(Modifier.fillMaxSize().background(Color(0x52101216)))
@@ -287,6 +351,31 @@ private fun KnotConfirm(
                     Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     Spacer(Modifier.height(8.dp))
                     Text(message, fontSize = 13.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 20.sp)
+                    // 可选成员勾选列表
+                    if (members.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        members.forEach { m ->
+                            Row(
+                                Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(
+                                        if (selected == m.id) MaterialTheme.colorScheme.primaryContainer
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                    .clickable { selected = if (selected == m.id) null else m.id }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Checkbox(
+                                    checked = selected == m.id,
+                                    onCheckedChange = { selected = if (it) m.id else null },
+                                )
+                                Text(m.name, fontSize = 13.sp)
+                            }
+                        }
+                    }
                     Spacer(Modifier.height(20.dp))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(
@@ -295,14 +384,14 @@ private fun KnotConfirm(
                             shape = RoundedCornerShape(10.dp),
                         ) { Text(cancelText) }
                         Button(
-                            onClick = onOk,
+                            onClick = { onOk(selected) },
                             modifier = Modifier.weight(1f).height(42.dp),
                             shape = RoundedCornerShape(10.dp),
                             colors = if (danger) ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFFFDEEF0),
                                 contentColor = Color(0xFFD94559),
                             ) else ButtonDefaults.buttonColors(),
-                        ) { Text(okText) }
+                        ) { Text(if (selected != null) t0("transfer_leave") else okText) }
                     }
                 }
             }
@@ -310,7 +399,64 @@ private fun KnotConfirm(
     }
 }
 
+/** KnotConfirm 内部使用的文案辅助（避免在非参数位置捕获 t）。 */
+private fun t0(key: String): String = com.knotyup.android.ui.Strings.t(com.knotyup.android.ui.Strings.currentLang, key)
+
 // —— UI 组件 ————————————————————————————
+
+/** 选主与重连：群主意外离开或主动转让。 */
+private fun handleOwnerLost(
+    t: (String) -> String,
+    scope: kotlinx.coroutines.CoroutineScope,
+    explicit: DeviceInfo?,
+) {
+    val s = AppState.session.value
+    val candidates = explicit?.let { listOf(it) } ?: s.members.drop(1) // [0] 是旧群主
+    android.util.Log.d("KnotYup", "owner lost: explicit=${explicit?.name}, candidates=${candidates.map { "${it.name}@${it.addr}" }}")
+    if (candidates.isEmpty()) {
+        AppState.reset()
+        AppState.toast(t("group_lost"))
+        return
+    }
+    if (candidates[0].id == AppState.device.id) {
+        // 当选：用预留端口承接为群主
+        val port = AppState.standby?.localPort ?: AppState.reservePort()
+        AppState.becomeOwner(s.pin, port)
+        AppState.toast(t("promoted"))
+    } else {
+        // 其余成员：依次尝试候选地址重连
+        AppState.toast(t("reconnecting"))
+        val pin_ = s.pin
+        scope.launch {
+            for (attempt in 0 until 10) {
+                for (c in candidates) {
+                    if (c.id == AppState.device.id || c.addr.isNullOrBlank()) continue
+                    var connected = false
+                    android.util.Log.d("KnotYup", "reconnect attempt=$attempt -> ${c.name}@${c.addr}")
+                    try {
+                        AppState.client.join(c.addr, pin_, AppState.deviceWithStandbyAddr()).collect { res ->
+                            res.fold({ ev ->
+                                if (ev is GroupEvent.Members && !connected) {
+                                    connected = true
+                                    AppState.toast(t("reconnected"))
+                                }
+                                AppState.emit(ev)
+                            }, { e ->
+                                android.util.Log.w("KnotYup", "reconnect failed: ${e.message}")
+                            })
+                        }
+                    } catch (_: Exception) {
+                    }
+                    if (connected) return@launch // 正常入群；若再次断开，Disconnected 事件会重新触发选主
+                    kotlinx.coroutines.delay(500)
+                }
+                kotlinx.coroutines.delay(1500)
+            }
+            AppState.reset()
+            AppState.toast(t("group_lost"))
+        }
+    }
+}
 
 @Composable
 private fun Header(onTheme: (String) -> Unit, onLang: (String) -> Unit, lang: String) {
@@ -355,12 +501,29 @@ private fun JoinBody(
     discovered: List<GroupAd>,
     addr: String, pin: String, joining: Boolean,
     onAddr: (String) -> Unit, onPin: (String) -> Unit,
-    onPick: (GroupAd) -> Unit, onJoin: () -> Unit,
+    onPick: (GroupAd) -> Unit, onJoin: () -> Unit, onCreate: () -> Unit,
 ) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.Center,
     ) {
+        // 创建群卡片
+        Card(
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            modifier = Modifier.fillMaxWidth().padding(bottom = 14.dp),
+        ) {
+            Column(Modifier.padding(20.dp)) {
+                Text(t("create_group"), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text(t("create_desc"), fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(14.dp))
+                Button(
+                    onClick = onCreate,
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(10.dp),
+                ) { Text(t("btn_create")) }
+            }
+        }
         Text(t("tagline"), fontSize = 26.sp, fontWeight = FontWeight.Bold)
         Text(t("tagline_sub"), fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(28.dp))
@@ -441,6 +604,10 @@ private fun GroupBody(
     members: List<DeviceInfo>,
     history: List<HistoryItem>,
     sendText: String,
+    role: String,
+    groupAddr: String,
+    groupPin: String,
+    onKick: (String) -> Unit,
     onCopy: (String) -> Unit,
     onSendText: (String) -> Unit,
     onSend: () -> Unit,
@@ -457,6 +624,26 @@ private fun GroupBody(
             Spacer(Modifier.height(12.dp))
         }
         item {
+            // 群主信息卡
+            if (role == "owner") {
+                Column(
+                    Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                ) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(t("group_addr"), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(groupAddr, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(t("group_pin"), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(groupPin, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
             Text(t("devices"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             Spacer(Modifier.height(6.dp))
             members.forEachIndexed { i, m ->
@@ -498,6 +685,11 @@ private fun GroupBody(
                             }
                         }
                         Text(m.platform, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (role == "owner" && !self) {
+                        TextButton(onClick = { onKick(m.id) }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
+                            Text(t("kick"), fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
+                        }
                     }
                 }
             }
@@ -555,7 +747,7 @@ private fun GroupBody(
                 onClick = onLeave,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(10.dp),
-            ) { Text(t("leave")) }
+            ) { Text(t(if (role == "owner") "dissolve" else "leave")) }
         }
     }
 }
