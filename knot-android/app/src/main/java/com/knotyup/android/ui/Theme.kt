@@ -18,6 +18,7 @@ val THEMES = listOf(
     "rose" to Color(0xFFF43F5E),
     "pink" to Color(0xFFEC4899),
     "violet" to Color(0xFF8B5CF6),
+    "blackgold" to Color(0xFFC9A227),
 )
 
 private fun scheme(accent: Color, dark: Boolean): ColorScheme {
@@ -25,8 +26,10 @@ private fun scheme(accent: Color, dark: Boolean): ColorScheme {
     return if (dark) darkColorScheme(
         primary = accent,
         primaryContainer = soft,
-        surface = Color(0xFF16181D),
-        background = Color(0xFF101216),
+        surface = Color(0xFF171A20),
+        background = Color(0xFF0F1115),
+        surfaceVariant = Color(0xFF1D2129),
+        outlineVariant = Color(0xFF272C36),
     ) else lightColorScheme(
         primary = accent,
         primaryContainer = soft,

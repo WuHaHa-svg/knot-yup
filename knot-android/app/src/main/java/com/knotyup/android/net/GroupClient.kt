@@ -24,11 +24,17 @@ class GroupClient(
 ) {
     private var ws: WebSocket? = null
     private var cipher: KnotCipher? = null
+
+    /** 主动退出标志：置位后不再向上抛连接断开/错误事件 */
+    @Volatile
+    private var intentionalClose = false
+
     var localDevice: DeviceInfo? = null
         private set
 
     /** 连接并加入群。返回事件流；流的取消（collect 结束）即断开。 */
     fun join(addr: String, pin: String, device: DeviceInfo): Flow<Result<GroupEvent>> = callbackFlow {
+        intentionalClose = false
         localDevice = device
         cipher = KnotCipher(pin)
         val url = if (addr.startsWith("ws://")) addr else "ws://$addr"
@@ -66,12 +72,12 @@ class GroupClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                trySend(Result.failure(t))
+                if (!intentionalClose) trySend(Result.failure(t))
                 close()
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                trySend(Result.success(GroupEvent.Disconnected))
+                if (!intentionalClose) trySend(Result.success(GroupEvent.Disconnected))
                 close()
             }
         })
@@ -93,6 +99,7 @@ class GroupClient(
     }
 
     fun leave() {
+        intentionalClose = true
         ws?.cancel()
         ws = null
     }

@@ -122,10 +122,43 @@ async fn forward_core_events(
     loop {
         match rx.recv().await {
             Ok(CoreEvent::Members(members)) => {
-                if let Some(s) = state.session.lock().await.as_mut() {
-                    s.members = members.clone();
-                }
+                let own_id = state
+                    .device
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|d| d.id.clone())
+                    .unwrap_or_default();
+                let (prev, had_session) = {
+                    let mut guard = state.session.lock().await;
+                    match guard.as_mut() {
+                        Some(s) => (std::mem::replace(&mut s.members, members.clone()), true),
+                        None => (Vec::new(), false),
+                    }
+                };
                 let _ = app.emit("knot://members", &members);
+                // 成员差量 → 加入/离开通知（首次同步与自身变化不提示）
+                if had_session && !prev.is_empty() {
+                    use std::collections::HashSet;
+                    let prev_ids: HashSet<String> = prev.iter().map(|d| d.id.clone()).collect();
+                    let new_ids: HashSet<String> = members.iter().map(|d| d.id.clone()).collect();
+                    for d in &members {
+                        if !prev_ids.contains(&d.id) && d.id != own_id {
+                            let _ = app.emit(
+                                "knot://member-change",
+                                serde_json::json!({ "type": "joined", "name": d.name }),
+                            );
+                        }
+                    }
+                    for d in &prev {
+                        if !new_ids.contains(&d.id) && d.id != own_id {
+                            let _ = app.emit(
+                                "knot://member-change",
+                                serde_json::json!({ "type": "left", "name": d.name }),
+                            );
+                        }
+                    }
+                }
             }
             Ok(CoreEvent::Clipboard { from, payload }) => {
                 // 防回环：成员把同步内容当作本机复制再发回来时，指纹相同，直接忽略

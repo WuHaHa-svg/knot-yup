@@ -116,7 +116,7 @@
         <ul id="memberList" class="member-list"></ul>
 
         <div class="group-info" id="groupInfo"></div>
-        <button class="btn danger" id="btnLeave" data-i18n="leave"></button>
+        <button class="btn danger" id="btnLeave"></button>
       </aside>
 
       <section class="panel clip-panel">
@@ -133,6 +133,18 @@
 
     <!-- Toast -->
     <div id="toast" class="toast"></div>
+
+    <!-- 确认弹窗 -->
+    <div id="confirmModal" class="modal-overlay hidden">
+      <div class="modal">
+        <h3 id="confirmTitle"></h3>
+        <p id="confirmMsg"></p>
+        <div class="modal-actions">
+          <button class="btn" id="confirmCancel"></button>
+          <button class="btn danger" id="confirmOk"></button>
+        </div>
+      </div>
+    </div>
   </div>
   <script src="i18n.js"></script>
   <script src="app.js"></script>

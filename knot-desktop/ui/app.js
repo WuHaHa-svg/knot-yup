@@ -17,6 +17,7 @@ const THEMES = [
   { id: 'rose',    color: '#f43f5e' },
   { id: 'pink',    color: '#ec4899' },
   { id: 'violet',  color: '#8b5cf6' },
+  { id: 'blackgold', color: '#c9a227' },
 ];
 
 function applyTheme(id) {
@@ -65,6 +66,29 @@ const PLATFORM_LABEL = () => ({
   linux: { 'zh-Hans': 'Linux', 'zh-Hant': 'Linux', en: 'Linux' },
 });
 
+// ── 确认弹窗（Promise 化） ────────────────
+
+function showConfirm(title, msg, okText, cancelText) {
+  return new Promise((resolve) => {
+    const modal = $('confirmModal');
+    $('confirmTitle').textContent = title;
+    $('confirmMsg').textContent = msg;
+    $('confirmOk').textContent = okText;
+    $('confirmCancel').textContent = cancelText;
+    modal.classList.remove('hidden');
+    const close = (val) => {
+      modal.classList.add('hidden');
+      $('confirmOk').onclick = $('confirmCancel').onclick = modal.onclick = null;
+      resolve(val);
+    };
+    $('confirmOk').onclick = () => close(true);
+    $('confirmCancel').onclick = () => close(false);
+    modal.onclick = (e) => {
+      if (e.target === modal) close(false);
+    };
+  });
+}
+
 function toast(msg) {
   // 后端错误码 → 本地化文案；未知内容原样展示
   const codeMap = {
@@ -103,6 +127,8 @@ function renderSession() {
   if (s) {
     chip.classList.add('online');
     $('statusText').textContent = t(s.role === 'owner' ? 'status_owner' : 'status_member');
+    // 群主显示「解散群」，成员显示「退出群」
+    $('btnLeave').textContent = t(s.role === 'owner' ? 'dissolve' : 'leave');
     renderMembers();
     renderGroupInfo();
   } else {
@@ -140,8 +166,15 @@ function renderMembers() {
 
   list.querySelectorAll('.kick').forEach((btn) => {
     btn.onclick = async () => {
+      const id = btn.dataset.id;
+      const m = s.members.find((x) => x.id === id);
+      const name = m ? m.name : id.slice(0, 6);
+      const ok = await showConfirm(
+        t('kick'), t('confirm_kick_msg', { name }), t('confirm_ok'), t('confirm_cancel')
+      );
+      if (!ok) return;
       try {
-        await invoke('kick_device', { deviceId: btn.dataset.id });
+        await invoke('kick_device', { deviceId: id });
       } catch (e) {
         toast(String(e));
       }
@@ -270,6 +303,13 @@ $('inputPin').addEventListener('keydown', (e) => e.key === 'Enter' && $('btnJoin
 $('inputAddr').addEventListener('keydown', (e) => e.key === 'Enter' && $('btnJoin').click());
 
 $('btnLeave').onclick = async () => {
+  const isOwner = state.session && state.session.role === 'owner';
+  const ok = await showConfirm(
+    isOwner ? t('dissolve') : t('leave'),
+    isOwner ? t('confirm_dissolve_msg') : t('confirm_leave_msg'),
+    t('confirm_ok'), t('confirm_cancel')
+  );
+  if (!ok) return;
   try {
     await invoke('leave_group', {});
     toast(t('left'));
@@ -315,14 +355,17 @@ async function main() {
     clipItems = [{ from: e.payload.from, text: e.payload.text || '', at_ms: Date.now() }, ...clipItems].slice(0, 50);
     renderClipboard();
   });
-  await listen('knot://kicked', () => {
-    toast(t('kicked'));
+  await listen('knot://kicked', (e) => {
+    toast(e.payload === 'GROUP_DISSOLVED' ? t('group_dissolved') : t('kicked'));
     state.session = null;
     clipItems = [];
     renderSession();
     renderClipboard();
   });
   await listen('knot://error', (e) => toast(e.payload));
+  await listen('knot://member-change', (e) => {
+    toast(t(e.payload.type === 'joined' ? 'member_joined' : 'member_left', { name: e.payload.name }));
+  });
   await listen('knot://discovered', (e) => {
     state.discovered = e.payload;
     renderDiscovered();

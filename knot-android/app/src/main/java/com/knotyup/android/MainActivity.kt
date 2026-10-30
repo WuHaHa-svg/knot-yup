@@ -20,6 +20,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -38,6 +39,7 @@ import com.knotyup.android.data.HistoryItem
 import com.knotyup.android.ui.KnotYupTheme
 import com.knotyup.android.ui.Strings
 import com.knotyup.android.ui.THEMES
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -63,6 +65,12 @@ class MainActivity : ComponentActivity() {
             val t = { key: String -> Strings.t(lang, key) }
 
             KnotYupTheme(themeId) {
+                // 状态栏图标颜色随系统明暗
+                val dark = androidx.compose.foundation.isSystemInDarkTheme()
+                androidx.compose.runtime.SideEffect {
+                    androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+                        .isAppearanceLightStatusBars = !dark
+                }
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     App(t, lang = lang,
                         onTheme = { themeId = it; AppState.saveTheme(context, it) },
@@ -91,6 +99,7 @@ private fun App(
     var pin by remember { mutableStateOf("") }
     var joining by remember { mutableStateOf(false) }
     var sendText by remember { mutableStateOf(sharedText ?: "") }
+    var confirmLeave by remember { mutableStateOf(false) }
     // 剪贴板指纹闸门[0]：最近一次同步的内容指纹（收/发都记录），防止「写入被当成本机复制」回环
     val clipGuard = remember { arrayOf("") }
 
@@ -98,7 +107,19 @@ private fun App(
     LaunchedEffect(Unit) {
         AppState.events.collect { event ->
             when (event) {
-                is GroupEvent.Members -> AppState.applyEvent(event)
+                is GroupEvent.Members -> {
+                    // 成员差量 → 加入/离开提示（首次同步与自身变化不提示）
+                    val prev = AppState.session.value.members
+                    if (prev.isNotEmpty()) {
+                        val prevIds = prev.map { it.id }.toSet()
+                        val newIds = event.members.map { it.id }.toSet()
+                        event.members.filter { it.id !in prevIds && it.id != AppState.device.id }
+                            .forEach { AppState.toast(t("member_joined").replace("{name}", it.name)) }
+                        prev.filter { it.id !in newIds && it.id != AppState.device.id }
+                            .forEach { AppState.toast(t("member_left").replace("{name}", it.name)) }
+                    }
+                    AppState.applyEvent(event)
+                }
                 is GroupEvent.Clipboard -> {
                     clipGuard[0] = event.payload.hash
                     AppState.applyEvent(event)
@@ -106,7 +127,7 @@ private fun App(
                 }
                 is GroupEvent.Kicked -> {
                     AppState.reset()
-                    AppState.toast(t("kicked"))
+                    AppState.toast(if (event.reason == "GROUP_DISSOLVED") t("group_dissolved") else t("kicked"))
                 }
                 GroupEvent.Disconnected -> {
                     AppState.reset()
@@ -117,9 +138,14 @@ private fun App(
         }
     }
 
-    // 发现监听（未入群时）
-    LaunchedEffect(session.joined) {
-        if (!session.joined) Discovery.listen().collect { discovered = it }
+    // 发现监听：仅在首页（未入群）且页面处于 RESUMED 时扫描，离开即停
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    LaunchedEffect(session.joined, lifecycleOwner) {
+        if (!session.joined) {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
+                Discovery.listen(context).collect { discovered = it }
+            }
+        }
     }
 
     // 前台剪贴板监听：本机复制 → 发送到群
@@ -157,6 +183,12 @@ private fun App(
             Header(onTheme, onLang, lang)
             if (session.joined) {
                 GroupBody(t, session.members, history, sendText,
+                    onCopy = { text ->
+                        // 点击历史复制：先同步指纹闸门，避免被监听器当作本机复制再发回群
+                        clipGuard[0] = textHash(text)
+                        ClipboardCapability.setText(context, text)
+                        AppState.toast(t("copied"))
+                    },
                     onSendText = { sendText = it },
                     onSend = {
                         if (sendText.isNotBlank() && AppState.client.sendClipboard(sendText)) {
@@ -165,10 +197,7 @@ private fun App(
                             sendText = ""
                         }
                     },
-                    onLeave = {
-                        AppState.reset()
-                        AppState.toast(t("left"))
-                    })
+                    onLeave = { confirmLeave = true })
             } else {
                 JoinBody(t, discovered, addr, pin, joining,
                     onAddr = { addr = it }, onPin = { pin = it },
@@ -213,6 +242,69 @@ private fun App(
                     .padding(horizontal = 20.dp, vertical = 12.dp)
             ) {
                 Text(msg, color = Color.White, fontSize = 13.sp)
+            }
+        }
+
+        // 退出群二次确认（自绘弹窗，风格与桌面端一致）
+        if (confirmLeave) {
+            KnotConfirm(
+                title = t("confirm_leave_title"),
+                message = t("confirm_leave_msg"),
+                okText = t("confirm_ok"),
+                cancelText = t("confirm_cancel"),
+                onOk = {
+                    confirmLeave = false
+                    AppState.reset()
+                    AppState.toast(t("left"))
+                },
+                onCancel = { confirmLeave = false },
+            )
+        }
+    }
+}
+
+/** 桌面端同款确认弹窗：半透明遮罩 + 白卡 + 主操作/危险操作按钮。 */
+@Composable
+private fun KnotConfirm(
+    title: String,
+    message: String,
+    okText: String,
+    cancelText: String,
+    danger: Boolean = true,
+    onOk: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Box(Modifier.fillMaxSize()) {
+        // 遮罩
+        Box(Modifier.fillMaxSize().background(Color(0x52101216)))
+        Box(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 24.dp,
+            ) {
+                Column(Modifier.padding(24.dp)) {
+                    Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(8.dp))
+                    Text(message, fontSize = 13.5.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, lineHeight = 20.sp)
+                    Spacer(Modifier.height(20.dp))
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = onCancel,
+                            modifier = Modifier.weight(1f).height(42.dp),
+                            shape = RoundedCornerShape(10.dp),
+                        ) { Text(cancelText) }
+                        Button(
+                            onClick = onOk,
+                            modifier = Modifier.weight(1f).height(42.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = if (danger) ButtonDefaults.buttonColors(
+                                containerColor = Color(0xFFFDEEF0),
+                                contentColor = Color(0xFFD94559),
+                            ) else ButtonDefaults.buttonColors(),
+                        ) { Text(okText) }
+                    }
+                }
             }
         }
     }
@@ -295,8 +387,9 @@ private fun JoinBody(
                             Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp)
+                                .clip(RoundedCornerShape(10.dp))
                                 .clickable { onPick(g) }
-                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant)
                                 .padding(horizontal = 10.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -348,11 +441,11 @@ private fun GroupBody(
     members: List<DeviceInfo>,
     history: List<HistoryItem>,
     sendText: String,
+    onCopy: (String) -> Unit,
     onSendText: (String) -> Unit,
     onSend: () -> Unit,
     onLeave: () -> Unit,
 ) {
-    val context = LocalContext.current
     val shizuku = remember { ClipboardCapability.isShizukuActive() && ClipboardCapability.isShizukuPermissionGranted() }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 24.dp)) {
         item {
@@ -370,7 +463,8 @@ private fun GroupBody(
                 val self = m.id == AppState.device.id
                 Row(
                     Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                        .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surface)
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -426,11 +520,9 @@ private fun GroupBody(
             items(history) { item ->
                 Column(
                     Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                        .clickable {
-                            ClipboardCapability.setText(context, item.text)
-                            AppState.toast(t("copied"))
-                        }
-                        .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable { onCopy(item.text) }
+                        .background(MaterialTheme.colorScheme.surface)
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                 ) {
                     val name = members.firstOrNull { it.id == item.from }?.name

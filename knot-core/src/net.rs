@@ -232,8 +232,18 @@ impl GroupServer {
         self.broadcast_members().await;
     }
 
-    /// 关闭服务端（断开全部成员）。
+    /// 关闭服务端（群解散）：通知全部成员后断开。
     pub async fn shutdown(&self) {
+        {
+            let map = self.members.read().await;
+            let text = serde_json::to_string(
+                &Message::Kick { reason: Some("GROUP_DISSOLVED".into()) }.seal(&self.cipher),
+            )
+            .unwrap();
+            for (_, (_, tx)) in map.iter() {
+                tx.try_send(WsMessage::Text(text.clone())).ok();
+            }
+        }
         self.members.write().await.clear();
         self.shutdown.try_send(WsMessage::Close(None)).ok();
     }

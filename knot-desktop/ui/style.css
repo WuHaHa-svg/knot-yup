@@ -66,7 +66,7 @@ body {
   background: var(--text-3);
   transition: background .4s;
 }
-.status-chip.online { color: var(--ok); border-color: #d9f0e5; }
+.status-chip.online { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 30%, transparent); }
 .status-chip.online .dot { background: var(--ok); animation: breathe 2.4s infinite; }
 @keyframes breathe {
   0%, 100% { box-shadow: 0 0 0 0 rgba(52, 169, 123, .35); }
@@ -286,6 +286,31 @@ body {
   border: 2px solid var(--accent); border-radius: 50%;
 }
 
+/* ── 确认弹窗 ──────────────────────── */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(16, 18, 22, .32);
+  backdrop-filter: blur(4px);
+  display: grid; place-items: center;
+  animation: fadeIn .25s var(--ease);
+}
+.modal-overlay.hidden { display: none; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  width: 340px; padding: 24px;
+  background: var(--surface); border-radius: var(--radius);
+  box-shadow: 0 24px 60px rgba(16, 24, 40, .22);
+  animation: modalIn .32s var(--ease);
+}
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(14px) scale(.97); }
+  to { opacity: 1; transform: none; }
+}
+.modal h3 { font-size: 16px; font-weight: 650; margin-bottom: 8px; }
+.modal p { font-size: 13.5px; color: var(--text-2); line-height: 1.6; }
+.modal-actions { display: flex; gap: 10px; margin-top: 20px; }
+.modal-actions .btn { flex: 1; }
+
 /* 语言切换 */
 .topbar-right { display: flex; align-items: center; gap: 10px; }
 .lang-btn {
@@ -336,6 +361,6 @@ body {
 
 /* 滚动条 */
 ::-webkit-scrollbar { width: 6px; }
-::-webkit-scrollbar-thumb { background: #d9dce2; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #c4c8d0; }
+::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text-3) 45%, transparent); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-3) 70%, transparent); }
 ::-webkit-scrollbar-track { background: transparent; }
