@@ -162,7 +162,8 @@ private fun App(
                         when (e.message) {
                             "WRONG_PIN" -> t("wrong_pin")
                             else -> "${t("join_failed")}\n${e.message ?: ""}"
-                        }
+                        },
+                        kind = 2,
                     )
                     joining = false
                 })
@@ -196,7 +197,7 @@ private fun App(
                 }
                 is GroupEvent.Kicked -> {
                     AppState.reset()
-                    AppState.toast(if (event.reason == "GROUP_DISSOLVED") t("group_dissolved") else t("kicked"))
+                    AppState.toast(if (event.reason == "GROUP_DISSOLVED") t("group_dissolved") else t("kicked"), 2)
                 }
                 is GroupEvent.OwnerChange -> handleOwnerLost(t, scope, event.newOwner)
                 GroupEvent.Disconnected -> handleOwnerLost(t, scope, null)
@@ -207,7 +208,7 @@ private fun App(
                     if (s.joined && s.role == "member") {
                         handleOwnerLost(t, scope, null)
                     } else {
-                        AppState.toast(event.message)
+                        AppState.toast(event.message, 2)
                     }
                 }
             }
@@ -255,10 +256,18 @@ private fun App(
         }
     }
 
-    // toast 自动消失
+    // Sonner 轻提示：toast 请求 → 顶部弹出（独立窗口层，不被弹窗遮罩挡住）
+    val toaster = com.dokar.sonner.rememberToasterState()
     LaunchedEffect(toastMsg) {
-        if (toastMsg != null) {
-            delay(2200)
+        toastMsg?.let { req ->
+            toaster.show(
+                message = req.msg,
+                type = when (req.kind) {
+                    1 -> com.dokar.sonner.ToastType.Success
+                    2 -> com.dokar.sonner.ToastType.Error
+                    else -> com.dokar.sonner.ToastType.Normal
+                },
+            )
             AppState.clearToast()
         }
     }
@@ -284,7 +293,7 @@ private fun App(
                         // 点击历史复制：先同步指纹闸门，避免被监听器当作本机复制再发回群
                         clipGuard[0] = textHash(text)
                         ClipboardCapability.setText(context, text)
-                        AppState.toast(t("copied"))
+                        AppState.toast(t("copied"), 1)
                     },
                     onSendText = { sendText = it },
                     onSend = {
@@ -297,7 +306,7 @@ private fun App(
                             }
                             if (sent) {
                                 AppState.addLocalHistory(sendText)
-                                AppState.toast(t("sent"))
+                                AppState.toast(t("sent"), 1)
                                 sendText = ""
                             }
                         }
@@ -312,14 +321,19 @@ private fun App(
                     onAddr = { addr = it }, onPin = { pin = it },
                     onPickGroup = { pinDialogFor = it },
                     onCreate = {
+                        // 功能全量依赖局域网：无局域网 IPv4 时提示并阻止建群
+                        if (Discovery.localIpAddress() == null) {
+                            AppState.toast(t("no_lan"), 2)
+                            return@HomeBody
+                        }
                         val port = AppState.reservePort()
                         val pin2 = java.security.SecureRandom().nextInt(900_000) + 100_000
                         AppState.becomeOwner(pin2.toString(), port)
-                        AppState.toast(t("group_created").replace("{pin}", pin2.toString()))
+                        AppState.toast(t("group_created").replace("{pin}", pin2.toString()), 1)
                     },
                     onJoin = {
                         if (addr.isBlank() || pin.isBlank()) {
-                            AppState.toast(t("fill_addr_pin"))
+                            AppState.toast(t("fill_addr_pin"), 2)
                         } else {
                             startJoin(addr, pin)
                         }
@@ -329,18 +343,15 @@ private fun App(
             }
         }
 
-        // Toast
-        toastMsg?.let { msg ->
-            Box(
-                Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 28.dp)
-                    .background(Color(0xE61D2129), RoundedCornerShape(14.dp))
-                    .padding(horizontal = 20.dp, vertical = 12.dp)
-            ) {
-                Text(msg, color = Color.White, fontSize = 13.sp)
-            }
-        }
+        // Sonner 顶部轻提示（独立于内容层的弹出队列）：显式 TopCenter + 顶部留出刘海安全距离
+        com.dokar.sonner.Toaster(
+            state = toaster,
+            alignment = Alignment.TopCenter,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .windowInsetsPadding(androidx.compose.foundation.layout.WindowInsets.displayCutout)
+                .padding(top = 10.dp),
+        )
 
         // 退出群二次确认（自绘弹窗，风格与桌面端一致）
         if (confirmLeave) {
@@ -409,6 +420,36 @@ private fun App(
             )
         }
 
+        // 加入群 Loading
+        if (joining) {
+            Box(Modifier.fillMaxSize()) {
+                Box(Modifier.fillMaxSize().background(Color(0x52101216)))
+                DialogCard(Modifier.align(Alignment.Center)) {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        shadowElevation = 0.dp,
+                    ) {
+                        Column(
+                            Modifier.padding(horizontal = 32.dp, vertical = 26.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(30.dp),
+                                strokeWidth = 3.dp,
+                            )
+                            Spacer(Modifier.height(16.dp))
+                            Text(
+                                t("joining"), fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // 扫码加群（全屏）
         if (showScanner) {            ScannerScreen(
                 t = t,
@@ -435,11 +476,11 @@ private fun QrDialog(t: (String) -> String, addr: String, pin: String, onClose: 
     androidx.activity.compose.BackHandler { onClose() }
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().background(Color(0x52101216)).clickable(enabled = false) {})
-        Box(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
+        DialogCard(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 24.dp,
+                shadowElevation = 0.dp,
                 onClick = onClose,
             ) {
                 Column(
@@ -746,6 +787,27 @@ private fun SplashScreen(onFinish: () -> Unit) {
 }
 
 
+/** 弹窗卡片入场动画：官方 AnimatedVisibility（scaleIn + fadeIn），阴影原生合成。 */
+@Composable
+private fun DialogCard(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    val visibleState = remember {
+        androidx.compose.animation.core.MutableTransitionState(false).apply { targetState = true }
+    }
+    androidx.compose.animation.AnimatedVisibility(
+        visibleState = visibleState,
+        modifier = modifier,
+        enter = androidx.compose.animation.scaleIn(
+            animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.88f, stiffness = 380f),
+            initialScale = 0.82f,
+        ) + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)),
+    ) {
+        content()
+    }
+}
+
 /** 桌面端同款确认弹窗：半透明遮罩 + 白卡 + 主操作/危险操作按钮。可选成员勾选（群主转让）。 */
 @Composable
 private fun KnotConfirm(
@@ -762,11 +824,11 @@ private fun KnotConfirm(
     Box(Modifier.fillMaxSize()) {
         // 遮罩
         Box(Modifier.fillMaxSize().background(Color(0x52101216)))
-        Box(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
+        DialogCard(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 24.dp,
+                shadowElevation = 0.dp,
             ) {
                 Column(Modifier.padding(24.dp)) {
                     Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
@@ -838,14 +900,14 @@ private fun handleOwnerLost(
     android.util.Log.d("KnotYup", "owner lost: explicit=${explicit?.name}, candidates=${candidates.map { "${it.name}@${it.addr}" }}")
     if (candidates.isEmpty()) {
         AppState.reset()
-        AppState.toast(t("group_lost"))
+        AppState.toast(t("group_lost"), 2)
         return
     }
     if (candidates[0].id == AppState.device.id) {
         // 当选：用预留端口承接为群主
         val port = AppState.standby?.localPort ?: AppState.reservePort()
         AppState.becomeOwner(s.pin, port)
-        AppState.toast(t("promoted"))
+        AppState.toast(t("promoted"), 1)
     } else {
         // 其余成员：依次尝试候选地址重连
         AppState.toast(t("reconnecting"))
@@ -861,7 +923,7 @@ private fun handleOwnerLost(
                             res.fold({ ev ->
                                 if (ev is GroupEvent.Members && !connected) {
                                     connected = true
-                                    AppState.toast(t("reconnected"))
+                                    AppState.toast(t("reconnected"), 1)
                                 }
                                 AppState.emit(ev)
                             }, { e ->
@@ -876,7 +938,7 @@ private fun handleOwnerLost(
                 kotlinx.coroutines.delay(1500)
             }
             AppState.reset()
-            AppState.toast(t("group_lost"))
+            AppState.toast(t("group_lost"), 2)
         }
     }
 }
@@ -946,7 +1008,7 @@ private fun Header(
                 shape = RoundedCornerShape(14.dp),
                 containerColor = MaterialTheme.colorScheme.surface,
                 tonalElevation = 0.dp,
-                shadowElevation = 12.dp,
+                shadowElevation = 0.dp,
             ) {
                 // 4×2 色板网格，当前主题带描边圈标识（对齐桌面端 .swatch.active）
                 Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
@@ -998,7 +1060,7 @@ private fun Header(
                 shape = RoundedCornerShape(14.dp),
                 containerColor = MaterialTheme.colorScheme.surface,
                 tonalElevation = 0.dp,
-                shadowElevation = 12.dp,
+                shadowElevation = 0.dp,
             ) {
                 Strings.langs.forEach { l ->
                     val active = l == lang
@@ -1038,41 +1100,29 @@ private fun HeaderIconBtn(onClick: () -> Unit, content: @Composable () -> Unit) 
     }
 }
 
-/** 挂载动画：上浮（弹性 spring）+ 淡入，交错紧密、连贯柔和；key() 重新进入组合即重播。 */
+/** 挂载入场动画：官方 AnimatedVisibility（fade + slide），阴影由框架原生合成、无闪烁。 */
 @Composable
-fun Modifier.riseIn(delayMillis: Int = 0): Modifier {
-    val alpha = remember { androidx.compose.animation.core.Animatable(0f) }
-    val offset = remember { androidx.compose.animation.core.Animatable(30f) }
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        kotlinx.coroutines.coroutineScope {
-            launch {
-                kotlinx.coroutines.delay(delayMillis.toLong())
-                // 缓入淡入，与位移时长相近，避免"先亮后动"的割裂感
-                alpha.animateTo(
-                    1f,
-                    androidx.compose.animation.core.tween(520, easing = androidx.compose.animation.core.CubicBezierEasing(.35f, 0f, .25f, 1f)),
-                )
-            }
-            launch {
-                kotlinx.coroutines.delay(delayMillis.toLong())
-                // 无过冲弹性：起步快、收尾柔，链条感强
-                offset.animateTo(
-                    0f,
-                    androidx.compose.animation.core.spring(
-                        dampingRatio = 0.9f,
-                        stiffness = 130f,
-                        visibilityThreshold = 0.1f,
-                    ),
-                )
-            }
-        }
+fun KnotEnter(
+    delayMillis: Int = 0,
+    slideDistance: Float = 0.22f, // 相对自身高度的位移比例
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    val visibleState = remember {
+        androidx.compose.animation.core.MutableTransitionState(false).apply { targetState = true }
     }
-    return this.then(
-        Modifier.graphicsLayer {
-            translationY = offset.value
-            this.alpha = alpha.value
-        }
-    )
+    androidx.compose.animation.AnimatedVisibility(
+        visibleState = visibleState,
+        modifier = modifier,
+        enter = androidx.compose.animation.fadeIn(
+            androidx.compose.animation.core.tween(420, delayMillis = delayMillis, easing = androidx.compose.animation.core.CubicBezierEasing(.35f, 0f, .25f, 1f)),
+        ) + androidx.compose.animation.slideInVertically(
+            animationSpec = androidx.compose.animation.core.tween(480, delayMillis = delayMillis, easing = androidx.compose.animation.core.CubicBezierEasing(.22f, 1f, .36f, 1f)),
+            initialOffsetY = { (it * slideDistance).toInt() },
+        ),
+    ) {
+        content()
+    }
 }
 
 /** 首页：Hero + 双卡片（对齐桌面端布局逻辑；窄屏上下、宽屏左右）。 */
@@ -1095,40 +1145,45 @@ private fun HomeBody(
         // Hero：主标题（第二段渐变）+ 副标题
         val accent = MaterialTheme.colorScheme.primary
         val accent2 = androidx.compose.ui.graphics.lerp(accent, Color(0xFFA855F7), 0.45f)
-        Text(
-            buildAnnotatedString {
-                withStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold, fontSize = 26.sp)) { append(t("tagline_1")) }
-                withStyle(
-                    androidx.compose.ui.text.SpanStyle(
-                        fontWeight = FontWeight.Bold, fontSize = 26.sp,
-                        brush = androidx.compose.ui.graphics.Brush.linearGradient(listOf(accent, accent2)),
-                    )
-                ) { append(t("tagline_2")) }
-            },
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            modifier = Modifier.riseIn(0),
-        )
+        KnotEnter(delayMillis = 0) {
+            Text(
+                buildAnnotatedString {
+                    withStyle(androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold, fontSize = 26.sp)) { append(t("tagline_1")) }
+                    withStyle(
+                        androidx.compose.ui.text.SpanStyle(
+                            fontWeight = FontWeight.Bold, fontSize = 26.sp,
+                            brush = androidx.compose.ui.graphics.Brush.linearGradient(listOf(accent, accent2)),
+                        )
+                    ) { append(t("tagline_2")) }
+                },
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
         Spacer(Modifier.height(6.dp))
-        Text(
-            t("tagline_sub"), fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            modifier = Modifier.riseIn(70),
-        )
+        KnotEnter(delayMillis = 70) {
+            Text(
+                t("tagline_sub"), fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
         Spacer(Modifier.height(24.dp))
 
         if (wide) {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 24.dp).riseIn(140),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                JoinCard(t, addr, pin, joining, Modifier.weight(1f), onAddr, onPin, onJoin, onCreate)
-                DiscoveredCard(t, discovered, Modifier.weight(1f), onPickGroup)
+            KnotEnter(delayMillis = 140, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    JoinCard(t, addr, pin, joining, Modifier.weight(1f), onAddr, onPin, onJoin, onCreate)
+                    DiscoveredCard(t, discovered, Modifier.weight(1f), onPickGroup)
+                }
             }
         } else {
-            JoinCard(t, addr, pin, joining, Modifier.fillMaxWidth().padding(horizontal = 24.dp).riseIn(140), onAddr, onPin, onJoin, onCreate)
+            KnotEnter(delayMillis = 140, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+                JoinCard(t, addr, pin, joining, Modifier.fillMaxWidth(), onAddr, onPin, onJoin, onCreate)
+            }
             Spacer(Modifier.height(16.dp))
-            DiscoveredCard(t, discovered, Modifier.fillMaxWidth().padding(horizontal = 24.dp).riseIn(210), onPickGroup)
+            KnotEnter(delayMillis = 210, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+                DiscoveredCard(t, discovered, Modifier.fillMaxWidth(), onPickGroup)
+            }
         }
     }
 }
@@ -1166,7 +1221,7 @@ private fun JoinCard(
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
-        shadowElevation = 2.dp,
+        shadowElevation = 0.dp,
         modifier = modifier,
     ) {
         Column(Modifier.padding(20.dp)) {
@@ -1228,7 +1283,7 @@ private fun DiscoveredCard(
     Surface(
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surface,
-        shadowElevation = 2.dp,
+        shadowElevation = 0.dp,
         modifier = modifier,
     ) {
         Column(Modifier.padding(20.dp)) {
@@ -1241,9 +1296,13 @@ private fun DiscoveredCard(
             if (discovered.isEmpty()) {
                 Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        // 空态图标不着色（灰色半透明，与桌面端一致）
                         Image(
                             painterResource(R.drawable.ic_devices), null,
-                            Modifier.size(28.dp).then(Modifier),
+                            Modifier.size(28.dp),
+                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                            ),
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
@@ -1304,18 +1363,26 @@ private fun PinDialog(
     var pinValue by remember { mutableStateOf("") }
     Box(Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().background(Color(0x52101216)).clickable(enabled = false) {})
-        Box(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
+        DialogCard(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 24.dp,
+                shadowElevation = 0.dp,
             ) {
                 Column(Modifier.padding(24.dp)) {
                     Text(t("join_group"), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(4.dp))
+                    // 群信息：两行裸文本（上行群名，下行 IP:端口），无容器包裹
                     Text(
-                        "${group.name} · ${group.addr}",
-                        fontSize = 13.sp,
+                        group.name,
+                        fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        group.addr,
+                        fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     )
@@ -1337,7 +1404,13 @@ private fun PinDialog(
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                         ) { Text(t("confirm_cancel"), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
                         Button(
-                            onClick = { if (pinValue.isNotBlank()) onJoin(pinValue.trim()) },
+                            onClick = {
+                                if (pinValue.isBlank()) {
+                                    AppState.toast(t("fill_pin"), 2)
+                                } else {
+                                    onJoin(pinValue.trim())
+                                }
+                            },
                             modifier = Modifier.weight(1f).heightIn(min = 42.dp),
                             shape = RoundedCornerShape(10.dp),
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
@@ -1392,15 +1465,20 @@ private fun GroupBody(
                 }
             }
         }
-        // 悬浮 Tab 栏：点击切换
-        GroupTabBar(
-            t = t,
-            page = pagerState.currentPage + pagerState.currentPageOffsetFraction,
-            onSelect = { i -> scope.launch { pagerState.animateScrollToPage(i) } },
+        // 悬浮 Tab 栏：点击切换；入场从底部升起（AnimatedVisibility 原生合成阴影）
+        KnotEnter(
+            delayMillis = 220,
+            slideDistance = 0.5f,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(horizontal = 24.dp, vertical = 18.dp),
-        )
+        ) {
+            GroupTabBar(
+                t = t,
+                page = pagerState.currentPage + pagerState.currentPageOffsetFraction,
+                onSelect = { i -> scope.launch { pagerState.animateScrollToPage(i) } },
+            )
+        }
     }
 }
 
@@ -1420,12 +1498,13 @@ private fun GroupTabBar(
 
     androidx.compose.foundation.layout.BoxWithConstraints(modifier) {
         val containerW = 248.dp
-        val segW = (containerW - 8.dp) / 2
+        val gap = 8.dp // item 间隔 = 容器内边距
+        val segW = (containerW - 8.dp - gap) / 2
 
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-            shadowElevation = 10.dp,
+            shadowElevation = 0.dp,
             border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
             modifier = Modifier.width(containerW),
         ) {
@@ -1436,12 +1515,12 @@ private fun GroupTabBar(
                         .align(Alignment.CenterStart)
                         .fillMaxHeight()
                         .width(segW)
-                        .graphicsLayer { translationX = pos * segW.toPx() }
+                        .graphicsLayer { translationX = pos * (segW + gap).toPx() }
                         .clip(RoundedCornerShape(12.dp))
                         .background(MaterialTheme.colorScheme.primaryContainer),
                 )
-                // tab items
-                Row(Modifier.fillMaxWidth()) {
+                // tab items（item 之间以容器内边距等宽的间隙隔开）
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items.forEachIndexed { i, (label, iconRes) ->
                         val active = pos > i - 0.5f && pos < i + 0.5f
                         val fg = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant

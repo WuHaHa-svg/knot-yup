@@ -74,6 +74,14 @@ fn local_ip() -> String {
         .unwrap_or_else(|_| "127.0.0.1".into())
 }
 
+/// 是否有可用的局域网 IPv4（功能全量依赖局域网，建群前检查）。
+fn has_lan() -> bool {
+    matches!(
+        local_ip_address::local_ip(),
+        Ok(ip) if !ip.is_loopback()
+    )
+}
+
 /// 启动剪贴板监视线程（轮询 + 去重）。
 /// 返回指令通道；本机内容变化通过 local_tx 抛给 async 侧。
 fn spawn_clipboard_watcher(local_tx: mpsc::Sender<ClipboardPayload>) -> mpsc::Sender<ClipCmd> {
@@ -348,6 +356,9 @@ async fn create_group(
 ) -> Result<serde_json::Value, String> {
     if state.session.lock().await.is_some() {
         return Err("ALREADY_IN_GROUP".into());
+    }
+    if !has_lan() {
+        return Err("NO_LAN".into());
     }
     let pin = pin.unwrap_or_else(gen_pin);
     let core_tx = state.core_tx.lock().await.clone().ok_or("core 未初始化")?;

@@ -116,23 +116,52 @@ function showConfirm(title, msg, okText, cancelText, members = null) {
   });
 }
 
-function toast(msg) {
+// ── 加入群 Loading ────────────────────────
+
+function showLoading() {
+  $('loadingText').textContent = t('joining');
+  $('loadingModal').classList.remove('hidden');
+}
+
+function hideLoading() {
+  $('loadingModal').classList.add('hidden');
+}
+
+function toast(msg, type = 'info') {
   // 后端错误码 → 本地化文案；未知内容原样展示
   const codeMap = {
     ALREADY_IN_GROUP: t('already_in_group'),
     OWNER_ONLY: t('owner_only'),
     WRONG_PIN: t('wrong_pin'),
+    NO_LAN: t('no_lan'),
     PROMOTED: t('promoted'),
     RECONNECTING: t('reconnecting'),
     RECONNECTED: t('reconnected'),
   };
   if (codeMap[msg]) msg = codeMap[msg];
   else if (/^连接失败|^Connection|^协议错误/.test(msg)) msg = t('join_failed');
-  const el = $('toast');
-  el.textContent = msg;
-  el.classList.add('show');
-  clearTimeout(el._t);
-  el._t = setTimeout(() => el.classList.remove('show'), 2200);
+  // Toastify 顶部居中提示（z-index 高于弹窗遮罩，不会被挡）
+  const colors = {
+    info: 'linear-gradient(135deg, #1d2129, #3a4049)',
+    success: 'linear-gradient(135deg, #34a97b, #2b8f68)',
+    error: 'linear-gradient(135deg, #d94559, #c23346)',
+  };
+  Toastify({
+    text: msg,
+    duration: 2200,
+    gravity: 'top',
+    position: 'center',
+    close: false,
+    style: {
+      background: colors[type] || colors.info,
+      borderRadius: '12px',
+      boxShadow: '0 10px 30px rgba(16, 24, 40, .28)',
+      fontSize: '13px',
+      fontWeight: '500',
+      padding: '10px 18px',
+      maxWidth: '70vw',
+    },
+  }).showToast();
 }
 
 function fmtTime(ms) {
@@ -215,7 +244,7 @@ function renderSharePop() {
     console.error('qr render failed', e);
   }
   pop.querySelectorAll('.share-copy').forEach((btn) => {
-    btn.onclick = () => navigator.clipboard.writeText(btn.dataset.copy).then(() => toast(t('copied')));
+    btn.onclick = () => navigator.clipboard.writeText(btn.dataset.copy).then(() => toast(t('copied'), 'success'));
   });
 }
 
@@ -289,7 +318,7 @@ function renderClipboard() {
     li.onclick = async () => {
       try {
         await invoke('copy_history_item', { index: i });
-        toast(t('copied_short'));
+        toast(t('copied_short'), 'success');
       } catch (e) {
         toast(String(e));
       }
@@ -345,10 +374,11 @@ function openPinDialog(group) {
   const modal = $('pinModal');
   const input = $('pinInput');
   $('pinTitle').textContent = t('join_group');
-  $('pinAddr').textContent = `${group.name} · ${group.addr}`;
+  $('pinName').textContent = group.name;
+  $('pinAddr').textContent = group.addr;
   input.value = '';
   modal.classList.remove('hidden');
-  input.focus();
+  setTimeout(() => input.focus(), 50);
   const close = () => {
     modal.classList.add('hidden');
     $('pinJoin').onclick = $('pinCancel').onclick = modal.onclick = null;
@@ -357,14 +387,15 @@ function openPinDialog(group) {
   $('pinCancel').textContent = t('confirm_cancel');
   const doJoin = async () => {
     const pin = input.value.trim();
-    if (!pin) return toast(t('fill_addr_pin'));
+    if (!pin) return toast(t('fill_addr_pin'), 'error');
     $('pinJoin').disabled = true;
+    close();
+    showLoading();
     try {
       await invoke('join_group', { addr: group.addr, pin });
-      close();
-      toast(t('joined'));
       await refresh();
     } catch (e) {
+      hideLoading();
       toast(String(e));
     } finally {
       $('pinJoin').disabled = false;
@@ -375,7 +406,9 @@ function openPinDialog(group) {
   modal.onclick = (e) => {
     if (e.target === modal) close();
   };
-  input.onkeydown = (e) => e.key === 'Enter' && doJoin();
+  input.onkeydown = (e) => {
+    if (e.key === 'Enter') doJoin();
+  };
 }
 
 // ── 动作 ─────────────────────────────────
@@ -384,7 +417,7 @@ $('btnCreate').onclick = async () => {
   $('btnCreate').disabled = true;
   try {
     const r = await invoke('create_group', {});
-    toast(t('group_created', { pin: r.pin }));
+    toast(t('group_created', { pin: r.pin }), 'success');
     await refresh();
   } catch (e) {
     toast(String(e));
@@ -396,13 +429,14 @@ $('btnCreate').onclick = async () => {
 $('btnJoin').onclick = async () => {
   const addr = $('inputAddr').value.trim();
   const pin = $('inputPin').value.trim();
-  if (!addr || !pin) return toast(t('fill_addr_pin'));
+  if (!addr || !pin) return toast(t('fill_addr_pin'), 'error');
   $('btnJoin').disabled = true;
+  showLoading();
   try {
     await invoke('join_group', { addr, pin });
-    toast(t('joined'));
     await refresh();
   } catch (e) {
+    hideLoading();
     toast(String(e));
   } finally {
     $('btnJoin').disabled = false;
@@ -518,6 +552,7 @@ async function main() {
   }, 1400);
 
   await listen('knot://members', (e) => {
+    hideLoading();
     if (state.session) {
       state.session.members = e.payload;
       renderMembers();
@@ -529,13 +564,14 @@ async function main() {
   });
   await listen('knot://kicked', (e) => {
     const p = e.payload;
-    toast(p === 'GROUP_DISSOLVED' ? t('group_dissolved') : p === 'GROUP_LOST' ? t('group_lost') : t('kicked'));
+    toast(p === 'GROUP_DISSOLVED' ? t('group_dissolved') : p === 'GROUP_LOST' ? t('group_lost') : t('kicked'), 'error');
+    hideLoading();
     state.session = null;
     clipItems = [];
     renderSession();
     renderClipboard();
   });
-  await listen('knot://error', (e) => toast(e.payload));
+  await listen('knot://error', (e) => toast(e.payload, 'error'));
   await listen('knot://toast', (e) => {
     toast(String(e.payload));
     // 升主/重连成功后会话已换新，需要刷新视图

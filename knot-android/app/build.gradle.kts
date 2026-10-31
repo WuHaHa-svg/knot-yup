@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.knotyup.android"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.knotyup.android"
@@ -16,9 +16,18 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("../knotyup.keystore")
+            storePassword = "knotyup2024"
+            keyAlias = "knotyup"
+            keyPassword = "knotyup2024"
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -45,6 +54,9 @@ dependencies {
 
     // WebSocket 服务端（Android 作为群主/承接群主）
     implementation("org.java-websocket:Java-WebSocket:1.5.7")
+
+    // 轻提示：Sonner for Compose（顶部 toast）
+    implementation("io.github.dokar3:sonner-android:0.3.2")
 
     // Shizuku：shell uid 代理（后台剪贴板，M2.2 启用 IClipboard 代理）
     implementation("dev.rikka.shizuku:api:13.1.5")

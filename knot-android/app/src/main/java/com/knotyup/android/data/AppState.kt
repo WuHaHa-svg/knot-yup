@@ -55,8 +55,11 @@ object AppState {
     private val _history = MutableStateFlow<List<HistoryItem>>(emptyList())
     val history: StateFlow<List<HistoryItem>> = _history
 
-    private val _toast = MutableStateFlow<String?>(null)
-    val toast: StateFlow<String?> = _toast
+    /** 轻提示请求（msg + 类型），由 UI 层的 Sonner Toaster 消费。 */
+    data class ToastReq(val msg: String, val kind: Int = 0) // 0=普通 1=成功 2=错误
+
+    private val _toast = MutableStateFlow<ToastReq?>(null)
+    val toast: StateFlow<ToastReq?> = _toast
 
     /** 网络事件总线（连接协程 → UI 协程）。 */
     private val _events = MutableSharedFlow<GroupEvent>(extraBufferCapacity = 64)
@@ -66,8 +69,8 @@ object AppState {
         _events.tryEmit(event)
     }
 
-    fun toast(msg: String) {
-        _toast.value = msg
+    fun toast(msg: String, kind: Int = 0) {
+        _toast.value = ToastReq(msg, kind)
     }
 
     fun clearToast() {

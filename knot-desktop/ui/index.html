@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KnotYup</title>
   <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="toastify.min.css" />
   <style>
     /* 开屏层：内联样式确保先于 JS/CSS 就绪即渲染，消除白屏 */
     #boot-splash {
@@ -208,9 +209,6 @@
       </section>
     </main>
 
-    <!-- Toast -->
-    <div id="toast" class="toast"></div>
-
     <!-- 确认弹窗 -->
     <div id="confirmModal" class="modal-overlay hidden">
       <div class="modal">
@@ -228,17 +226,27 @@
     <div id="pinModal" class="modal-overlay hidden">
       <div class="modal">
         <h3 id="pinTitle"></h3>
-        <p id="pinAddr" class="pin-addr"></p>
-        <input id="pinInput" class="input" maxlength="6" inputmode="numeric" spellcheck="false" />
+        <div class="pin-name" id="pinName"></div>
+        <div class="pin-addr" id="pinAddr"></div>
+        <input id="pinInput" class="input pin-input" maxlength="6" inputmode="numeric" spellcheck="false" autofocus />
         <div class="modal-actions">
           <button class="btn" id="pinCancel"></button>
           <button class="btn primary" id="pinJoin"></button>
         </div>
       </div>
     </div>
+
+    <!-- 加入群 Loading -->
+    <div id="loadingModal" class="modal-overlay hidden">
+      <div class="modal loading-modal">
+        <div class="spinner"></div>
+        <p id="loadingText" class="loading-text"></p>
+      </div>
+    </div>
   </div>
   <script src="i18n.js"></script>
   <script src="qrcode.min.js"></script>
+  <script src="toastify.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
