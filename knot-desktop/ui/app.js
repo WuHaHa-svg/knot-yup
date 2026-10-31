@@ -549,7 +549,7 @@ async function main() {
       boot.classList.add('out');
       setTimeout(() => boot.remove(), 500);
     }
-  }, 1400);
+  }, 1950); // 等最后一字蹦跳完成（1.14s 延迟 + 0.65s 动画 ≈ 1.8s）再淡出
 
   await listen('knot://members', (e) => {
     hideLoading();

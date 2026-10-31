@@ -56,6 +56,24 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.tween
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.knotyup.android.ui.Motion
+
+/** 导航路由。 */
+private object Routes {
+    const val HOME = "home"
+    const val GROUP = "group"
+    const val SCANNER = "scanner"
+}
 
 @OptIn(androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi::class)
 class MainActivity : ComponentActivity() {
@@ -124,7 +142,6 @@ private fun App(
     var confirmLeave by remember { mutableStateOf(false) }
     var pendingKick by remember { mutableStateOf<String?>(null) }
     var pinDialogFor by remember { mutableStateOf<GroupAd?>(null) }
-    var showScanner by remember { mutableStateOf(false) }
     var showQr by remember { mutableStateOf(false) }
     // rememberSaveable：横竖屏旋转（Activity 重建）不重播开屏动画
     var showSplash by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(true) }
@@ -272,6 +289,18 @@ private fun App(
         }
     }
 
+    // ── 导航（会话驱动）：入群 → 群页面；离群/被踢 → 回首页重新挂载（重播入场动画）──
+    val navController = rememberNavController()
+    LaunchedEffect(session.joined) {
+        if (session.joined) {
+            if (navController.currentDestination?.route != Routes.GROUP) {
+                navController.navigate(Routes.GROUP) { launchSingleTop = true }
+            }
+        } else if (navController.currentDestination?.route == Routes.GROUP) {
+            navController.popBackStack(Routes.HOME, inclusive = false)
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         Column(
             Modifier
@@ -281,63 +310,94 @@ private fun App(
         ) {
             Header(
                 onTheme, onLang, lang, themeId,
-                onScan = { showScanner = true }, showScan = !session.joined,
+                onScan = { navController.navigate(Routes.SCANNER) }, showScan = !session.joined,
                 showShare = session.joined, onShare = { showQr = true },
             )
-            if (session.joined) {
-                GroupBody(t, session.members, history, sendText,
-                    role = session.role,
-                    groupAddr = session.addr, groupPin = session.pin,
-                    onKick = { pendingKick = it },
-                    onCopy = { text ->
-                        // 点击历史复制：先同步指纹闸门，避免被监听器当作本机复制再发回群
-                        clipGuard[0] = textHash(text)
-                        ClipboardCapability.setText(context, text)
-                        AppState.toast(t("copied"), 1)
-                    },
-                    onSendText = { sendText = it },
-                    onSend = {
-                        if (sendText.isNotBlank()) {
-                            val sent = if (AppState.isOwner()) {
-                                AppState.server?.broadcastClipboard(sendText)
-                                AppState.server != null
-                            } else {
-                                AppState.client.sendClipboard(sendText)
-                            }
-                            if (sent) {
-                                AppState.addLocalHistory(sendText)
-                                AppState.toast(t("sent"), 1)
-                                sendText = ""
-                            }
-                        }
-                    },
-                    onLeave = { confirmLeave = true })
-            } else {
-                // key：从群页面返回首页时重新挂载，重播入场动画
-                key(session.joined) {
+            NavHost(
+                navController = navController,
+                startDestination = Routes.HOME,
+                modifier = Modifier.weight(1f),
+                enterTransition = { Motion.pageEnter() },
+                exitTransition = { Motion.pageExit() },
+                popEnterTransition = { Motion.pagePopEnter() },
+                popExitTransition = { Motion.pagePopExit() },
+            ) {
+                composable(Routes.HOME) {
                     HomeBody(
-                    t = t, wide = wide, discovered = discovered,
-                    addr = addr, pin = pin, joining = joining,
-                    onAddr = { addr = it }, onPin = { pin = it },
-                    onPickGroup = { pinDialogFor = it },
-                    onCreate = {
-                        // 功能全量依赖局域网：无局域网 IPv4 时提示并阻止建群
-                        if (Discovery.localIpAddress() == null) {
-                            AppState.toast(t("no_lan"), 2)
-                            return@HomeBody
-                        }
-                        val port = AppState.reservePort()
-                        val pin2 = java.security.SecureRandom().nextInt(900_000) + 100_000
-                        AppState.becomeOwner(pin2.toString(), port)
-                        AppState.toast(t("group_created").replace("{pin}", pin2.toString()), 1)
+                        t = t, wide = wide, discovered = discovered,
+                        addr = addr, pin = pin, joining = joining,
+                        onAddr = { addr = it }, onPin = { pin = it },
+                        onPickGroup = { pinDialogFor = it },
+                        onCreate = {
+                            // 功能全量依赖局域网：无局域网 IPv4 时提示并阻止建群
+                            if (Discovery.localIpAddress() == null) {
+                                AppState.toast(t("no_lan"), 2)
+                                return@HomeBody
+                            }
+                            val port = AppState.reservePort()
+                            val pin2 = java.security.SecureRandom().nextInt(900_000) + 100_000
+                            AppState.becomeOwner(pin2.toString(), port)
+                            AppState.toast(t("group_created").replace("{pin}", pin2.toString()), 1)
+                        },
+                        onJoin = {
+                            if (addr.isBlank() || pin.isBlank()) {
+                                AppState.toast(t("fill_addr_pin"), 2)
+                            } else {
+                                startJoin(addr, pin)
+                            }
+                        },
+                    )
+                }
+                composable(Routes.GROUP) {
+                    GroupBody(t, session.members, history, sendText,
+                        role = session.role,
+                        groupAddr = session.addr, groupPin = session.pin,
+                        onKick = { pendingKick = it },
+                        onCopy = { text ->
+                            // 点击历史复制：先同步指纹闸门，避免被监听器当作本机复制再发回群
+                            clipGuard[0] = textHash(text)
+                            ClipboardCapability.setText(context, text)
+                            AppState.toast(t("copied"), 1)
+                        },
+                        onSendText = { sendText = it },
+                        onSend = {
+                            if (sendText.isNotBlank()) {
+                                val sent = if (AppState.isOwner()) {
+                                    AppState.server?.broadcastClipboard(sendText)
+                                    AppState.server != null
+                                } else {
+                                    AppState.client.sendClipboard(sendText)
+                                }
+                                if (sent) {
+                                    AppState.addLocalHistory(sendText)
+                                    AppState.toast(t("sent"), 1)
+                                    sendText = ""
+                                }
+                            }
+                        },
+                        onLeave = { confirmLeave = true })
+                }
+                // 扫码：全屏目的地，底部滑入/滑出
+                composable(
+                    Routes.SCANNER,
+                    enterTransition = {
+                        slideInVertically(tween(Motion.SLOW, easing = Motion.Easing)) { it } +
+                            fadeIn(tween(Motion.NORMAL, easing = Motion.Easing))
                     },
-                    onJoin = {
-                        if (addr.isBlank() || pin.isBlank()) {
-                            AppState.toast(t("fill_addr_pin"), 2)
-                        } else {
-                            startJoin(addr, pin)
-                        }
+                    popExitTransition = {
+                        slideOutVertically(tween(Motion.NORMAL, easing = Motion.Easing)) { it } +
+                            fadeOut(tween(Motion.FAST))
                     },
+                ) {
+                    ScannerScreen(
+                        t = t,
+                        onResult = { addrValue, pinValue ->
+                            navController.popBackStack()
+                            if (addrValue.isNotBlank()) {
+                                startJoin(addrValue, pinValue)
+                            }
+                        },
+                        onClose = { navController.popBackStack() },
                     )
                 }
             }
@@ -353,7 +413,9 @@ private fun App(
                 .padding(top = 10.dp),
         )
 
-        // 退出群二次确认（自绘弹窗，风格与桌面端一致）
+        // ── 弹窗（平台 Dialog：原生窗口层 + 系统遮罩，动画只作用于卡片内容）──
+
+        // 退出群二次确认
         if (confirmLeave) {
             val ownerLeave = AppState.isOwner()
             KnotConfirm(
@@ -420,11 +482,17 @@ private fun App(
             )
         }
 
-        // 加入群 Loading
+        // 加入群 Loading（不可关闭）
         if (joining) {
-            Box(Modifier.fillMaxSize()) {
-                Box(Modifier.fillMaxSize().background(Color(0x52101216)))
-                DialogCard(Modifier.align(Alignment.Center)) {
+            Dialog(
+                onDismissRequest = {},
+                properties = DialogProperties(
+                    dismissOnBackPress = false,
+                    dismissOnClickOutside = false,
+                    usePlatformDefaultWidth = false,
+                ),
+            ) {
+                DialogCard {
                     Surface(
                         shape = RoundedCornerShape(16.dp),
                         color = MaterialTheme.colorScheme.surface,
@@ -449,19 +517,6 @@ private fun App(
                 }
             }
         }
-
-        // 扫码加群（全屏）
-        if (showScanner) {            ScannerScreen(
-                t = t,
-                onResult = { addrValue, pinValue ->
-                    showScanner = false
-                    if (addrValue.isNotBlank()) {
-                        startJoin(addrValue, pinValue)
-                    }
-                },
-                onClose = { showScanner = false },
-            )
-        }
     }
     } // Crossfade
 }
@@ -473,10 +528,11 @@ private fun QrDialog(t: (String) -> String, addr: String, pin: String, onClose: 
         put("v", 1); put("app", "knotyup"); put("addr", addr); put("pin", pin)
     }.toString()
     val qrBitmap = remember(payload) { generateQrBitmap(payload, 512) }
-    androidx.activity.compose.BackHandler { onClose() }
-    Box(Modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().background(Color(0x52101216)).clickable(enabled = false) {})
-        DialogCard(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        DialogCard(Modifier.padding(horizontal = 40.dp)) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surface,
@@ -567,8 +623,7 @@ private fun ScannerScreen(
         if (!hasPermission) permissionLauncher.launch(android.Manifest.permission.CAMERA)
         onDispose { }
     }
-    // 扫码页返回键 = 关闭扫码
-    androidx.activity.compose.BackHandler { onClose() }
+    // 返回键由导航处理（popBackStack = 关闭扫码）
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (hasPermission) {
@@ -670,8 +725,10 @@ private fun parseJoinPayload(text: String): Pair<String?, String?> {
 @Composable
 private fun SplashScreen(onFinish: () -> Unit) {
     val draw = remember { androidx.compose.animation.core.Animatable(0f) }        // 打结进度
-    val brandAlpha = remember { androidx.compose.animation.core.Animatable(0f) }   // 文字浮现
-    val brandOffset = remember { androidx.compose.animation.core.Animatable(16f) } // 文字上浮
+    val word = "KnotYup"
+    // 第二幕：逐字蹦跳（每个字独立的透明度 + 上浮弹簧）
+    val charAlphas = remember { word.map { androidx.compose.animation.core.Animatable(0f) } }
+    val charOffsets = remember { word.map { androidx.compose.animation.core.Animatable(26f) } }
     val colorPhase = remember { androidx.compose.animation.core.Animatable(0f) }   // 渐变上色
 
     LaunchedEffect(Unit) {
@@ -680,10 +737,18 @@ private fun SplashScreen(onFinish: () -> Unit) {
             1f,
             androidx.compose.animation.core.tween(1100, easing = androidx.compose.animation.core.CubicBezierEasing(.4f, 0f, .2f, 1f)),
         )
-        // 第二幕：文字浮现
+        // 第二幕：文字逐字蹦跳（低阻尼弹簧回弹，交错 55ms）
         kotlinx.coroutines.coroutineScope {
-            launch { brandAlpha.animateTo(1f, androidx.compose.animation.core.tween(400)) }
-            launch { brandOffset.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.85f, stiffness = 220f)) }
+            word.forEachIndexed { i, _ ->
+                launch {
+                    kotlinx.coroutines.delay(i * 55L)
+                    launch { charAlphas[i].animateTo(1f, androidx.compose.animation.core.tween(200)) }
+                    charOffsets[i].animateTo(
+                        0f,
+                        androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 420f),
+                    )
+                }
+            }
         }
         kotlinx.coroutines.delay(250)
         // 第三幕：渐变上色
@@ -755,31 +820,39 @@ private fun SplashScreen(onFinish: () -> Unit) {
                 }
             }
             Spacer(Modifier.height(22.dp))
-            // 文字：黑色基底 + 渐变叠层
-            Box(
-                Modifier.graphicsLayer {
-                    alpha = brandAlpha.value
-                    translationY = brandOffset.value
-                },
-            ) {
-                Text(
-                    "KnotYup",
-                    color = Color.Black,
-                    fontSize = 30.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp,
-                )
-                if (colorPhase.value > 0f) {
-                    Text(
-                        "KnotYup",
-                        style = androidx.compose.ui.text.TextStyle(
+            // 文字：逐字蹦跳（黑色基底 + 渐变叠层）
+            Box {
+                Row {
+                    word.forEachIndexed { i, ch ->
+                        Text(
+                            text = ch.toString(),
+                            color = Color.Black,
                             fontSize = 30.sp,
                             fontWeight = FontWeight.Bold,
                             letterSpacing = 1.sp,
-                            brush = gradient,
-                        ),
-                        modifier = Modifier.graphicsLayer { alpha = colorPhase.value },
-                    )
+                            modifier = Modifier.graphicsLayer {
+                                alpha = charAlphas[i].value
+                                translationY = charOffsets[i].value
+                            },
+                        )
+                    }
+                }
+                if (colorPhase.value > 0f) {
+                    Row(
+                        Modifier.graphicsLayer { alpha = colorPhase.value },
+                    ) {
+                        word.forEach { ch ->
+                            Text(
+                                text = ch.toString(),
+                                style = androidx.compose.ui.text.TextStyle(
+                                    fontSize = 30.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.sp,
+                                    brush = gradient,
+                                ),
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -799,10 +872,7 @@ private fun DialogCard(
     androidx.compose.animation.AnimatedVisibility(
         visibleState = visibleState,
         modifier = modifier,
-        enter = androidx.compose.animation.scaleIn(
-            animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.88f, stiffness = 380f),
-            initialScale = 0.82f,
-        ) + androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(180)),
+        enter = Motion.dialogEnter(),
     ) {
         content()
     }
@@ -821,10 +891,11 @@ private fun KnotConfirm(
     onCancel: () -> Unit,
 ) {
     var selected by remember { mutableStateOf<String?>(null) }
-    Box(Modifier.fillMaxSize()) {
-        // 遮罩
-        Box(Modifier.fillMaxSize().background(Color(0x52101216)))
-        DialogCard(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        DialogCard(Modifier.padding(horizontal = 40.dp)) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surface,
@@ -1114,12 +1185,7 @@ fun KnotEnter(
     androidx.compose.animation.AnimatedVisibility(
         visibleState = visibleState,
         modifier = modifier,
-        enter = androidx.compose.animation.fadeIn(
-            androidx.compose.animation.core.tween(420, delayMillis = delayMillis, easing = androidx.compose.animation.core.CubicBezierEasing(.35f, 0f, .25f, 1f)),
-        ) + androidx.compose.animation.slideInVertically(
-            animationSpec = androidx.compose.animation.core.tween(480, delayMillis = delayMillis, easing = androidx.compose.animation.core.CubicBezierEasing(.22f, 1f, .36f, 1f)),
-            initialOffsetY = { (it * slideDistance).toInt() },
-        ),
+        enter = Motion.mountEnter(delayMillis, slideDistance),
     ) {
         content()
     }
@@ -1361,9 +1427,11 @@ private fun PinDialog(
     onDismiss: () -> Unit,
 ) {
     var pinValue by remember { mutableStateOf("") }
-    Box(Modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().background(Color(0x52101216)).clickable(enabled = false) {})
-        DialogCard(Modifier.align(Alignment.Center).padding(horizontal = 40.dp)) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        DialogCard(Modifier.padding(horizontal = 40.dp)) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.surface,

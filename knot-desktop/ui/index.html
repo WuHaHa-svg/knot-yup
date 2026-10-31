@@ -31,11 +31,27 @@
       margin-top: 14px;
       font-family: inherit;
       font-size: 20px; font-weight: 700; color: #1d2129;
-      opacity: 0; transform: translateY(8px);
-      animation: boot-rise .5s cubic-bezier(.22, 1, .36, 1) .75s forwards;
     }
+    /* 逐字蹦跳：回弹缓动 + 交错延迟 */
+    .boot-word span {
+      display: inline-block;
+      opacity: 0;
+      transform: translateY(16px) scale(.5);
+      animation: boot-pop .65s cubic-bezier(.34, 1.56, .64, 1) forwards;
+    }
+    .boot-word span:nth-child(1) { animation-delay: .78s; }
+    .boot-word span:nth-child(2) { animation-delay: .84s; }
+    .boot-word span:nth-child(3) { animation-delay: .90s; }
+    .boot-word span:nth-child(4) { animation-delay: .96s; }
+    .boot-word span:nth-child(5) { animation-delay: 1.02s; }
+    .boot-word span:nth-child(6) { animation-delay: 1.08s; }
+    .boot-word span:nth-child(7) { animation-delay: 1.14s; }
     @keyframes boot-draw { to { stroke-dashoffset: 0; } }
-    @keyframes boot-rise { to { opacity: 1; transform: none; } }
+    @keyframes boot-pop {
+      0%   { opacity: 0; transform: translateY(16px) scale(.5); }
+      60%  { opacity: 1; }
+      100% { opacity: 1; transform: none; }
+    }
   </style>
 </head>
 <body>
@@ -45,7 +61,7 @@
       <svg viewBox="0 0 24 24" class="boot-knot">
         <path pathLength="100" d="M9 15 L9 3 M9 3 C9 3 4 5 4 10 M15 9 L15 21 M15 21 C15 21 20 19 20 14 M6 18 C6 18 9 20 12 18 M18 6 C18 6 15 4 12 6"/>
       </svg>
-      <div class="boot-word">KnotYup</div>
+      <div class="boot-word"><span>K</span><span>n</span><span>o</span><span>t</span><span>Y</span><span>u</span><span>p</span></div>
     </div>
   </div>
   <!-- SVG 图标库：所有图标统一 stroke 风格（1.8 / round），通过 <use href="#i-*"/> 引用 -->
