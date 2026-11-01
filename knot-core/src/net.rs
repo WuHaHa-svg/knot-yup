@@ -51,6 +51,7 @@ impl GroupServer {
     ) -> std::io::Result<(Arc<Self>, u16)> {
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;
         let port = listener.local_addr()?.port();
+        tracing::debug!(target: "ws/server", "群主监听 0.0.0.0:{port} pin={pin}");
         let members: MemberMap = Arc::new(RwLock::new(HashMap::new()));
         // shutdown 通道：发送端保留在句柄中，接收端挂到 accept 循环上。
         let (shutdown, mut shutdown_rx) = mpsc::channel::<WsMessage>(1);
@@ -92,6 +93,10 @@ impl GroupServer {
 
     async fn handle_conn(self: Arc<Self>, stream: TcpStream) -> Result<(), Box<dyn Error + Send + Sync>> {
         let cipher = self.cipher.clone();
+        let peer = stream
+            .peer_addr()
+            .map(|a| a.to_string())
+            .unwrap_or_else(|_| "?".into());
         let ws = tokio_tungstenite::accept_async(stream).await?;
         let (mut sink, mut source) = ws.split();
 
@@ -103,8 +108,11 @@ impl GroupServer {
             },
             _ => return Err("expected join message".into()),
         };
+        tracing::debug!(target: "ws/server", "<- join [{peer}] device={} platform={} addr={:?}",
+            device.name, device.platform, device.addr);
 
         if pin != *self.pin.as_ref() {
+            tracing::warn!(target: "ws/server", "-> join_result{{ok=false}} [{peer}] reason=WRONG_PIN");
             let _ = sink
                 .send(WsMessage::Text(serde_json::to_string(&Message::JoinResult {
                     ok: false,
@@ -118,6 +126,7 @@ impl GroupServer {
         // 2. 注册成员 + 回执
         let (tx, mut rx) = mpsc::channel::<WsMessage>(64);
         self.members.write().await.insert(device.id.clone(), (device.clone(), tx));
+        tracing::debug!(target: "ws/server", "-> join_result{{ok=true}} [{peer}] members={}", self.member_infos().await.len());
         let _ = sink
             .send(WsMessage::Text(serde_json::to_string(&Message::JoinResult {
                 ok: true,
@@ -148,6 +157,8 @@ impl GroupServer {
                         .and_then(|m| m.open(&cipher));
                     match inner {
                         Some(Message::Clipboard { from, payload }) => {
+                            tracing::debug!(target: "ws/server", "<- clipboard [{peer}] from={} len={} hash={}",
+                                from, payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash);
                             // 通知本机 UI，并把原始密文转发给其他成员（同 PIN 同密钥）
                             event_tx.send(CoreEvent::Clipboard {
                                 from: from.clone(),
@@ -169,11 +180,15 @@ impl GroupServer {
                 }
                 Ok(WsMessage::Close(_)) => break,
                 Ok(_) => {}
-                Err(_) => break,
+                Err(e) => {
+                    tracing::debug!(target: "ws/server", "连接错误 [{peer}]: {e}");
+                    break;
+                }
             }
         }
 
         writer.abort();
+        tracing::debug!(target: "ws/server", "连接关闭 [{peer}] 移除成员 {}", device_id);
         members.write().await.remove(&device_id);
         self.broadcast_members().await;
         Ok(())
@@ -191,6 +206,8 @@ impl GroupServer {
 
     async fn broadcast_members(&self) {
         let members = self.member_infos().await;
+        tracing::debug!(target: "ws/server", "-> members 广播 n={} ({})",
+            members.len(), members.iter().map(|d| d.name.clone()).collect::<Vec<_>>().join(","));
         let text = serde_json::to_string(
             &Message::Members { members: members.clone() }.seal(&self.cipher),
         )
@@ -206,6 +223,8 @@ impl GroupServer {
 
     /// 广播本机剪贴板变化到所有成员。
     pub async fn broadcast_clipboard(&self, from: String, payload: ClipboardPayload) {
+        tracing::debug!(target: "ws/server", "-> clipboard 广播 n={} len={}",
+            self.members.read().await.len(), payload.text.as_deref().map(str::len).unwrap_or(0));
         let text = serde_json::to_string(
             &Message::Clipboard { from, payload }.seal(&self.cipher),
         )
@@ -221,6 +240,7 @@ impl GroupServer {
         if device_id == self.owner.id {
             return;
         }
+        tracing::debug!(target: "ws/server", "-> kick {device_id}");
         {
             let mut map = self.members.write().await;
             if let Some((_, tx)) = map.remove(device_id) {
@@ -241,6 +261,7 @@ impl GroupServer {
     }
 
     async fn dissolve_notify(&self) {
+        tracing::debug!(target: "ws/server", "-> 解散通知 kick reason=GROUP_DISSOLVED n={}", self.members.read().await.len());
         let map = self.members.read().await;
         let text = serde_json::to_string(
             &Message::Kick { reason: Some("GROUP_DISSOLVED".into()) }.seal(&self.cipher),
@@ -259,6 +280,7 @@ impl GroupServer {
 
     /// 转让群主并退出：通知成员新群主后直接停止（不发解散通知）。
     pub async fn transfer(&self, new_owner: &DeviceInfo) {
+        tracing::debug!(target: "ws/server", "-> owner_change new_owner={} 停止服务", new_owner.name);
         {
             let map = self.members.read().await;
             let text = serde_json::to_string(
@@ -298,11 +320,13 @@ impl GroupClient {
         event_tx: broadcast::Sender<CoreEvent>,
     ) -> Result<Self, String> {
         let url = if addr.starts_with("ws://") { addr.to_string() } else { format!("ws://{addr}") };
-        let ws = tokio_tungstenite::connect_async(url)
+        tracing::debug!(target: "ws/client", "连接 {url} …");
+        let ws = tokio_tungstenite::connect_async(&url)
             .await
             .map_err(|e| format!("连接失败: {e}"))?;
         let (mut sink, mut source) = ws.0.split();
 
+        tracing::debug!(target: "ws/client", "-> join device={} addr={:?}", device.name, device.addr);
         sink.send(WsMessage::Text(
             serde_json::to_string(&Message::Join { pin: pin.to_string(), device: device.clone() }).unwrap(),
         ))
@@ -313,9 +337,12 @@ impl GroupClient {
         match source.next().await {
             Some(Ok(WsMessage::Text(t))) => match serde_json::from_str::<Message>(&t) {
                 Ok(Message::JoinResult { ok: true, members, .. }) => {
+                    tracing::debug!(target: "ws/client", "<- join_result{{ok=true}} members={}", members.len());
                     event_tx.send(CoreEvent::Members(members)).ok();
                 }
                 Ok(Message::JoinResult { ok: false, reason, .. }) => {
+                    tracing::debug!(target: "ws/client", "<- join_result{{ok=false}} reason={:?}",
+                        reason.as_deref().unwrap_or(""));
                     return Err(reason.unwrap_or_else(|| "入组被拒绝".into()));
                 }
                 _ => return Err("协议错误：期望入组结果".into()),
@@ -344,25 +371,34 @@ impl GroupClient {
                             .and_then(|m| m.open(&loop_cipher));
                         match inner {
                             Some(Message::Members { members }) => {
+                                tracing::debug!(target: "ws/client", "<- members n={}", members.len());
                                 event_tx.send(CoreEvent::Members(members)).ok();
                             }
                             Some(Message::Clipboard { from, payload }) => {
+                                tracing::debug!(target: "ws/client", "<- clipboard from={} len={} hash={}",
+                                    from, payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash);
                                 event_tx.send(CoreEvent::Clipboard { from, payload }).ok();
                             }
                             Some(Message::Kick { reason }) => {
+                                tracing::debug!(target: "ws/client", "<- kick reason={:?}", reason.as_deref().unwrap_or(""));
                                 event_tx.send(CoreEvent::Kicked(reason.unwrap_or_default())).ok();
                                 break;
                             }
                             Some(Message::OwnerChange { new_owner }) => {
+                                tracing::debug!(target: "ws/client", "<- owner_change new_owner={}", new_owner.name);
                                 event_tx.send(CoreEvent::OwnerChange(new_owner)).ok();
                                 break;
                             }
                             _ => {}
                         }
                     }
-                    Ok(WsMessage::Close(_)) => break,
+                    Ok(WsMessage::Close(_)) => {
+                        tracing::debug!(target: "ws/client", "服务端关闭连接");
+                        break;
+                    }
                     Ok(_) => {}
                     Err(e) => {
+                        tracing::debug!(target: "ws/client", "连接错误: {e}");
                         event_tx.send(CoreEvent::Error(format!("connection closed: {e}"))).ok();
                         break;
                     }
@@ -380,6 +416,8 @@ impl GroupClient {
 
     /// 发送本机剪贴板变化到组主（加密信封）。
     pub async fn send_clipboard(&self, payload: ClipboardPayload) -> Result<(), String> {
+        tracing::debug!(target: "ws/client", "-> clipboard len={} hash={}",
+            payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash);
         let text = serde_json::to_string(
             &Message::Clipboard {
                 from: self.local_id.clone(),

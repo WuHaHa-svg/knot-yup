@@ -139,7 +139,9 @@ function toast(msg, type = 'info') {
     RECONNECTED: t('reconnected'),
   };
   if (codeMap[msg]) msg = codeMap[msg];
-  else if (/^连接失败|^Connection|^协议错误/.test(msg)) msg = t('join_failed');
+  else if (/^连接失败|^Connection|^协议错误|^入组被拒绝|^发送入组请求失败/.test(msg)) msg = t('join_failed');
+  // 兜底：仍是纯 ASCII（后端原始错误串）→ 本地化通用失败文案，避免英文直塞
+  else if (/^[\x20-\x7e]+$/.test(msg)) msg = t('op_failed');
   // Toastify 顶部居中提示（z-index 高于弹窗遮罩，不会被挡）
   const colors = {
     info: 'linear-gradient(135deg, #1d2129, #3a4049)',
@@ -584,6 +586,14 @@ async function main() {
     state.discovered = e.payload;
     renderDiscovered();
   });
+
+  // 调试入口：双击首页右下角版号 → 系统浏览器打开实时日志页（软件继续运行）
+  $('versionBadge').ondblclick = () => window.open('http://127.0.0.1:45692', '_blank');
+  // 发布版（release 构建）后端不编译调试服务，此处隐藏入口
+  try {
+    const dbg = await invoke('debug_tools_enabled');
+    if (!dbg) $('versionBadge').style.display = 'none';
+  } catch { $('versionBadge').style.display = 'none'; }
 
   state.discoveredScanning = true;
   renderDiscovered();

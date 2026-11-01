@@ -26,7 +26,6 @@
       stroke-dashoffset: 100;
       animation: boot-draw 1s cubic-bezier(.4, 0, .2, 1) forwards;
     }
-    .boot-inner svg .boot-grad path { transition: stroke .6s ease .1s; }
     .boot-inner .boot-word {
       margin-top: 14px;
       font-family: inherit;
@@ -198,6 +197,8 @@
           <div class="discovered-list" id="discoveredList"></div>
         </section>
       </div>
+      <!-- 版号（双击在浏览器打开调试日志页；与 tauri.conf.json version 保持同步） -->
+      <div class="version-badge" id="versionBadge" title="双击打开调试日志 http://127.0.0.1:45692">v0.1.0</div>
     </main>
 
     <!-- 主内容：已入组 -->

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KnotYup Debug</title>
+<style>
+  :root { color-scheme: dark; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #101216; color: #c3c9d4; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid #262b33; flex: none; }
+  .title { font-size: 13px; font-weight: 600; color: #e6e9ef; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #f7768e; }
+  .dot.on { background: #9ece6a; }
+  .count { font-size: 11px; color: #6b7280; }
+  .filters { display: flex; gap: 6px; margin-left: 8px; }
+  .filter { font-size: 11px; color: #9aa3af; background: #1a1f27; border: 1px solid #2a303a; border-radius: 999px; padding: 2px 10px; cursor: pointer; user-select: none; }
+  .filter.on { color: #101216; background: #7aa2f7; border-color: #7aa2f7; }
+  .spacer { flex: 1; }
+  button { font-size: 11.5px; color: #9aa3af; background: #1a1f27; border: 1px solid #2a303a; border-radius: 7px; padding: 4px 12px; cursor: pointer; }
+  button:hover { color: #e6e9ef; border-color: #3a424f; }
+  #list { flex: 1; overflow-y: auto; padding: 8px 16px 20px; }
+  .row { display: flex; gap: 10px; padding: 3px 0; font-size: 11.5px; line-height: 1.5; border-bottom: 1px solid #171b21; }
+  .time { color: #5b636f; flex: none; }
+  .tag { flex: none; min-width: 120px; }
+  .tag .cat { font-size: 10px; padding: 0 6px; border-radius: 4px; margin-right: 6px; }
+  .cat.evt  { color: #7aa2f7; background: rgba(122,162,247,.12); }
+  .cat.scan { color: #bb9af7; background: rgba(187,154,247,.12); }
+  .cat.discovery { color: #7dcfff; background: rgba(125,207,255,.12); }
+  .cat.ws   { color: #ff9e64; background: rgba(255,158,100,.12); }
+  .cat.act  { color: #9ece6a; background: rgba(158,206,106,.12); }
+  .cat.err  { color: #f7768e; background: rgba(247,118,142,.12); }
+  .cat.app  { color: #e0af68; background: rgba(224,175,104,.12); }
+  .text { word-break: break-all; white-space: pre-wrap; }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: #2a303a; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="dot" id="dot"></div>
+  <span class="title">KnotYup Debug</span>
+  <span class="count" id="count">0 条</span>
+  <div class="filters" id="filters"></div>
+  <span class="spacer"></span>
+  <button id="pause">暂停</button>
+  <button id="clear">清空</button>
+</header>
+<div id="list"></div>
+<script>
+  const list = document.getElementById('list');
+  const cat = t => (t.split('/')[0] || 'app');
+  const ALL = { evt: true, scan: true, discovery: true, ws: true, act: true, err: true, app: true };
+  let paused = false, total = 0;
+  const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+  // 过滤器（按 tag 一级分类）
+  const filtersEl = document.getElementById('filters');
+  for (const c of Object.keys(ALL)) {
+    const b = document.createElement('span');
+    b.className = 'filter on'; b.textContent = c;
+    b.onclick = () => { ALL[c] = !ALL[c]; b.classList.toggle('on', ALL[c]); };
+    filtersEl.appendChild(b);
+  }
+
+  function fmt(ts) {
+    const d = new Date(ts);
+    const p = (n, w = 2) => String(n).padStart(w, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  }
+
+  function add(e) {
+    total++;
+    document.getElementById('count').textContent = total + ' 条';
+    const c = cat(e.tag);
+    if (!ALL[c]) return;
+    const el = document.createElement('div');
+    el.className = 'row';
+    el.innerHTML = `<span class="time">${fmt(e.ts)}</span>` +
+      `<span class="tag"><span class="cat ${c}">${c}</span>${esc(e.tag)}</span>` +
+      `<span class="text">${esc(e.text)}</span>`;
+    list.appendChild(el);
+    while (list.children.length > 2000) list.removeChild(list.firstChild);
+    if (!paused) list.scrollTop = list.scrollHeight;
+  }
+
+  document.getElementById('clear').onclick = () => { list.innerHTML = ''; total = 0; document.getElementById('count').textContent = '0 条'; };
+  document.getElementById('pause').onclick = (e) => { paused = !paused; e.target.textContent = paused ? '继续' : '暂停'; e.target.style.color = paused ? '#e0af68' : ''; };
+
+  function connect() {
+    const es = new EventSource('/events');
+    es.onopen = () => document.getElementById('dot').classList.add('on');
+    es.onerror = () => { document.getElementById('dot').classList.remove('on'); es.close(); setTimeout(connect, 1500); };
+    es.onmessage = (ev) => { try { add(JSON.parse(ev.data)); } catch {} };
+  }
+  connect();
+</script>
+</body>
+</html>

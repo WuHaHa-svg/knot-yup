@@ -34,6 +34,7 @@ const MESSAGES = {
     fill_addr_pin: '请填写群地址和 PIN 码', already_in_group: '已在群中，请先退出',
     owner_only: '只有群主可以移出设备', copy_failed: '复制失败',
     wrong_pin: 'PIN 码不正确', join_failed: '连接失败，请检查地址和网络',
+    op_failed: '操作失败，请重试',
   },
   'zh-Hant': {
     tagline_1: '把裝置', tagline_2: '打成一個結',
@@ -67,6 +68,7 @@ const MESSAGES = {
     fill_addr_pin: '請填寫群位址和 PIN 碼', already_in_group: '已在群中，請先退出',
     owner_only: '只有群主可以移出裝置', copy_failed: '複製失敗',
     wrong_pin: 'PIN 碼不正確', join_failed: '連線失敗，請檢查位址和網路',
+    op_failed: '操作失敗，請重試',
   },
   'en': {
     tagline_1: 'Tie your devices', tagline_2: 'into one knot',
@@ -100,6 +102,7 @@ const MESSAGES = {
     fill_addr_pin: 'Please enter address and PIN', already_in_group: 'Already in a group — leave first',
     owner_only: 'Only the owner can remove devices', copy_failed: 'Copy failed',
     wrong_pin: 'Incorrect PIN', join_failed: 'Connection failed — check address and network',
+    op_failed: 'Something went wrong — please try again',
   },
 };
 

@@ -19,11 +19,10 @@ data class GroupAd(val id: String, val name: String, val addr: String)
 /**
  * UDP 广播发现（端口 45691，与桌面端 discovery.rs 一致）。
  *
- * 模型（killStep 渐进剔除）：
- * - 群主每 2.5s 广播一次
- * - 监听端每 1s 一个扫描周期：周期内收到的群命中（killStep 清零/新增），
- *   未命中的 killStep +1，连续累积到 5（约 5s 无广播）才正式剔除；
- *   再收到即复活并清零——应对 Wi-Fi 广播丢包导致的误剔除
+ * 模型（窗口直出）：
+ * - 群主每 1s 常规广播一次（建群另有突发）
+ * - 监听端每 5s 一个扫描周期：窗口内收到的群即当前在线群（期望 ~5 包，整窗全空
+ *   几乎只意味着群主真的离开）；万一误剔，下个窗口收到即自动复活
  *
  * 生命周期约定：Flow 被 collect 时开始扫描，取消时停止。
  * 持有 MulticastLock（多数安卓设备省电时会丢弃广播包）。
@@ -31,8 +30,8 @@ data class GroupAd(val id: String, val name: String, val addr: String)
  */
 object Discovery {
     const val PORT = 45691
-    private const val ANNOUNCE_INTERVAL_MS = 2_500L
-    private const val SCAN_INTERVAL_MS = 1_000L
+    private const val ANNOUNCE_INTERVAL_MS = 1_000L
+    private const val SCAN_INTERVAL_MS = 5_000L
     private const val KILL_THRESHOLD = 5
 
     /** 本机局域网 IPv4（无则 null）。 */
@@ -67,7 +66,7 @@ object Discovery {
         return targets.distinct()
     }
 
-    /** 群主：周期广播本群（建群初期密集突发，快速建立可见性；collect 开始，取消停止）。 */
+    /** 群主：周期广播本群（建群突发 + 每 10s 常规；collect 开始，取消停止）。 */
     fun announce(ad: GroupAd): Flow<Unit> = flow<Unit> {
         val socket = DatagramSocket().apply { broadcast = true }
         val json = org.json.JSONObject()
@@ -87,7 +86,7 @@ object Discovery {
                 if (d > 0) delay(d)
                 sendAll()
             }
-            // 常规期：每 2.5s 一发
+            // 常规期：每 10s 一发
             while (currentCoroutineContext().isActive) {
                 sendAll()
                 delay(ANNOUNCE_INTERVAL_MS)
@@ -135,8 +134,7 @@ object Discovery {
         }
 
         val buf = ByteArray(1024)
-        // id -> (群信息, killStep)
-        val seen = HashMap<String, Pair<GroupAd, Int>>()
+        // 上次广播的列表（仅在变化时发送，避免每 5s 刷一次 UI）
         var emitted: List<GroupAd> = emptyList()
         try {
             while (currentCoroutineContext().isActive) {
@@ -161,43 +159,11 @@ object Discovery {
                     }
                 }
 
-                // —— 周期末结算 ——
-                var changed = false
-                // 命中：新增或清零（信息变化时更新）
-                for ((id, ad) in got) {
-                    val cur = seen[id]
-                    if (cur == null) {
-                        seen[id] = ad to 0
-                        changed = true
-                    } else {
-                        if (cur.first.addr != ad.addr || cur.first.name != ad.name) {
-                            seen[id] = ad to 0
-                            changed = true
-                        } else {
-                            seen[id] = cur.first to 0
-                        }
-                    }
-                }
-                // 未命中：killStep 累积，达到阈值正式剔除
-                val missed = seen.filterKeys { it !in got }.keys.toList()
-                for (id in missed) {
-                    val (ad, kill) = seen.getValue(id)
-                    if (kill + 1 >= KILL_THRESHOLD) {
-                        seen.remove(id)
-                        changed = true
-                    } else {
-                        seen[id] = ad to kill + 1
-                    }
-                }
-
-                if (changed) {
-                    val list = seen.values.map { it.first }.sortedBy { it.name }
-                    if (list != emitted) {
-                        emitted = list
-                        emit(list)
-                    } else {
-                        changed = false
-                    }
+                // —— 周期末结算：窗口直出（本窗口收到即在线，未收到即剔除；误剔下窗自愈） ——
+                val list = got.values.sortedBy { it.name }
+                if (list != emitted) {
+                    emitted = list
+                    emit(list)
                 }
             }
         } finally {

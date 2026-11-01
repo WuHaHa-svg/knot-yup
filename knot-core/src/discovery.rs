@@ -1,6 +1,7 @@
 //! 局域网组发现：UDP 广播（实现比 mDNS 轻，跨平台无 Bonjour 依赖；后续可换 mDNS）。
-//! 组主每 2.5s 广播一次；监听端每 1s 一个扫描周期，killStep 渐进剔除：
-//! 连续 5 个扫描周期未收到广播才正式移除（应对 Wi-Fi 广播丢包），再收到即复活并清零。
+//! 组主每 1s 常规广播一次（建群另有突发）；监听端每 5s 一个扫描周期，窗口直出模型：
+//! 一个周期（期望 ~5 个广播包）内收到即在线、未收到即剔除——广播密度下单窗全空
+//! 几乎只意味着群主真的离开；万一误剔，下个窗口收到即自动复活（自愈）。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -10,13 +11,11 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 pub const DISCOVERY_PORT: u16 = 45691;
-const ANNOUNCE_INTERVAL: Duration = Duration::from_millis(2500);
-/// 扫描周期：每 1000ms 对表做一次「命中清零 / 未命中累积」
-const SCAN_INTERVAL: Duration = Duration::from_millis(1000);
-/// killStep 达到 5（连续 5 个周期未收到）才剔除
-const KILL_THRESHOLD: u32 = 5;
+const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(1);
+/// 扫描周期：窗口内收到的群即当前在线群
+const SCAN_INTERVAL: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupAd {
     pub id: String,      // 组主设备 id
     pub name: String,    // 组主设备名
@@ -43,6 +42,13 @@ pub async fn announce(ad: GroupAd) -> std::io::Result<mpsc::Sender<()>> {
     let payload = format!("KNOTYUP1|{}", serde_json::to_string(&ad).unwrap());
     let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
     tokio::spawn(async move {
+        async fn send_all(sock: &UdpSocket, payload: &str, reason: &str) {
+            let targets = broadcast_targets();
+            tracing::debug!(target: "discovery/announce", "{reason} -> {} 目标", targets.len());
+            for target in targets {
+                let _ = sock.send_to(payload.as_bytes(), (target, DISCOVERY_PORT)).await;
+            }
+        }
         // 突发期：前 2s 内每 400ms 一发（连丢 4~5 个包也能秒级被发现）
         let burst_plan: Vec<Duration> = vec![
             Duration::from_millis(0),
@@ -56,30 +62,28 @@ pub async fn announce(ad: GroupAd) -> std::io::Result<mpsc::Sender<()>> {
                 _ = stop_rx.recv() => return,
                 _ = tokio::time::sleep(delay) => {}
             }
-            for target in broadcast_targets() {
-                let _ = sock.send_to(payload.as_bytes(), (target, DISCOVERY_PORT)).await;
-            }
+            send_all(&sock, &payload, &format!("突发广播 +{delay:?}")).await;
         }
-        // 常规期：每 2.5s 一发
+        // 常规期：每 10s 一发
+        send_all(&sock, &payload, "常规广播").await;
         loop {
-            for target in broadcast_targets() {
-                let _ = sock.send_to(payload.as_bytes(), (target, DISCOVERY_PORT)).await;
-            }
             tokio::select! {
                 _ = stop_rx.recv() => break,
-                _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {}
+                _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {
+                    send_all(&sock, &payload, "常规广播").await;
+                }
             }
         }
     });
     Ok(stop_tx)
 }
 
-/// 监听广播：每个扫描周期（1s）内收到的群命中（killStep 清零/新增），
-/// 未命中的 killStep +1，累积到 5 正式剔除。列表变化时发送完整列表。
+/// 监听广播：每个扫描周期（5s）窗口直出——窗口内收到即在线、未收到即剔除，
+/// 列表变化时发送完整列表。
 pub async fn listen(event_tx: tokio::sync::broadcast::Sender<Vec<GroupAd>>) -> std::io::Result<()> {
     let sock = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await?;
-    // id -> (群信息, killStep)
-    let mut seen: HashMap<String, (GroupAd, u32)> = HashMap::new();
+    // 上次广播的列表（仅在变化时发送，避免每 5s 刷一次 UI）
+    let mut last: Vec<GroupAd> = Vec::new();
     let mut buf = [0u8; 1024];
     loop {
         // —— 一个扫描周期：收集周期内收到的广播 ——
@@ -91,10 +95,11 @@ pub async fn listen(event_tx: tokio::sync::broadcast::Sender<Vec<GroupAd>>) -> s
                 break;
             }
             match tokio::time::timeout(remain, sock.recv_from(&mut buf)).await {
-                Ok(Ok((n, _))) => {
+                Ok(Ok((n, peer))) => {
                     if let Ok(text) = std::str::from_utf8(&buf[..n]) {
                         if let Some(json) = text.strip_prefix("KNOTYUP1|") {
                             if let Ok(ad) = serde_json::from_str::<GroupAd>(json) {
+                                tracing::debug!(target: "discovery/recv", "<- 广播 [{peer}] {}@{}", ad.name, ad.addr);
                                 got.insert(ad.id.clone(), ad);
                             }
                         }
@@ -105,43 +110,16 @@ pub async fn listen(event_tx: tokio::sync::broadcast::Sender<Vec<GroupAd>>) -> s
             }
         }
 
-        // —— 周期末结算 ——
-        let mut changed = false;
-        // 命中：新增或清零（信息变化时更新）
-        for (id, ad) in &got {
-            match seen.get_mut(id) {
-                Some((old, kill)) => {
-                    if old.addr != ad.addr || old.name != ad.name {
-                        *old = ad.clone();
-                        changed = true;
-                    }
-                    *kill = 0;
-                }
-                None => {
-                    seen.insert(id.clone(), (ad.clone(), 0));
-                    changed = true;
-                }
-            }
+        // —— 周期末结算：窗口直出（本窗口收到即在线，未收到即剔除；误剔下窗自愈） ——
+        let received = got.len();
+        let mut list: Vec<GroupAd> = got.into_values().collect();
+        list.sort_by(|a, b| a.name.cmp(&b.name)); // 稳定顺序，避免列表随机抖动
+        if list != last {
+            event_tx.send(list.clone()).ok();
+            last = list;
         }
-        // 未命中：killStep 累积，达到阈值正式剔除
-        let missed: Vec<String> = seen
-            .keys()
-            .filter(|id| !got.contains_key(*id))
-            .cloned()
-            .collect();
-        for id in missed {
-            if let Some((_, kill)) = seen.get_mut(&id) {
-                *kill += 1;
-                if *kill >= KILL_THRESHOLD {
-                    seen.remove(&id);
-                    changed = true;
-                }
-            }
-        }
-
-        if changed {
-            let list: Vec<GroupAd> = seen.values().map(|(ad, _)| ad.clone()).collect();
-            event_tx.send(list).ok();
-        }
+        // 每个扫描周期都打点
+        let table = last.iter().map(|ad| format!("{}@{}", ad.name, ad.addr)).collect::<Vec<_>>().join(", ");
+        tracing::debug!(target: "discovery/scan", "周期结算: 本周期收到 {received} 个广播, 当前表 [{table}]");
     }
 }

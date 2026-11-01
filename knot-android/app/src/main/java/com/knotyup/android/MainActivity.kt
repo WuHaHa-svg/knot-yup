@@ -63,6 +63,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloat
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -175,11 +176,10 @@ private fun App(
                         else -> {}
                     }
                 }, { e ->
+                    // 错误细节走 logcat，toast 只给本地化文案（避免英文直塞）
+                    android.util.Log.w("KnotYup", "join failed: ${e.message}")
                     AppState.toast(
-                        when (e.message) {
-                            "WRONG_PIN" -> t("wrong_pin")
-                            else -> "${t("join_failed")}\n${e.message ?: ""}"
-                        },
+                        if (e.message == "WRONG_PIN") t("wrong_pin") else t("join_failed"),
                         kind = 2,
                     )
                     joining = false
@@ -225,7 +225,8 @@ private fun App(
                     if (s.joined && s.role == "member") {
                         handleOwnerLost(t, scope, null)
                     } else {
-                        AppState.toast(event.message, 2)
+                        // 原始错误细节已在上面 Log.w，toast 只给本地化文案
+                        AppState.toast(t("op_failed"), 2)
                     }
                 }
             }
@@ -719,7 +720,7 @@ private fun parseJoinPayload(text: String): Pair<String?, String?> {
 /**
  * 启动页（纯白底，三幕动画）：
  * 1) 黑色绳结逐笔「打出」
- * 2) 打结完成后 KnotYup 文字浮现（黑色）
+ * 2) 打结完成后 KnotYup 文字逐字蹦跳出现
  * 3) 绳结与文字一起染上品牌渐变色，随后关闭启动动画
  */
 @Composable
@@ -1055,7 +1056,7 @@ private fun Header(
         // 扫码加群（仅首页显示）
         if (showScan) {
             HeaderIconBtn(onClick = onScan) {
-                Image(painterResource(R.drawable.ic_camera), "scan", Modifier.size(18.dp))
+                Image(painterResource(R.drawable.ic_scan), "scan", Modifier.size(18.dp))
             }
             Spacer(Modifier.width(8.dp))
         }
@@ -1123,7 +1124,12 @@ private fun Header(
         // 语言：点击弹出菜单，当前语言高亮
         Box {
             HeaderIconBtn(onClick = { langOpen = true }) {
-                Text(Strings.langLabels[lang] ?: "简", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    Strings.langLabels[lang] ?: "简",
+                    fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    // 与扫码/主题图标同色调（#6B7280 系），顶栏入口视觉统一
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
             DropdownMenu(
                 expanded = langOpen,
@@ -1256,8 +1262,8 @@ private fun HomeBody(
 
 /** 卡片头：彩色图标 + 标题 + 副文字（对齐桌面端卡片结构）。 */
 @Composable
-private fun CardHead(iconRes: Int, iconBg: Color, title: String, subtitle: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+private fun CardHead(iconRes: Int, iconBg: Color, title: String, subtitle: String, modifier: Modifier = Modifier) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         Box(
             Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(iconBg),
             contentAlignment = Alignment.Center,

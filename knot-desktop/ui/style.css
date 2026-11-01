@@ -504,3 +504,12 @@ body {
 ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text-3) 45%, transparent); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--text-3) 70%, transparent); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 版号（首页右下角，双击在浏览器打开调试日志页） ── */
+.home { position: relative; }
+.version-badge {
+  position: absolute; right: 18px; bottom: 10px;
+  font-size: 11px; color: var(--text-3);
+  user-select: none; cursor: default; letter-spacing: .3px;
+}
+.version-badge:hover { color: var(--text-2); }

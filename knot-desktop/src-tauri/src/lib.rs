@@ -1,4 +1,19 @@
 //! KnotYup 桌面端：把 knot-core 桥接到 Tauri 命令与事件。
+//!
+//! 调试能力（日志页 / 45692 监听 / discovery 打点桥接）全部 `#[cfg(debug_assertions)]` 门控：
+//! `tauri build`（正式版）完全不编译、不监听、无入口；`tauri dev` 与 `tauri build --debug` 才启用。
+
+#[cfg(debug_assertions)]
+mod debug_server;
+
+/// 调试日志：仅 debug 构建生效（发布版为空操作，参数被编译器消除）。
+#[cfg(debug_assertions)]
+fn dlog(tag: &str, text: impl AsRef<str>) {
+    debug_server::dlog(tag, text);
+}
+#[cfg(not(debug_assertions))]
+#[allow(unused_variables)]
+fn dlog(tag: &str, text: impl AsRef<str>) {}
 
 use knot_core::clipboard::{text_hash, ClipboardWatcher};
 use knot_core::discovery::{self, GroupAd};
@@ -15,7 +30,7 @@ enum ClipCmd {
     Set(ClipboardPayload),
 }
 
-#[derive(Clone, Copy, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Role {
     Owner,
@@ -43,7 +58,6 @@ struct Session {
     standby: Option<tokio::net::TcpListener>,
 }
 
-#[derive(Default)]
 struct AppState {
     device: Mutex<Option<DeviceInfo>>,
     session: Mutex<Option<Session>>,
@@ -132,6 +146,7 @@ async fn forward_core_events(
     loop {
         match rx.recv().await {
             Ok(CoreEvent::Members(members)) => {
+                dlog("evt/members", members.iter().map(|d| d.name.clone()).collect::<Vec<_>>().join(", "));
                 let own_id = state
                     .device
                     .lock()
@@ -171,6 +186,7 @@ async fn forward_core_events(
                 }
             }
             Ok(CoreEvent::Clipboard { from, payload }) => {
+                dlog("evt/clipboard", format!("from={} len={} hash={}", from, payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash));
                 // 防回环：成员把同步内容当作本机复制再发回来时，指纹相同，直接忽略
                 let mut guard = state.last_clip_hash.lock().await;
                 if *guard == payload.hash {
@@ -188,14 +204,17 @@ async fn forward_core_events(
                 );
             }
             Ok(CoreEvent::Kicked(reason)) => {
+                dlog("evt/kicked", &reason);
                 *state.session.lock().await = None;
                 let _ = app.emit("knot://kicked", reason);
             }
             Ok(CoreEvent::OwnerChange(new_owner)) => {
+                dlog("evt/owner-change", format!("new_owner={} @ {}", new_owner.name, new_owner.addr.clone().unwrap_or_default()));
                 // 群主主动转让：new_owner 升为主，其余重连
                 handle_owner_lost(app.clone(), state.clone(), Some(new_owner)).await;
             }
             Ok(CoreEvent::Error(e)) => {
+                dlog("evt/error", &e);
                 let is_member = {
                     let s = state.session.lock().await;
                     matches!(&*s, Some(Session { role: Role::Member, .. }))
@@ -231,9 +250,11 @@ async fn handle_owner_lost(app: AppHandle, state: Arc<AppState>, explicit: Optio
     });
 
     if candidates.is_empty() {
+        dlog("err/owner-lost", "无候选，群丢失");
         let _ = app.emit("knot://kicked", "GROUP_LOST");
         return;
     }
+    dlog("act/owner-lost", format!("候选: {}", candidates.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(" → ")));
 
     if candidates[0].id == my_id {
         // 当选：用预留端口升为群主
@@ -256,6 +277,7 @@ async fn handle_owner_lost(app: AppHandle, state: Arc<AppState>, explicit: Optio
                 })
                 .await
                 .ok();
+                dlog("act/promoted", format!("承接群主 {addr}"));
                 *state.session.lock().await = Some(Session {
                     role: Role::Owner,
                     server: Some(server),
@@ -271,12 +293,14 @@ async fn handle_owner_lost(app: AppHandle, state: Arc<AppState>, explicit: Optio
             }
             Err(_) => {
                 let _ = app.emit("knot://kicked", "GROUP_LOST");
+                dlog("err/promoted", "承接群主失败（端口被占）");
             }
         }
     } else {
         // 重连：依次尝试候选地址（当选者未就绪时退避重试）
         drop(s);
         let _ = app.emit("knot://toast", "RECONNECTING");
+        dlog("act/reconnecting", "开始重连候选");
         tauri::async_runtime::spawn(async move {
             for _attempt in 0..10 {
                 for c in &candidates {
@@ -285,6 +309,7 @@ async fn handle_owner_lost(app: AppHandle, state: Arc<AppState>, explicit: Optio
                         continue;
                     }
                     let device = state.device.lock().await.clone().unwrap();
+                    dlog("act/reconnect-try", format!("attempt={_attempt} -> {addr}"));
                     if let Ok(client) = GroupClient::connect(addr, &pin, device, core_tx.clone()).await {
                         let mut guard = state.session.lock().await;
                         if guard.is_some() {
@@ -302,12 +327,14 @@ async fn handle_owner_lost(app: AppHandle, state: Arc<AppState>, explicit: Optio
                         });
                         drop(guard);
                         let _ = app.emit("knot://toast", "RECONNECTED");
+                        dlog("act/reconnected", format!("已重连 {addr}"));
                         return;
                     }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             }
             let _ = app.emit("knot://kicked", "GROUP_LOST");
+            dlog("err/reconnect", "10 轮重连全部失败，群丢失");
         });
     }
 }
@@ -363,11 +390,16 @@ async fn create_group(
     let pin = pin.unwrap_or_else(gen_pin);
     let core_tx = state.core_tx.lock().await.clone().ok_or("core 未初始化")?;
     let device = state.device.lock().await.clone().unwrap();
+    dlog("act/create", format!("创建群 port={} pin={}", port.unwrap_or(0), pin));
     let (server, port) = GroupServer::start(port.unwrap_or(0), pin.clone(), device.clone(), core_tx)
         .await
-        .map_err(|e| format!("启动服务失败: {e}"))?;
+        .map_err(|e| {
+            dlog("err/create", format!("{e}"));
+            format!("启动服务失败: {e}")
+        })?;
 
     let addr = format!("{}:{}", local_ip(), port);
+    dlog("act/create", format!("群已建立 ws://{addr} pin={pin}"));
     let _ = app.emit("knot://members", vec![device.clone()]);
 
     // 组主在局域网内广播本组（供其他设备发现；PIN 不随广播发布）
@@ -403,12 +435,16 @@ async fn join_group(
     }
     let core_tx = state.core_tx.lock().await.clone().ok_or("CORE_INIT")?;
     let mut device = state.device.lock().await.clone().unwrap();
+    dlog("act/join", format!("加入群 {addr} pin={pin}"));
     // 预留端口：群主意外离开时本机可能需要承接为群主
     let standby = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.map_err(|e| format!("{e}"))?;
     if let Ok(p) = standby.local_addr() {
         device.addr = Some(format!("{}:{}", local_ip(), p.port()));
+        dlog("act/join", format!("预留承接端口 {}", p.port()));
     }
-    let client = GroupClient::connect(&addr, &pin, device.clone(), core_tx).await?;
+    let client = GroupClient::connect(&addr, &pin, device.clone(), core_tx).await.inspect_err(|e| {
+        dlog("err/join", format!("{e}"));
+    })?;
 
     *state.session.lock().await = Some(Session {
         role: Role::Member,
@@ -429,6 +465,7 @@ async fn leave_group(
     transfer_to: Option<String>,
 ) -> Result<(), String> {
     if let Some(s) = state.session.lock().await.take() {
+        dlog("act/leave", format!("role={:?} transfer_to={:?}", s.role, transfer_to));
         if let Some(server) = s.server {
             if let Some(target) = transfer_to {
                 // 转让给指定成员后退群
@@ -454,6 +491,7 @@ async fn kick_device(state: State<'_, SharedState>, device_id: String) -> Result
     let s = state.session.lock().await;
     match &*s {
         Some(Session { server: Some(server), .. }) => {
+            dlog("act/kick", &device_id);
             server.kick(&device_id).await;
             Ok(())
         }
@@ -477,7 +515,17 @@ async fn copy_history_item(state: State<'_, SharedState>, index: usize) -> Resul
     Ok(())
 }
 
+/// 前端查询：调试工具是否可用（发布版隐藏入口）。
+#[tauri::command]
+fn debug_tools_enabled() -> bool {
+    cfg!(debug_assertions)
+}
+
 pub fn run() {
+    // 日志订阅器装配：debug 构建走 debug_server（含 discovery 桥接），release 走纯 fmt
+    #[cfg(debug_assertions)]
+    debug_server::init_tracing();
+    #[cfg(not(debug_assertions))]
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -488,7 +536,15 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
-            let shared: SharedState = Arc::new(AppState::default());
+            let shared: SharedState = Arc::new(AppState {
+                device: Mutex::new(None),
+                session: Mutex::new(None),
+                clip_tx: Mutex::new(None),
+                core_tx: Mutex::new(None),
+                history: Mutex::new(Vec::new()),
+                discovered: Mutex::new(Vec::new()),
+                last_clip_hash: Mutex::new(String::new()),
+            });
 
             // 本机设备身份
             let device = DeviceInfo {
@@ -527,6 +583,7 @@ pub fn run() {
                     }
                     let listener =
                         tauri::async_runtime::spawn(discovery::listen(disc_tx.clone()));
+                    dlog("scan", "扫描启动（进入首页）");
                     // 等待暂停（进群）
                     while *scan_rx.borrow() {
                         if scan_rx.changed().await.is_err() {
@@ -535,14 +592,22 @@ pub fn run() {
                         }
                     }
                     listener.abort();
+                    dlog("scan", "扫描停止（进入群页面）");
                 }
             });
             let shared_disc = shared.clone();
             let handle_disc = handle.clone();
             tauri::async_runtime::spawn(async move {
+                let mut last_sig = String::new();
                 loop {
                     match disc_rx.recv().await {
                         Ok(list) => {
+                            // 只在发现列表变化时记日志（每秒刷新一次，避免刷屏）
+                            let sig = list.iter().map(|g| format!("{}@{}", g.name, g.addr)).collect::<Vec<_>>().join(" | ");
+                            if sig != last_sig {
+                                last_sig = sig.clone();
+                                dlog("scan/result", if sig.is_empty() { "(空)" } else { &sig });
+                            }
                             *shared_disc.discovered.lock().await = list.clone();
                             let _ = handle_disc.emit("knot://discovered", &list);
                         }
@@ -564,6 +629,7 @@ pub fn run() {
             let handle_clip = handle.clone();
             tauri::async_runtime::spawn(async move {
                 while let Some(payload) = local_rx.recv().await {
+                    dlog("evt/local-clip", format!("本机复制 len={} hash={}", payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash));
                     let from = shared_clip
                         .device
                         .lock()
@@ -601,6 +667,12 @@ pub fn run() {
             });
 
             app.manage(shared);
+
+            // 调试日志服务（仅 debug 构建；浏览器访问 http://127.0.0.1:45692 实时查看）
+            #[cfg(debug_assertions)]
+            tauri::async_runtime::spawn(debug_server::start());
+            dlog("app", format!("启动完成 device={} ip={}", device.name, local_ip()));
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -609,7 +681,8 @@ pub fn run() {
             join_group,
             leave_group,
             kick_device,
-            copy_history_item
+            copy_history_item,
+            debug_tools_enabled
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
