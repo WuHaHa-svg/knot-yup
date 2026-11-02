@@ -78,8 +78,17 @@ private object Routes {
 
 @OptIn(androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi::class)
 class MainActivity : ComponentActivity() {
+    // 焦点变化时重新隐藏状态栏：Android 10 及国产 OEM（MIUI/EMUI/Funtouch/ColorOS）
+    // 会在弹窗/键盘/切后台回来后擅自把状态栏显示回来，必须每次补 hide
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) com.knotyup.android.ui.FullScreen.keepFullScreen(window)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // 全屏（沉浸式）：onCreate 尽早配置，避免启动瞬间状态栏闪现
+        com.knotyup.android.ui.FullScreen.applyFullScreen(window)
         val sharedText = intent?.takeIf { it.action == android.content.Intent.ACTION_SEND }
             ?.getStringExtra(android.content.Intent.EXTRA_TEXT)
 
@@ -103,13 +112,6 @@ class MainActivity : ComponentActivity() {
             val t = { key: String -> Strings.t(lang, key) }
 
             KnotYupTheme(themeId) {
-                // 全屏：隐藏状态栏（下滑可临时呼出）
-                androidx.compose.runtime.SideEffect {
-                    val controller = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
-                    controller.hide(androidx.core.view.WindowInsetsCompat.Type.statusBars())
-                    controller.systemBarsBehavior =
-                        androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                }
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     App(t, lang = lang, wide = wide, themeId = themeId,
                         onTheme = { themeId = it; AppState.saveTheme(context, it) },

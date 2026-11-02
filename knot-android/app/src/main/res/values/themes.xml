@@ -2,6 +2,8 @@
 <resources>
     <style name="Theme.KnotYup" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- 状态栏始终隐藏，浅色图标在暗色主题下也可见 -->
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>
