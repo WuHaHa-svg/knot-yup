@@ -41,6 +41,10 @@ sealed class Msg {
     data class Clipboard(val from: String, val payload: ClipboardPayload) : Msg()
     data class Kick(val reason: String?) : Msg()
     data class OwnerChange(val newOwner: DeviceInfo) : Msg()
+    /** 心跳：成员 → 群主，每 5s 一次；携带发送者身份与递增序号 */
+    data class Ping(val device: DeviceInfo, val seq: Long, val tsMs: Long) : Msg()
+    /** 心跳回执：群主 → 成员；携带群状态快照（成员表，[0] 为群主），seq 回应对应 Ping */
+    data class Pong(val owner: DeviceInfo, val members: List<DeviceInfo>, val seq: Long, val tsMs: Long) : Msg()
     data class Encrypted(val data: String) : Msg()
 
     fun toJson(): String {
@@ -53,6 +57,11 @@ sealed class Msg {
             is Clipboard -> JSONObject().put("type", "clipboard").put("from", from).put("payload", payload.toJson())
             is Kick -> JSONObject().put("type", "kick").putOpt("reason", reason)
             is OwnerChange -> JSONObject().put("type", "owner_change").put("new_owner", newOwner.toJson())
+            is Ping -> JSONObject().put("type", "ping").put("device", device.toJson())
+                .put("seq", seq).put("ts_ms", tsMs)
+            is Pong -> JSONObject().put("type", "pong").put("owner", owner.toJson())
+                .put("members", org.json.JSONArray(members.map { it.toJson() }))
+                .put("seq", seq).put("ts_ms", tsMs)
             is Encrypted -> JSONObject().put("type", "encrypted").put("data", data)
         }
         return o.toString()
@@ -81,6 +90,12 @@ sealed class Msg {
                     )
                     "kick" -> Kick(if (o.has("reason")) o.getString("reason") else null)
                     "owner_change" -> OwnerChange(DeviceInfo.fromJson(o.getJSONObject("new_owner")))
+                    "ping" -> Ping(DeviceInfo.fromJson(o.getJSONObject("device")), o.getLong("seq"), o.getLong("ts_ms"))
+                    "pong" -> Pong(
+                        DeviceInfo.fromJson(o.getJSONObject("owner")),
+                        o.optJSONArray("members")?.devices() ?: emptyList(),
+                        o.getLong("seq"), o.getLong("ts_ms"),
+                    )
                     "encrypted" -> Encrypted(o.getString("data"))
                     else -> null
                 }

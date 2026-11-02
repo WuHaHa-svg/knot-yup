@@ -18,18 +18,38 @@ class KnotGroupServer(
 
     private val cipher = KnotCipher(pin)
     private val members = LinkedHashMap<String, Pair<DeviceInfo, WebSocket>>()
+    // 心跳看门狗：每连接最近活跃时间（任何入站消息都算活跃）
+    private val lastActive = java.util.concurrent.ConcurrentHashMap<WebSocket, Long>()
+    private val watchdog = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "knot-heartbeat-watchdog").apply { isDaemon = true }
+    }
 
-    override fun onStart() {}
+    override fun onStart() {
+        // 成员每 5s 心跳，超过 20s（≈3 次未达 + 余量）无任何入站消息即判定假死
+        watchdog.scheduleAtFixedRate({ checkIdle() }, 5, 5, java.util.concurrent.TimeUnit.SECONDS)
+    }
 
-    override fun onOpen(ws: WebSocket, handshake: ClientHandshake) {}
+    override fun onOpen(ws: WebSocket, handshake: ClientHandshake) {
+        lastActive[ws] = System.currentTimeMillis()
+    }
 
     override fun onClose(ws: WebSocket, code: Int, reason: String, remote: Boolean) {
+        lastActive.remove(ws)
         val id = members.entries.firstOrNull { it.value.second == ws }?.key ?: return
         members.remove(id)
         broadcastMembers()
     }
 
+    private fun checkIdle() {
+        val now = System.currentTimeMillis()
+        lastActive.entries.filter { now - it.value > 20_000 }.forEach { (ws, since) ->
+            android.util.Log.w("KnotYup", "心跳看门狗：连接空闲超 ${(now - since) / 1000}s，关闭")
+            runCatching { ws.close(1000, "HEARTBEAT_TIMEOUT") } // → 对端 onClose，本地 onClose 走移除广播
+        }
+    }
+
     override fun onMessage(ws: WebSocket, message: String) {
+        lastActive[ws] = System.currentTimeMillis()
         val senderId = members.entries.firstOrNull { it.value.second == ws }?.key
         val msg = Msg.parse(message) ?: return
 
@@ -47,12 +67,22 @@ class KnotGroupServer(
         }
 
         val inner = if (msg is Msg.Encrypted) Msg.parse(cipher.decrypt(msg.data) ?: return) else msg
-        if (inner is Msg.Clipboard) {
-            onEvent(GroupEvent.Clipboard(inner.from, inner.payload))
-            // 原样转发密文给其他成员
-            members.values.forEach { (d, w) ->
-                if (d.id != senderId) runCatching { w.send(message) }
+        when (inner) {
+            is Msg.Ping -> {
+                // 回执：群主视角的群状态快照（成员表，[0] 为群主）
+                android.util.Log.d("KnotYup", "<- ping#${inner.seq} -> pong#${inner.seq}")
+                runCatching {
+                    ws.send(Msg.Pong(owner, memberList(), inner.seq, System.currentTimeMillis()).toJson())
+                }
             }
+            is Msg.Clipboard -> {
+                onEvent(GroupEvent.Clipboard(inner.from, inner.payload))
+                // 原样转发密文给其他成员
+                members.values.forEach { (d, w) ->
+                    if (d.id != senderId) runCatching { w.send(message) }
+                }
+            }
+            else -> {}
         }
     }
 
@@ -89,6 +119,7 @@ class KnotGroupServer(
         val sealed = Msg.OwnerChange(newOwner).sealed(cipher).toJson()
         members.values.forEach { (_, w) -> runCatching { w.send(sealed); w.close() } }
         members.clear()
+        watchdog.shutdownNow()
         runCatching { stop(0) }
     }
 
@@ -97,6 +128,7 @@ class KnotGroupServer(
         val sealed = Msg.Kick("GROUP_DISSOLVED").sealed(cipher).toJson()
         members.values.forEach { (_, w) -> runCatching { w.send(sealed); w.close() } }
         members.clear()
+        watchdog.shutdownNow()
         runCatching { stop(0) }
     }
 

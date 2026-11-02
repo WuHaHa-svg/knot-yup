@@ -1,8 +1,10 @@
 package com.knotyup.android.net
 
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -40,6 +42,10 @@ class GroupClient(
         cipher = KnotCipher(pin)
         val url = if (addr.startsWith("ws://")) addr else "ws://$addr"
         val request = Request.Builder().url(url).build()
+        // 防双实例：新连接前确保旧连接取消（遗留 socket 会与心跳/事件竞争）
+        ws?.cancel()
+        // 心跳共享状态：最近一次被回执的 ping 序号（onMessage 更新，心跳协程检查）
+        var lastPongSeq = 0L
 
         val socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -63,6 +69,12 @@ class GroupClient(
                         }
                     }
                     is Msg.Members -> trySend(Result.success(GroupEvent.Members(msg.members)))
+                    is Msg.Pong -> {
+                        android.util.Log.d("KnotYup", "<- pong#${msg.seq} members=${msg.members.size}")
+                        lastPongSeq = msg.seq
+                        // Pong 携带群状态快照 → 同步成员表
+                        trySend(Result.success(GroupEvent.Members(msg.members)))
+                    }
                     is Msg.Clipboard -> trySend(Result.success(GroupEvent.Clipboard(msg.from, msg.payload)))
                     is Msg.Kick -> {
                         trySend(Result.success(GroupEvent.Kicked(msg.reason ?: "")))
@@ -87,6 +99,37 @@ class GroupClient(
             }
         })
         ws = socket
+
+        // 心跳：每 5s 发一次 Ping；3s 内未收到对应 seq 的 Pong 计一次未达；
+        // 连续 3 次未达 → 判定群主失联，断开连接（onFailure → 选主流程）
+        launch {
+            android.util.Log.i("KnotYup", "心跳任务启动（5s 间隔 / 3s 超时 / 3 次未达失联）")
+            var seq = 0L
+            var misses = 0
+            while (true) {
+                delay(5_000)
+                seq++
+                android.util.Log.d("KnotYup", "-> ping#$seq")
+                socket.send(Msg.Ping(device, seq, System.currentTimeMillis()).toJson())
+                val deadline = System.currentTimeMillis() + 3_000
+                var acked = false
+                while (System.currentTimeMillis() < deadline) {
+                    if (lastPongSeq >= seq) { acked = true; break }
+                    delay(300)
+                }
+                if (acked) {
+                    misses = 0
+                } else {
+                    misses++
+                    android.util.Log.w("KnotYup", "ping#$seq 3s 未回执，连续未达 $misses/3")
+                    if (misses >= 3) {
+                        android.util.Log.w("KnotYup", "心跳判定群主失联（连续 3 次未回执）")
+                        socket.cancel() // 触发 onFailure → 现有选主逻辑
+                        break
+                    }
+                }
+            }
+        }
 
         awaitClose {
             socket.cancel()

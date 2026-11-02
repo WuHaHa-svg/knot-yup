@@ -65,8 +65,19 @@ pub enum Message {
     OwnerChange {
         new_owner: DeviceInfo,
     },
-    Ping,
-    Pong,
+    /// 心跳：成员 → 群主，每 5s 一次；携带发送者身份与递增序号
+    Ping {
+        device: DeviceInfo,
+        seq: u64,
+        ts_ms: u64,
+    },
+    /// 心跳回执：群主 → 成员；携带群状态快照（成员表，[0] 为群主），seq 回应对应 Ping
+    Pong {
+        owner: DeviceInfo,
+        members: Vec<DeviceInfo>,
+        seq: u64,
+        ts_ms: u64,
+    },
     /// 加密信封：data = base64(nonce || AES-256-GCM(json(内部消息)))
     Encrypted { data: String },
 }
@@ -88,4 +99,12 @@ impl Message {
 
 pub fn device_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+/// 当前毫秒时间戳（心跳消息用）。
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

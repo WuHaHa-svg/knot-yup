@@ -160,30 +160,51 @@ private fun App(
         activity?.moveTaskToBack(true)
     }
 
-    // 手动/弹窗共用的入群流程
+    // 手动/弹窗共用的入群流程：立即 loading → 先收起键盘 → 0.5s 后再执行加群逻辑；入群 5s 超时
+    val appView = androidx.compose.ui.platform.LocalView.current
     fun startJoin(addrValue: String, pinValue: String) {
-        joining = true
+        joining = true // Loading 立即出现
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+        imm?.hideSoftInputFromWindow(appView.windowToken, 0)
         scope.launch {
+            kotlinx.coroutines.delay(500)
             // 记录会话（重连/承接群主需要同 PIN），预留端口并随 join 上报地址
             AppState.onJoining(addrValue, pinValue)
             AppState.setStandby(java.net.ServerSocket(0))
-            AppState.client.join(addrValue, pinValue, AppState.deviceWithStandbyAddr()).collect { result ->
-                result.fold({ event ->
-                    AppState.emit(event)
-                    when (event) {
-                        is GroupEvent.Members -> joining = false
-                        is GroupEvent.Kicked, GroupEvent.Disconnected -> joining = false
-                        else -> {}
-                    }
-                }, { e ->
-                    // 错误细节走 logcat，toast 只给本地化文案（避免英文直塞）
-                    android.util.Log.w("KnotYup", "join failed: ${e.message}")
-                    AppState.toast(
-                        if (e.message == "WRONG_PIN") t("wrong_pin") else t("join_failed"),
-                        kind = 2,
-                    )
-                    joining = false
-                })
+            val joinJob = launch {
+                AppState.client.join(addrValue, pinValue, AppState.deviceWithStandbyAddr()).collect { result ->
+                    result.fold({ event ->
+                        AppState.emit(event)
+                        when (event) {
+                            is GroupEvent.Members -> joining = false
+                            is GroupEvent.Kicked, GroupEvent.Disconnected -> joining = false
+                            else -> {}
+                        }
+                    }, { e ->
+                        // 错误细节走 logcat，UI 只给本地化文案
+                        android.util.Log.w("KnotYup", "join failed: ${e.message}")
+                        val s = AppState.session.value
+                        if (s.joined && s.role == "member") {
+                            // 已入群后的连接失败（心跳失联/群主消失）→ 选主承接，而不是报错
+                            handleOwnerLost(t, scope, null)
+                        } else if (e.message == "WRONG_PIN") {
+                            AppState.toast(t("wrong_pin"), kind = 2)
+                            joining = false
+                        } else {
+                            AppState.toast(t("join_failed"), kind = 2)
+                            joining = false
+                        }
+                    })
+                }
+            }
+            // 入群超时：5s 内未收到成员表即判失败（取消连接 + 提示）
+            kotlinx.coroutines.delay(5000)
+            if (joining && !AppState.session.value.joined) {
+                android.util.Log.w("KnotYup", "join timeout (5s): $addrValue")
+                joinJob.cancel()
+                AppState.client.leave() // 确保旧 socket 关闭（防双实例）
+                AppState.toast(t("join_failed"), kind = 2)
+                joining = false
             }
         }
     }
@@ -967,12 +988,19 @@ private fun handleOwnerLost(
     scope: kotlinx.coroutines.CoroutineScope,
     explicit: DeviceInfo?,
 ) {
+    // 防重入：错误分支与事件分支可能双路触发（如心跳失联同时产生 flow failure 与事件）
+    if (AppState.ownerLostHandling) {
+        android.util.Log.w("KnotYup", "handleOwnerLost 已在处理中，忽略重复触发")
+        return
+    }
+    AppState.ownerLostHandling = true
     val s = AppState.session.value
     val candidates = explicit?.let { listOf(it) } ?: s.members.drop(1) // [0] 是旧群主
     android.util.Log.d("KnotYup", "owner lost: explicit=${explicit?.name}, candidates=${candidates.map { "${it.name}@${it.addr}" }}")
     if (candidates.isEmpty()) {
         AppState.reset()
         AppState.toast(t("group_lost"), 2)
+        AppState.ownerLostHandling = false
         return
     }
     if (candidates[0].id == AppState.device.id) {
@@ -980,6 +1008,7 @@ private fun handleOwnerLost(
         val port = AppState.standby?.localPort ?: AppState.reservePort()
         AppState.becomeOwner(s.pin, port)
         AppState.toast(t("promoted"), 1)
+        AppState.ownerLostHandling = false
     } else {
         // 其余成员：依次尝试候选地址重连
         AppState.toast(t("reconnecting"))
@@ -996,6 +1025,7 @@ private fun handleOwnerLost(
                                 if (ev is GroupEvent.Members && !connected) {
                                     connected = true
                                     AppState.toast(t("reconnected"), 1)
+                                    AppState.ownerLostHandling = false
                                 }
                                 AppState.emit(ev)
                             }, { e ->
@@ -1011,6 +1041,7 @@ private fun handleOwnerLost(
             }
             AppState.reset()
             AppState.toast(t("group_lost"), 2)
+            AppState.ownerLostHandling = false
         }
     }
 }
@@ -1433,6 +1464,13 @@ private fun PinDialog(
     onDismiss: () -> Unit,
 ) {
     var pinValue by remember { mutableStateOf("") }
+    // 键盘收起要用弹窗自身窗口的 token
+    val dialogView = androidx.compose.ui.platform.LocalView.current
+    val dialogContext = LocalContext.current
+    fun hideKeyboard() {
+        val imm = dialogContext.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
+        imm?.hideSoftInputFromWindow(dialogView.windowToken, 0)
+    }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -1482,6 +1520,7 @@ private fun PinDialog(
                                 if (pinValue.isBlank()) {
                                     AppState.toast(t("fill_pin"), 2)
                                 } else {
+                                    hideKeyboard()
                                     onJoin(pinValue.trim())
                                 }
                             },

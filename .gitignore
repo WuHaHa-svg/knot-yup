@@ -24,3 +24,5 @@ knot-android/.idea/
 .idea/
 .vscode/
 knot-android/knotyup.keystore
+dist/
+knot-android/.kotlin/

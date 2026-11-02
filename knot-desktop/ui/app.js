@@ -182,6 +182,7 @@ function escapeHtml(s) {
 
 function renderSession() {
   const s = state.session;
+  if (!s) membersSig = ''; // 离群后重置指纹，重入群时强制渲染
   $('viewHome').classList.toggle('hidden', !!s);
   $('viewGroup').classList.toggle('hidden', !s);
   // 群信息分享按钮：仅群页面显示（不分角色）；离开时同时收起弹层
@@ -250,9 +251,14 @@ function renderSharePop() {
   });
 }
 
+// 设备列表指纹：内容未变跳过渲染（Pong 每 5s 携带成员快照，避免无谓全量重建 DOM）
+let membersSig = '';
 function renderMembers() {
   const s = state.session;
   if (!s) return;
+  const sig = `${s.role}|` + s.members.map((m) => `${m.id}:${m.name}:${m.platform}`).join(',');
+  if (sig === membersSig) return;
+  membersSig = sig;
   const list = $('memberList');
   list.innerHTML = '';
   const isOwner = s.role === 'owner';

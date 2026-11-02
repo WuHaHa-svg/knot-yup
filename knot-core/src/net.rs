@@ -5,6 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -125,6 +126,8 @@ impl GroupServer {
 
         // 2. 注册成员 + 回执
         let (tx, mut rx) = mpsc::channel::<WsMessage>(64);
+        let conn_tx = tx.clone(); // 心跳回执 + 退出校验用（本连接的通道标识）
+        // 同 id 重复入群：旧条目被覆盖（旧发送端 drop → 旧连接自然关闭），旧连接的清理不会误删新条目（见下方退出校验）
         self.members.write().await.insert(device.id.clone(), (device.clone(), tx));
         tracing::debug!(target: "ws/server", "-> join_result{{ok=true}} [{peer}] members={}", self.member_infos().await.len());
         let _ = sink
@@ -138,8 +141,28 @@ impl GroupServer {
 
         // 3. 读循环：转发成员消息；写任务：消费出站通道
         let members = self.members.clone();
+        let owner_info = self.owner.clone();
         let event_tx = self.event_tx.clone();
         let device_id = device.id.clone();
+
+        // 空闲看门狗：成员每 5s 心跳，超过 20s（≈3 次未达 + 余量）无任何入站消息即判定假死
+        let last_activity = std::sync::Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
+        let (dead_tx, mut dead_rx) = mpsc::channel::<()>(1);
+        {
+            let last = last_activity.clone();
+            let peer_w = peer.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let idle = last.lock().unwrap().elapsed();
+                    if idle >= Duration::from_secs(20) {
+                        tracing::debug!(target: "ws/server", "心跳看门狗：{peer_w} 空闲 {idle:?}，关闭连接");
+                        dead_tx.send(()).await.ok();
+                        return;
+                    }
+                }
+            });
+        }
 
         let writer = tokio::spawn(async move {
             while let Some(msg) = rx.recv().await {
@@ -149,7 +172,15 @@ impl GroupServer {
             }
         });
 
-        while let Some(msg) = source.next().await {
+        loop {
+            let msg = tokio::select! {
+                _ = dead_rx.recv() => break, // 看门狗超时
+                m = source.next() => match m {
+                    Some(v) => v,
+                    None => break,
+                },
+            };
+            *last_activity.lock().unwrap() = tokio::time::Instant::now();
             match msg {
                 Ok(WsMessage::Text(t)) => {
                     let inner = serde_json::from_str::<Message>(&t)
@@ -172,8 +203,22 @@ impl GroupServer {
                                 }
                             }
                         }
-                        Some(Message::Ping) => {
-                            let _ = Message::Pong;
+                        Some(Message::Ping { seq, .. }) => {
+                            // 回执：群主视角的群状态快照（成员表，[0] 为群主）
+                            tracing::debug!(target: "ws/server", "<- ping#{seq} [{peer}] -> pong#{seq}");
+                            let members_now = members.read().await;
+                            let list = {
+                                let mut l = vec![owner_info.clone()];
+                                l.extend(members_now.values().map(|(info, _)| info.clone()));
+                                l
+                            };
+                            let pong = Message::Pong {
+                                owner: owner_info.clone(),
+                                members: list,
+                                seq,
+                                ts_ms: crate::protocol::now_ms(),
+                            };
+                            let _ = conn_tx.try_send(WsMessage::Text(serde_json::to_string(&pong).unwrap()));
                         }
                         _ => {}
                     }
@@ -188,8 +233,21 @@ impl GroupServer {
         }
 
         writer.abort();
-        tracing::debug!(target: "ws/server", "连接关闭 [{peer}] 移除成员 {}", device_id);
-        members.write().await.remove(&device_id);
+        // 退出校验：仅当成员表里注册的仍是本连接的通道才移除
+        // （同 id 重复入群后旧连接退出时，成员表里已是新连接，不能误删）
+        {
+            let mut map = members.write().await;
+            let is_mine = map
+                .get(&device_id)
+                .map(|(_, t)| t.same_channel(&conn_tx))
+                .unwrap_or(false);
+            if is_mine {
+                tracing::debug!(target: "ws/server", "连接关闭 [{peer}] 移除成员 {device_id}");
+                map.remove(&device_id);
+            } else {
+                tracing::debug!(target: "ws/server", "连接关闭 [{peer}]（已被新连接取代，保留新成员表条目）");
+            }
+        }
         self.broadcast_members().await;
         Ok(())
     }
@@ -355,6 +413,18 @@ impl GroupClient {
         let cipher = Arc::new(Cipher::from_pin(pin));
         let loop_cipher = cipher.clone();
 
+        // 心跳共享状态：最近一次被回执的 ping 序号（读循环更新，心跳任务检查）
+        let last_pong_seq = std::sync::Arc::new(std::sync::Mutex::new(0u64));
+        let reader_seq = last_pong_seq.clone();
+        let hb_seq = last_pong_seq.clone();
+        // 读循环存活标志：读循环退出（被踢/服务端关闭/出错）后心跳任务随之静默退出，
+        // 防止陈旧心跳在连接已死后误报「群主失联」
+        let reader_alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let reader_alive_flag = reader_alive.clone();
+        let hb_alive = reader_alive.clone();
+        // 心跳失联信号：心跳任务 → 读循环（读循环收到后自行结束并抛 Error）
+        let (hb_shutdown_tx, mut hb_shutdown_rx) = mpsc::channel::<()>(1);
+
         let reader = tokio::spawn(async move {
             let writer = tokio::spawn(async move {
                 while let Some(msg) = rx.recv().await {
@@ -363,7 +433,18 @@ impl GroupClient {
                     }
                 }
             });
-            while let Some(msg) = source.next().await {
+            loop {
+                let msg = tokio::select! {
+                    m = source.next() => match m {
+                        Some(v) => v,
+                        None => break,
+                    },
+                    _ = hb_shutdown_rx.recv() => {
+                        // 心跳判定失联，主动结束读循环
+                        event_tx.send(CoreEvent::Error("connection closed: heartbeat timeout".into())).ok();
+                        break;
+                    }
+                };
                 match msg {
                     Ok(WsMessage::Text(t)) => {
                         let inner = serde_json::from_str::<Message>(&t)
@@ -372,6 +453,12 @@ impl GroupClient {
                         match inner {
                             Some(Message::Members { members }) => {
                                 tracing::debug!(target: "ws/client", "<- members n={}", members.len());
+                                event_tx.send(CoreEvent::Members(members)).ok();
+                            }
+                            Some(Message::Pong { members, seq, .. }) => {
+                                tracing::debug!(target: "ws/client", "<- pong#{seq} members={}", members.len());
+                                *reader_seq.lock().unwrap() = seq;
+                                // Pong 携带群状态快照 → 同步成员表（任意成员实时知晓群状态）
                                 event_tx.send(CoreEvent::Members(members)).ok();
                             }
                             Some(Message::Clipboard { from, payload }) => {
@@ -394,6 +481,8 @@ impl GroupClient {
                     }
                     Ok(WsMessage::Close(_)) => {
                         tracing::debug!(target: "ws/client", "服务端关闭连接");
+                        // 视为连接断开：抛 Error 触发上层的选主/重连（否则成员会静默卡死）
+                        event_tx.send(CoreEvent::Error("connection closed: server closed connection".into())).ok();
                         break;
                     }
                     Ok(_) => {}
@@ -404,8 +493,61 @@ impl GroupClient {
                     }
                 }
             }
+            reader_alive_flag.store(false, std::sync::atomic::Ordering::Relaxed);
             writer.abort();
         });
+
+        // 心跳任务：每 5s 发一次 Ping；3s 内未收到对应 seq 的 Pong 计一次未达；连续 3 次未达 → 判定群主失联
+        {
+            let tx = tx.clone();
+            let device = device.clone();
+            let hb_tx = hb_shutdown_tx;
+            tokio::spawn(async move {
+                let mut seq: u64 = 0;
+                let mut misses: u32 = 0;
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    // 读循环已退出（被踢/关闭/出错）：心跳随之静默结束，不误报失联
+                    if !hb_alive.load(std::sync::atomic::Ordering::Relaxed) {
+                        return;
+                    }
+                    seq += 1;
+                    let ping = Message::Ping {
+                        device: device.clone(),
+                        seq,
+                        ts_ms: crate::protocol::now_ms(),
+                    };
+                    tracing::debug!(target: "ws/client", "-> ping#{seq}");
+                    if tx.send(WsMessage::Text(serde_json::to_string(&ping).unwrap())).await.is_err() {
+                        return; // 连接已关闭，读循环会处理后续
+                    }
+                    // 等待 3s 内的回执
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+                    let mut acked = false;
+                    while tokio::time::Instant::now() < deadline {
+                        if !hb_alive.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        if *hb_seq.lock().unwrap() >= seq {
+                            acked = true;
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                    if acked {
+                        misses = 0;
+                    } else {
+                        misses += 1;
+                        tracing::debug!(target: "ws/client", "ping#{seq} 3s 未回执，连续未达 {misses}/3");
+                        if misses >= 3 {
+                            tracing::debug!(target: "ws/client", "心跳判定群主失联（连续 3 次未回执）");
+                            hb_tx.send(()).await.ok();
+                            return;
+                        }
+                    }
+                }
+            });
+        }
 
         Ok(Self { tx, local_id, cipher, reader: Some(reader) })
     }

@@ -65,6 +65,10 @@ object AppState {
     private val _events = MutableSharedFlow<GroupEvent>(extraBufferCapacity = 64)
     val events = _events.asSharedFlow()
 
+    /** 选主/重连处理中标志：防止 handleOwnerLost 被重复触发（错误分支与事件分支双路到达） */
+    @Volatile
+    var ownerLostHandling = false
+
     fun emit(event: GroupEvent) {
         _events.tryEmit(event)
     }
