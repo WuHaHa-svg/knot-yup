@@ -89,6 +89,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // 全屏（沉浸式）：onCreate 尽早配置，避免启动瞬间状态栏闪现
         com.knotyup.android.ui.FullScreen.applyFullScreen(window)
+        // 群地址解析需要系统 ConnectivityManager 兜底（见 Discovery.localIpAddress(context)）
+        AppState.appContext = applicationContext
         val sharedText = intent?.takeIf { it.action == android.content.Intent.ACTION_SEND }
             ?.getStringExtra(android.content.Intent.EXTRA_TEXT)
 

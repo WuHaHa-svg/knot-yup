@@ -31,6 +31,10 @@ data class SessionState(
 
 /** 全局会话状态（UI 单源）。 */
 object AppState {
+    /** applicationContext（MainActivity onCreate 注入）：群地址解析需要系统 ConnectivityManager 兜底 */
+    @Volatile
+    var appContext: Context? = null
+
     val device = DeviceInfo(
         id = UUID.randomUUID().toString(),
         name = "${android.os.Build.MODEL} · Android",
@@ -96,7 +100,7 @@ object AppState {
     /** 带预留地址的设备信息（入群用）。 */
     fun deviceWithStandbyAddr(): DeviceInfo {
         val port = standby?.localPort
-        val ip = Discovery.localIpAddress()
+        val ip = Discovery.localIpAddress(appContext)
         return if (port != null && ip != null) device.copy(addr = "$ip:$port") else device
     }
 
@@ -136,14 +140,30 @@ object AppState {
         val s = KnotGroupServer(port, pin, owner, ::emit)
         s.start()
         server = s
-        val ip = Discovery.localIpAddress() ?: "0.0.0.0"
-        val addr = "$ip:${s.boundPort()}"
-        _session.value = SessionState(
-            role = "owner", addr = addr, pin = pin,
-            members = listOf(device), joined = true,
-        )
-        startAnnounce(addr)
-        return addr to s.boundPort()
+        // 解析本机 IP：带 ConnectivityManager 兜底 + 短重试（部分 OEM 网卡上报时序滞后）。
+        // 拿不到真实 IP 时绝不能广播 0.0.0.0 假地址污染发现协议——群主照常当，只是暂不广播。
+        var ip: String? = null
+        for (i in 0 until 5) {
+            ip = Discovery.localIpAddress(appContext)
+            if (ip != null) break
+            Thread.sleep(200)
+        }
+        val boundPort = s.boundPort()
+        if (ip != null) {
+            val addr = "$ip:$boundPort"
+            _session.value = SessionState(
+                role = "owner", addr = addr, pin = pin,
+                members = listOf(device), joined = true,
+            )
+            startAnnounce(addr)
+        } else {
+            android.util.Log.w("KnotYup", "becomeOwner: 无法解析本机局域网 IP，群主已承接但暂不广播（地址显示为 :$boundPort）")
+            _session.value = SessionState(
+                role = "owner", addr = ":$boundPort", pin = pin,
+                members = listOf(device), joined = true,
+            )
+        }
+        return _session.value.addr to boundPort
     }
 
     /** 停止广播与服务端。 */

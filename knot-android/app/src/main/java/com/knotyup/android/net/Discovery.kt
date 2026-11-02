@@ -50,6 +50,38 @@ object Discovery {
         return null
     }
 
+    /**
+     * 本机局域网 IPv4（带系统兜底）：先走网卡枚举；拿不到（部分 OEM 接口上报时序
+     * 异常 / 热点环境）再用 ConnectivityManager 按 Wi-Fi/以太网 transport 查
+     * LinkProperties。群地址 / standby 地址等「要广播给别人」的场合必须用本方法，
+     * 严禁回落到 0.0.0.0 之类的假地址污染发现协议。
+     */
+    fun localIpAddress(context: Context?): String? {
+        localIpAddress()?.let { return it }
+        if (context == null) return null
+        return runCatching {
+            @Suppress("DEPRECATION") // allNetworks 在 API 31 标记废弃但同步可用，替代 API 是异步回调不适用此处
+            val cm = context.applicationContext
+                .getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+                ?: return null
+            val transports = intArrayOf(
+                android.net.NetworkCapabilities.TRANSPORT_WIFI,
+                android.net.NetworkCapabilities.TRANSPORT_ETHERNET,
+                android.net.NetworkCapabilities.TRANSPORT_VPN, // VPN 覆盖下的 Wi-Fi 也算（IP 在 VPN 接口上）
+            )
+            for (t in transports) {
+                val net = cm.allNetworks.firstOrNull { n ->
+                    cm.getNetworkCapabilities(n)?.hasTransport(t) == true
+                } ?: continue
+                val lp = cm.getLinkProperties(net) ?: continue
+                lp.linkAddresses.firstOrNull { a ->
+                    a.address is java.net.Inet4Address && !a.address.isLoopbackAddress
+                }?.let { return it.address.hostAddress }
+            }
+            null
+        }.getOrNull()
+    }
+
     /** 广播目标：全局广播 + 本机各网卡的子网广播地址（应对多网卡/热点下全局广播不可达）。 */
     private fun broadcastTargets(): List<java.net.InetAddress> {
         val targets = mutableListOf(java.net.InetAddress.getByName("255.255.255.255"))

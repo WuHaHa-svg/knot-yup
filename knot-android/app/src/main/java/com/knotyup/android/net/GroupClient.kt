@@ -44,8 +44,10 @@ class GroupClient(
         val request = Request.Builder().url(url).build()
         // 防双实例：新连接前确保旧连接取消（遗留 socket 会与心跳/事件竞争）
         ws?.cancel()
-        // 心跳共享状态：最近一次被回执的 ping 序号（onMessage 更新，心跳协程检查）
-        var lastPongSeq = 0L
+        // 心跳共享状态：最近一次被回执的 ping 序号。
+        // 写在 OkHttp 读线程、读在心跳协程——必须用原子量（普通变量跨线程无可见性保证，
+        // 轮询循环可能永远读到旧值 → 误判群主失联 → 误承接）
+        val lastPongSeq = java.util.concurrent.atomic.AtomicLong(0)
 
         val socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -71,7 +73,7 @@ class GroupClient(
                     is Msg.Members -> trySend(Result.success(GroupEvent.Members(msg.members)))
                     is Msg.Pong -> {
                         android.util.Log.d("KnotYup", "<- pong#${msg.seq} members=${msg.members.size}")
-                        lastPongSeq = msg.seq
+                        lastPongSeq.set(msg.seq)
                         // Pong 携带群状态快照 → 同步成员表
                         trySend(Result.success(GroupEvent.Members(msg.members)))
                     }
@@ -114,7 +116,7 @@ class GroupClient(
                 val deadline = System.currentTimeMillis() + 3_000
                 var acked = false
                 while (System.currentTimeMillis() < deadline) {
-                    if (lastPongSeq >= seq) { acked = true; break }
+                    if (lastPongSeq.get() >= seq) { acked = true; break }
                     delay(300)
                 }
                 if (acked) {
