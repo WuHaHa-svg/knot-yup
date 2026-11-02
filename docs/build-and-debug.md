@@ -2,6 +2,13 @@
 
 > 所有命令的执行目录均标注在命令上方；`tauri`/`cargo tauri` 需已安装（`cargo install tauri-cli`）。
 
+## 0. 一键打包双端测试版
+
+```bash
+./scripts/build-debug.sh
+# macOS（--debug，含调试日志页）+ Android debug APK，带时间戳放入 dist/
+```
+
 ## 1. 启动桌面端 dev
 
 ```bash
@@ -72,7 +79,7 @@ cd knot-android
 | 前缀 | 内容 |
 |---|---|
 | `discovery/scan` | 每个扫描周期（5s）结算：收到几个广播、当前表内容 |
-| `discovery/announce` | 本机作为群主的每次广播（建群突发 5 连发 + 每 2.5s 常规） |
+| `discovery/announce` | 本机作为群主的每次广播（建群突发 5 连发 + 每 1s 常规） |
 | `evt/*` | 协议事件：members / clipboard / kicked / owner-change / error / 本机复制 |
 | `act/*` | 本机动作：create / join（含预留承接端口）/ leave / kick / promoted / reconnect 全过程 |
 | `err/*` | 失败原因：建群 / 入群 / 承接群主 / 重连 |

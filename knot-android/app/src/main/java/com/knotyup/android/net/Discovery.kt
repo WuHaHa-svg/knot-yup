@@ -32,7 +32,6 @@ object Discovery {
     const val PORT = 45691
     private const val ANNOUNCE_INTERVAL_MS = 1_000L
     private const val SCAN_INTERVAL_MS = 5_000L
-    private const val KILL_THRESHOLD = 5
 
     /** 本机局域网 IPv4（无则 null）。 */
     fun localIpAddress(): String? {
@@ -66,7 +65,7 @@ object Discovery {
         return targets.distinct()
     }
 
-    /** 群主：周期广播本群（建群突发 + 每 10s 常规；collect 开始，取消停止）。 */
+    /** 群主：周期广播本群（建群突发 + 每 1s 常规；collect 开始，取消停止）。 */
     fun announce(ad: GroupAd): Flow<Unit> = flow<Unit> {
         val socket = DatagramSocket().apply { broadcast = true }
         val json = org.json.JSONObject()
@@ -86,7 +85,7 @@ object Discovery {
                 if (d > 0) delay(d)
                 sendAll()
             }
-            // 常规期：每 10s 一发
+            // 常规期：每 1s 一发
             while (currentCoroutineContext().isActive) {
                 sendAll()
                 delay(ANNOUNCE_INTERVAL_MS)

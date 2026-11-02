@@ -64,7 +64,7 @@ pub async fn announce(ad: GroupAd) -> std::io::Result<mpsc::Sender<()>> {
             }
             send_all(&sock, &payload, &format!("突发广播 +{delay:?}")).await;
         }
-        // 常规期：每 10s 一发
+        // 常规期：每 1s 一发
         send_all(&sock, &payload, "常规广播").await;
         loop {
             tokio::select! {

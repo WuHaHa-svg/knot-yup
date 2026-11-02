@@ -2,7 +2,7 @@
 //! M0 拓扑：星型。组主负责成员管理与广播；剪贴板消息经组主转发到其他成员。
 
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +29,9 @@ pub enum CoreEvent {
 }
 
 type Tx = mpsc::Sender<WsMessage>;
-type MemberMap = Arc<RwLock<HashMap<String, (DeviceInfo, Tx)>>>;
+/// 成员表：BTreeMap 按 device.id 保序，保证 members 广播与 Pong 快照顺序确定
+/// （选主候选 = members[1..] 顺位承接，双端顺序必须一致：Android 端为 LinkedHashMap 插入序）。
+type MemberMap = Arc<RwLock<BTreeMap<String, (DeviceInfo, Tx)>>>;
 
 /// 组主（WebSocket 服务端）。
 pub struct GroupServer {
@@ -53,7 +55,7 @@ impl GroupServer {
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;
         let port = listener.local_addr()?.port();
         tracing::debug!(target: "ws/server", "群主监听 0.0.0.0:{port} pin={pin}");
-        let members: MemberMap = Arc::new(RwLock::new(HashMap::new()));
+        let members: MemberMap = Arc::new(RwLock::new(BTreeMap::new()));
         // shutdown 通道：发送端保留在句柄中，接收端挂到 accept 循环上。
         let (shutdown, mut shutdown_rx) = mpsc::channel::<WsMessage>(1);
 
@@ -303,7 +305,7 @@ impl GroupServer {
             let mut map = self.members.write().await;
             if let Some((_, tx)) = map.remove(device_id) {
                 let text = serde_json::to_string(
-                    &Message::Kick { reason: Some("removed by owner".into()) }.seal(&self.cipher),
+                    &Message::Kick { reason: Some("KICKED".into()) }.seal(&self.cipher),
                 )
                 .unwrap();
                 tx.try_send(WsMessage::Text(text)).ok();
