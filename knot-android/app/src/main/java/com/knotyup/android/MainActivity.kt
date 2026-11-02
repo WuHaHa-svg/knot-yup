@@ -148,6 +148,7 @@ private fun App(
     var pendingKick by remember { mutableStateOf<String?>(null) }
     var pinDialogFor by remember { mutableStateOf<GroupAd?>(null) }
     var showQr by remember { mutableStateOf(false) }
+    var showShizukuGuide by remember { mutableStateOf(false) }
     // rememberSaveable：横竖屏旋转（Activity 重建）不重播开屏动画
     var showSplash by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(true) }
 
@@ -158,11 +159,8 @@ private fun App(
             return@Crossfade
         }
 
-    // 返回键拦截：群页面 back 不退群，仅退到系统主界面（等同 Home 键），不触发任何 ws 操作
-    val activity = androidx.compose.ui.platform.LocalContext.current as? ComponentActivity
-    androidx.activity.compose.BackHandler(enabled = session.joined) {
-        activity?.moveTaskToBack(true)
-    }
+    // 返回键拦截见 NavHost 之后（BackHandler 必须晚于 NavHost 组合，
+    // 否则导航栈的回调优先生效，back 会 pop 回首页而不是弹退出确认）
 
     // 手动/弹窗共用的入群流程：立即 loading → 先收起键盘 → 0.5s 后再执行加群逻辑；入群 5s 超时
     val appView = androidx.compose.ui.platform.LocalView.current
@@ -214,6 +212,27 @@ private fun App(
     }
     // 剪贴板指纹闸门[0]：最近一次同步的内容指纹（收/发都记录），防止「写入被当成本机复制」回环
     val clipGuard = remember { arrayOf("") }
+
+    // 剪贴板能力模式（Shizuku 后台 / 前台）：随 Shizuku binder 与授权状态自动切换
+    var clipMode by remember { mutableStateOf(ClipboardCapability.currentMode()) }
+    LaunchedEffect(Unit) {
+        ClipboardCapability.observeModeChanges { clipMode = it }
+    }
+
+    // 本机剪贴板变化 → 群广播（两种监听模式共用；含指纹闸门防回环）
+    suspend fun sendLocalClip(text: String) {
+        val hash = textHash(text)
+        if (text.isEmpty() || hash == clipGuard[0]) return
+        clipGuard[0] = hash
+        val sent = if (AppState.isOwner()) {
+            AppState.server?.broadcastClipboard(text)
+            AppState.server != null
+        } else {
+            AppState.client.sendClipboard(text)
+        }
+        if (sent) AppState.addLocalHistory(text)
+    }
+
 
     // 事件处理（含写本机剪贴板，需要 context）
     LaunchedEffect(Unit) {
@@ -271,31 +290,50 @@ private fun App(
         }
     }
 
-    // 前台剪贴板监听：本机复制 → 发送到群
-    LaunchedEffect(session.joined) {
-        if (session.joined) {
+    // 剪贴板监听（按模式自动切换）：SHIZUKU → 1s 轮询摘要指纹（后台可感知）；
+    // FOREGROUND → 系统变更回调（仅前台有效）。两者共用 sendLocalClip 链路。
+    LaunchedEffect(session.joined, clipMode) {
+        if (!session.joined) return@LaunchedEffect
+        if (clipMode == ClipboardCapability.Mode.SHIZUKU) {
+            // 基线：起始指纹不当作新复制（与前台回调「只在变化时报」语义一致）
+            var lastFp = ClipboardCapability.fingerprint(context)
+            while (true) {
+                delay(1_000)
+                val fp = ClipboardCapability.fingerprint(context) ?: continue
+                if (fp == lastFp) continue
+                lastFp = fp
+                ClipboardCapability.getText(context)?.let { sendLocalClip(it) }
+            }
+        } else {
             val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             val listener = ClipboardManager.OnPrimaryClipChangedListener {
-                val text = ClipboardCapability.getText(context) ?: return@OnPrimaryClipChangedListener
-                val hash = textHash(text)
-                // 跳过刚写入的远端同步内容（指纹相同）
-                if (text.isNotEmpty() && hash != clipGuard[0]) {
-                    clipGuard[0] = hash
-                    val sent = if (AppState.isOwner()) {
-                        AppState.server?.broadcastClipboard(text)
-                        AppState.server != null
-                    } else {
-                        AppState.client.sendClipboard(text)
-                    }
-                    if (sent) AppState.addLocalHistory(text)
+                // getText 是 suspend（Shizuku binder / IO 线程），回调里起协程
+                scope.launch {
+                    ClipboardCapability.getText(context)?.let { sendLocalClip(it) }
                 }
             }
             cm.addPrimaryClipChangedListener(listener)
             try {
-                while (true) delay(60_000) // 保持监听直到离开组合/入群状态变化
+                while (true) delay(60_000) // 保持监听直到离开组合/入群状态/模式变化
             } finally {
                 cm.removePrimaryClipChangedListener(listener)
             }
+        }
+    }
+
+    // 群组前台服务：入群期间保进程存活（后台剪贴板轮询 + ws 连接），退出/被踢停止
+    val notifPermLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {}
+    LaunchedEffect(session.joined) {
+        if (session.joined) {
+            if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                androidx.core.content.ContextCompat.checkSelfPermission(
+                    context, android.Manifest.permission.POST_NOTIFICATIONS
+                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) notifPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            com.knotyup.android.service.KnotForegroundService.start(context, t("sync_notif"))
+        } else {
+            com.knotyup.android.service.KnotForegroundService.stop(context)
         }
     }
 
@@ -376,13 +414,14 @@ private fun App(
                 }
                 composable(Routes.GROUP) {
                     GroupBody(t, session.members, history, sendText,
-                        role = session.role,
+                        role = session.role, clipMode = clipMode,
+                        onModeClick = { showShizukuGuide = true },
                         groupAddr = session.addr, groupPin = session.pin,
                         onKick = { pendingKick = it },
                         onCopy = { text ->
                             // 点击历史复制：先同步指纹闸门，避免被监听器当作本机复制再发回群
                             clipGuard[0] = textHash(text)
-                            ClipboardCapability.setText(context, text)
+                            scope.launch { ClipboardCapability.setText(context, text) }
                             AppState.toast(t("copied"), 1)
                         },
                         onSendText = { sendText = it },
@@ -427,6 +466,12 @@ private fun App(
                     )
                 }
             }
+        }
+
+        // 返回键拦截：群页面 back = 弹退出群确认（成员：退出；群主：转让/解散）。
+        // 必须组合在 NavHost 之后——后注册的回调优先生效，否则导航栈 pop 回首页
+        androidx.activity.compose.BackHandler(enabled = session.joined) {
+            confirmLeave = true
         }
 
         // Sonner 顶部轻提示（独立于内容层的弹出队列）：显式 TopCenter + 顶部留出刘海安全距离
@@ -505,6 +550,14 @@ private fun App(
                 addr = session.addr,
                 pin = session.pin,
                 onClose = { showQr = false },
+            )
+        }
+
+        // Shizuku 后台剪贴板引导弹窗（群页面模式徽章点击弹出）
+        if (showShizukuGuide) {
+            ShizukuGuideDialog(
+                t = t,
+                onDismiss = { showShizukuGuide = false },
             )
         }
 
@@ -1548,6 +1601,8 @@ private fun GroupBody(
     role: String,
     groupAddr: String,
     groupPin: String,
+    clipMode: com.knotyup.android.clipboard.ClipboardCapability.Mode,
+    onModeClick: () -> Unit,
     onKick: (String) -> Unit,
     onCopy: (String) -> Unit,
     onSendText: (String) -> Unit,
@@ -1577,7 +1632,7 @@ private fun GroupBody(
                     }
             ) {
                 when (page) {
-                    0 -> DevicesTab(t, members, role, onKick, onLeave)
+                    0 -> DevicesTab(t, members, role, groupAddr, groupPin, clipMode, onModeClick, onKick, onLeave)
                     else -> ClipboardTab(t, members, history, sendText, onCopy, onSendText, onSend)
                 }
             }
@@ -1599,8 +1654,97 @@ private fun GroupBody(
     }
 }
 
-/** 悬浮分段 Tab 栏：容器 + tab item + 激活指示块（点击切换，块随页面偏移联动）。 */
+/** 群信息卡内的「标签 + 值」行（值用等宽字体，便于核对地址/PIN）。 */
 @Composable
+private fun InfoRow(label: String, value: String, mono: Boolean = false) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            value,
+            fontSize = 12.sp, fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+            fontFamily = if (mono) androidx.compose.ui.text.font.FontFamily.Monospace else null,
+        )
+    }
+}
+
+/** Shizuku 后台剪贴板引导弹窗：说明 + 打开 Shizuku + 授权。 */
+@Composable
+private fun ShizukuGuideDialog(
+    t: (String) -> String,
+    onDismiss: () -> Unit,
+) {
+    val context = LocalContext.current
+    val active = com.knotyup.android.clipboard.ClipboardCapability.isShizukuActive()
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        DialogCard(Modifier.padding(horizontal = 40.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 0.dp,
+            ) {
+                Column(Modifier.padding(24.dp)) {
+                    Text(t("shizuku_guide_title"), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        t("shizuku_guide_body"),
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    Row {
+                        // 打开 Shizuku App（已激活则隐藏此按钮）
+                        if (!active) {
+                            Text(
+                                t("open_shizuku"),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        runCatching {
+                                            context.startActivity(
+                                                android.content.Intent(
+                                                    android.content.Intent.ACTION_MAIN
+                                                ).apply {
+                                                    addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+                                                    setPackage("moe.shizuku.privileged.api")
+                                                }
+                                            )
+                                        }
+                                    }
+                                    .padding(vertical = 10.dp),
+                                fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            )
+                            Spacer(Modifier.width(10.dp))
+                        }
+                        // 授权（需 Shizuku 已运行）
+                        Text(
+                            t("grant_permission"),
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(10.dp))
+                                .clickable {
+                                    com.knotyup.android.clipboard.ClipboardCapability.requestShizukuPermission()
+                                }
+                                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp))
+                                .padding(vertical = 10.dp),
+                            fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 悬浮分段 Tab 栏：容器 + tab item + 激活指示块（点击切换，块随页面偏移联动）。 */@Composable
 private fun GroupTabBar(
     t: (String) -> String,
     page: Float,
@@ -1608,7 +1752,7 @@ private fun GroupTabBar(
     modifier: Modifier = Modifier,
 ) {
     val items = listOf(
-        t("devices") to R.drawable.ic_devices,
+        t("group_info") to R.drawable.ic_devices,
         t("clipboard") to R.drawable.ic_clip,
     )
     val pos = page
@@ -1705,12 +1849,53 @@ private fun DevicesTab(
     t: (String) -> String,
     members: List<DeviceInfo>,
     role: String,
+    groupAddr: String,
+    groupPin: String,
+    clipMode: com.knotyup.android.clipboard.ClipboardCapability.Mode,
+    onModeClick: () -> Unit,
     onKick: (String) -> Unit,
     onLeave: () -> Unit,
 ) {
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp).padding(bottom = 96.dp),
     ) {
+        Text(t("group_info"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+        Spacer(Modifier.height(6.dp))
+        // 群信息卡：地址 / PIN / 剪贴板模式（前台模式可点击看 Shizuku 引导）
+        val shizuku = clipMode == com.knotyup.android.clipboard.ClipboardCapability.Mode.SHIZUKU
+        Column(
+            Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+        ) {
+            InfoRow(t("group_addr"), groupAddr, mono = true)
+            Spacer(Modifier.height(7.dp))
+            InfoRow(t("group_pin"), groupPin, mono = true)
+            Spacer(Modifier.height(7.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(t("clip_mode"), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    Modifier.size(6.dp).background(
+                        if (shizuku) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outline,
+                        RoundedCornerShape(50),
+                    )
+                )
+                Spacer(Modifier.width(5.dp))
+                Text(
+                    t(if (shizuku) "shizuku_mode_hint" else "fg_mode_hint"),
+                    fontSize = 11.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
+                    color = if (shizuku) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = if (!shizuku) {
+                        Modifier.clip(RoundedCornerShape(6.dp)).clickable { onModeClick() }
+                    } else Modifier,
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
         Text(t("devices"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         Spacer(Modifier.height(6.dp))
         members.forEachIndexed { i, m ->

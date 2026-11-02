@@ -8,6 +8,11 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- 前台服务（M2.2 后台剪贴板同步）：保进程不被冻结 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:label="KnotYup"
         android:icon="@mipmap/ic_launcher"
@@ -33,6 +38,12 @@
                 <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
+
+        <!-- 群组前台服务：入群期间常驻（Shizuku 剪贴板轮询 + ws 保活） -->
+        <service
+            android:name=".service.KnotForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
 
         <!-- Shizuku provider（声明即生效，能力探测在运行时） -->
         <provider
