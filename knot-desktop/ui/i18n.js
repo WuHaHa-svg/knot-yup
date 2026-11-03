@@ -33,7 +33,7 @@ const MESSAGES = {
     member_joined: '{name} 加入了群', member_left: '{name} 离开了群',
     fill_addr_pin: '请填写群地址和 PIN 码', already_in_group: '已在群中，请先退出',
     owner_only: '只有群主可以移出设备', copy_failed: '复制失败',
-    wrong_pin: 'PIN 码不正确', join_failed: '连接失败，请检查地址和网络',
+    wrong_pin: 'PIN 码不正确', join_failed: '连接失败，请检查群信息或重新连接局域网',
     op_failed: '操作失败，请重试',
   },
   'zh-Hant': {
@@ -67,7 +67,7 @@ const MESSAGES = {
     member_joined: '{name} 加入了群', member_left: '{name} 離開了群',
     fill_addr_pin: '請填寫群位址和 PIN 碼', already_in_group: '已在群中，請先退出',
     owner_only: '只有群主可以移出裝置', copy_failed: '複製失敗',
-    wrong_pin: 'PIN 碼不正確', join_failed: '連線失敗，請檢查位址和網路',
+    wrong_pin: 'PIN 碼不正確', join_failed: '連線失敗，請檢查群組資訊或重新連線區域網路',
     op_failed: '操作失敗，請重試',
   },
   'en': {
@@ -101,7 +101,7 @@ const MESSAGES = {
     member_joined: '{name} joined the group', member_left: '{name} left the group',
     fill_addr_pin: 'Please enter address and PIN', already_in_group: 'Already in a group — leave first',
     owner_only: 'Only the owner can remove devices', copy_failed: 'Copy failed',
-    wrong_pin: 'Incorrect PIN', join_failed: 'Connection failed — check address and network',
+    wrong_pin: 'Incorrect PIN', join_failed: 'Connection failed. Check the group info or reconnect to the LAN',
     op_failed: 'Something went wrong — please try again',
   },
 };

@@ -1,525 +1,37 @@
-//! KnotYup 桌面端：把 knot-core 桥接到 Tauri 命令与事件。
+//! KnotYup 桌面端装配层：模块声明 + Tauri 应用装配。
 //!
 //! 调试能力（日志页 / 45692 监听 / discovery 打点桥接）全部 `#[cfg(debug_assertions)]` 门控：
 //! `tauri build`（正式版）完全不编译、不监听、无入口；`tauri dev` 与 `tauri build --debug` 才启用。
+//!
+//! 模块划分：
+//! - state.rs    会话/设备/历史状态与通用工具
+//! - clipboard.rs 桌面剪贴板监视线程
+//! - bridge.rs   core 事件 → Tauri 事件桥接 + 选主/重连
+//! - commands.rs 全部 #[tauri::command]
 
 #[cfg(debug_assertions)]
 mod debug_server;
 
+mod bridge;
+mod clipboard;
+mod commands;
+mod state;
+
 /// 调试日志：仅 debug 构建生效（发布版为空操作，参数被编译器消除）。
 #[cfg(debug_assertions)]
-fn dlog(tag: &str, text: impl AsRef<str>) {
+pub(crate) fn dlog(tag: &str, text: impl AsRef<str>) {
     debug_server::dlog(tag, text);
 }
 #[cfg(not(debug_assertions))]
 #[allow(unused_variables)]
-fn dlog(tag: &str, text: impl AsRef<str>) {}
+pub(crate) fn dlog(tag: &str, text: impl AsRef<str>) {}
 
-use knot_core::clipboard::{text_hash, ClipboardWatcher};
 use knot_core::discovery::{self, GroupAd};
-use knot_core::net::{CoreEvent, GroupClient, GroupServer};
-use knot_core::protocol::{ClipboardKind, ClipboardPayload, DeviceInfo};
-use std::sync::Arc;
-use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::sync::{broadcast, mpsc, Mutex};
-
-/// 剪贴板线程收到的指令
-enum ClipCmd {
-    /// 写入剪贴板（来自远端同步或用户点击历史条目）
-    Set(ClipboardPayload),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-enum Role {
-    Owner,
-    Member,
-}
-
-#[derive(Clone, serde::Serialize)]
-struct HistoryItem {
-    from: String,
-    text: String,
-    at_ms: u64,
-}
-
-struct Session {
-    role: Role,
-    server: Option<Arc<GroupServer>>,
-    client: Option<GroupClient>,
-    members: Vec<DeviceInfo>,
-    /// Owner: 本机监听地址；Member: 组主地址
-    addr: String,
-    pin: String,
-    /// 组主停止广播的句柄
-    announce_stop: Option<mpsc::Sender<()>>,
-    /// 成员期预留的 TcpListener（承接群主用），端口即 DeviceInfo.addr 中的端口
-    standby: Option<tokio::net::TcpListener>,
-}
-
-struct AppState {
-    device: Mutex<Option<DeviceInfo>>,
-    session: Mutex<Option<Session>>,
-    clip_tx: Mutex<Option<mpsc::Sender<ClipCmd>>>,
-    core_tx: Mutex<Option<broadcast::Sender<CoreEvent>>>,
-    history: Mutex<Vec<HistoryItem>>,
-    discovered: Mutex<Vec<GroupAd>>,
-    /// 最近一次同步的剪贴板指纹（防回环：忽略同指纹的远端回声）
-    last_clip_hash: Mutex<String>,
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// 生成 6 位数字 PIN。
-fn gen_pin() -> String {
-    use rand::Rng;
-    rand::thread_rng().gen_range(100_000..1_000_000).to_string()
-}
-
-fn local_ip() -> String {
-    local_ip_address::local_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| "127.0.0.1".into())
-}
-
-/// 是否有可用的局域网 IPv4（功能全量依赖局域网，建群前检查）。
-fn has_lan() -> bool {
-    matches!(
-        local_ip_address::local_ip(),
-        Ok(ip) if !ip.is_loopback()
-    )
-}
-
-/// 启动剪贴板监视线程（轮询 + 去重）。
-/// 返回指令通道；本机内容变化通过 local_tx 抛给 async 侧。
-fn spawn_clipboard_watcher(local_tx: mpsc::Sender<ClipboardPayload>) -> mpsc::Sender<ClipCmd> {
-    let (tx, mut rx) = mpsc::channel::<ClipCmd>(32);
-    std::thread::Builder::new()
-        .name("clipboard-watcher".into())
-        .spawn(move || {
-            let mut watcher = match ClipboardWatcher::new() {
-                Ok(w) => w,
-                Err(e) => {
-                    tracing::error!("clipboard init failed: {e}");
-                    return;
-                }
-            };
-            // tokio mpsc 的 blocking_recv 会阻塞，单独起消费线程桥接到 std channel
-            let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<ClipCmd>();
-            std::thread::spawn(move || {
-                while let Some(cmd) = rx.blocking_recv() {
-                    cmd_tx.send(cmd).ok();
-                }
-            });
-            loop {
-                while let Ok(cmd) = cmd_rx.try_recv() {
-                    match cmd {
-                        ClipCmd::Set(payload) => {
-                            if let Err(e) = watcher.apply_remote(&payload) {
-                                tracing::error!("apply clipboard: {e}");
-                            }
-                        }
-                    }
-                }
-                if let Ok(Some(payload)) = watcher.poll_text() {
-                    local_tx.blocking_send(payload).ok();
-                }
-                std::thread::sleep(Duration::from_millis(400));
-            }
-        })
-        .expect("spawn clipboard watcher");
-    tx
-}
-
-/// core 事件 → Tauri 事件 → 前端
-async fn forward_core_events(
-    app: AppHandle,
-    state: Arc<AppState>,
-    mut rx: broadcast::Receiver<CoreEvent>,
-) {
-    loop {
-        match rx.recv().await {
-            Ok(CoreEvent::Members(members)) => {
-                dlog("evt/members", members.iter().map(|d| d.name.clone()).collect::<Vec<_>>().join(", "));
-                let own_id = state
-                    .device
-                    .lock()
-                    .await
-                    .as_ref()
-                    .map(|d| d.id.clone())
-                    .unwrap_or_default();
-                let (prev, had_session) = {
-                    let mut guard = state.session.lock().await;
-                    match guard.as_mut() {
-                        Some(s) => (std::mem::replace(&mut s.members, members.clone()), true),
-                        None => (Vec::new(), false),
-                    }
-                };
-                let _ = app.emit("knot://members", &members);
-                // 成员差量 → 加入/离开通知（首次同步与自身变化不提示）
-                if had_session && !prev.is_empty() {
-                    use std::collections::HashSet;
-                    let prev_ids: HashSet<String> = prev.iter().map(|d| d.id.clone()).collect();
-                    let new_ids: HashSet<String> = members.iter().map(|d| d.id.clone()).collect();
-                    for d in &members {
-                        if !prev_ids.contains(&d.id) && d.id != own_id {
-                            let _ = app.emit(
-                                "knot://member-change",
-                                serde_json::json!({ "type": "joined", "name": d.name }),
-                            );
-                        }
-                    }
-                    for d in &prev {
-                        if !new_ids.contains(&d.id) && d.id != own_id {
-                            let _ = app.emit(
-                                "knot://member-change",
-                                serde_json::json!({ "type": "left", "name": d.name }),
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(CoreEvent::Clipboard { from, payload }) => {
-                dlog("evt/clipboard", format!("from={} len={} hash={}", from, payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash));
-                // 防回环：成员把同步内容当作本机复制再发回来时，指纹相同，直接忽略
-                let mut guard = state.last_clip_hash.lock().await;
-                if *guard == payload.hash {
-                    continue;
-                }
-                *guard = payload.hash.clone();
-                drop(guard);
-                if let Some(tx) = state.clip_tx.lock().await.as_ref() {
-                    let _ = tx.send(ClipCmd::Set(payload.clone())).await;
-                }
-                push_history(&state, &from, &payload).await;
-                let _ = app.emit(
-                    "knot://clipboard",
-                    serde_json::json!({ "from": from, "text": payload.text, "hash": payload.hash }),
-                );
-            }
-            Ok(CoreEvent::Kicked(reason)) => {
-                dlog("evt/kicked", &reason);
-                *state.session.lock().await = None;
-                let _ = app.emit("knot://kicked", reason);
-            }
-            Ok(CoreEvent::OwnerChange(new_owner)) => {
-                dlog("evt/owner-change", format!("new_owner={} @ {}", new_owner.name, new_owner.addr.clone().unwrap_or_default()));
-                // 群主主动转让：new_owner 升为主，其余重连
-                handle_owner_lost(app.clone(), state.clone(), Some(new_owner)).await;
-            }
-            Ok(CoreEvent::Error(e)) => {
-                dlog("evt/error", &e);
-                let is_member = {
-                    let s = state.session.lock().await;
-                    matches!(&*s, Some(Session { role: Role::Member, .. }))
-                };
-                if is_member && e.starts_with("connection closed") {
-                    // 群主意外离开 → 选主
-                    handle_owner_lost(app.clone(), state.clone(), None).await;
-                } else if !e.starts_with("connection closed") {
-                    let _ = app.emit("knot://error", e);
-                }
-            }
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => break,
-        }
-    }
-}
-
-/// 群主消失（意外断开或主动转让）后的选主与重连。
-/// explicit = 转让时指定的新群主；None = 按 members[1] 顺位确定选主。
-async fn handle_owner_lost(app: AppHandle, state: Arc<AppState>, explicit: Option<DeviceInfo>) {
-    let Some(mut s) = state.session.lock().await.take() else {
-        return;
-    };
-    let candidates: Vec<DeviceInfo> = match &explicit {
-        Some(d) => vec![d.clone()],
-        None => s.members.iter().skip(1).cloned().collect(), // [0] 是旧群主
-    };
-    let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
-    let pin = s.pin.clone();
-    let core_tx = state.core_tx.lock().await.clone().unwrap_or_else(|| {
-        // 理论上 setup 已初始化；兜底新建（事件转发只订阅原通道，此分支仅保编译）
-        broadcast::channel::<CoreEvent>(128).0
-    });
-
-    if candidates.is_empty() {
-        dlog("err/owner-lost", "无候选，群丢失");
-        let _ = app.emit("knot://kicked", "GROUP_LOST");
-        return;
-    }
-    dlog("act/owner-lost", format!("候选: {}", candidates.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(" → ")));
-
-    if candidates[0].id == my_id {
-        // 当选：用预留端口升为群主
-        let standby_port = s
-            .standby
-            .as_ref()
-            .and_then(|l| l.local_addr().ok())
-            .map(|a| a.port())
-            .unwrap_or(0);
-        s.standby = None; // 释放端口
-        drop(s);
-        let device = state.device.lock().await.clone().unwrap_or_else(|| candidates[0].clone());
-        match GroupServer::start(standby_port, pin.clone(), device.clone(), core_tx).await {
-            Ok((server, port)) => {
-                let addr = format!("{}:{}", local_ip(), port);
-                let announce_stop = discovery::announce(GroupAd {
-                    id: device.id.clone(),
-                    name: device.name.clone(),
-                    addr: addr.clone(),
-                })
-                .await
-                .ok();
-                dlog("act/promoted", format!("承接群主 {addr}"));
-                *state.session.lock().await = Some(Session {
-                    role: Role::Owner,
-                    server: Some(server),
-                    client: None,
-                    members: vec![device.clone()],
-                    addr,
-                    pin,
-                    announce_stop,
-                    standby: None,
-                });
-                let _ = app.emit("knot://members", vec![device]);
-                let _ = app.emit("knot://toast", "PROMOTED");
-            }
-            Err(_) => {
-                let _ = app.emit("knot://kicked", "GROUP_LOST");
-                dlog("err/promoted", "承接群主失败（端口被占）");
-            }
-        }
-    } else {
-        // 重连：依次尝试候选地址（当选者未就绪时退避重试）
-        drop(s);
-        let _ = app.emit("knot://toast", "RECONNECTING");
-        dlog("act/reconnecting", "开始重连候选");
-        tauri::async_runtime::spawn(async move {
-            for _attempt in 0..10 {
-                for c in &candidates {
-                    let Some(addr) = &c.addr else { continue };
-                    if c.id == my_id {
-                        continue;
-                    }
-                    let device = state.device.lock().await.clone().unwrap();
-                    dlog("act/reconnect-try", format!("attempt={_attempt} -> {addr}"));
-                    if let Ok(client) = GroupClient::connect(addr, &pin, device, core_tx.clone()).await {
-                        let mut guard = state.session.lock().await;
-                        if guard.is_some() {
-                            return; // 已经被其他路径处理
-                        }
-                        *guard = Some(Session {
-                            role: Role::Member,
-                            server: None,
-                            client: Some(client),
-                            members: vec![],
-                            addr: addr.clone(),
-                            pin: pin.clone(),
-                            announce_stop: None,
-                            standby: None,
-                        });
-                        drop(guard);
-                        let _ = app.emit("knot://toast", "RECONNECTED");
-                        dlog("act/reconnected", format!("已重连 {addr}"));
-                        return;
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            }
-            let _ = app.emit("knot://kicked", "GROUP_LOST");
-            dlog("err/reconnect", "10 轮重连全部失败，群丢失");
-        });
-    }
-}
-
-async fn push_history(state: &Arc<AppState>, from: &str, payload: &ClipboardPayload) {
-    if let Some(text) = &payload.text {
-        let mut h = state.history.lock().await;
-        h.insert(
-            0,
-            HistoryItem {
-                from: from.to_string(),
-                text: text.clone(),
-                at_ms: now_ms(),
-            },
-        );
-        h.truncate(50);
-    }
-}
-
-type SharedState = Arc<AppState>;
-
-#[tauri::command]
-async fn get_state(state: State<'_, SharedState>) -> Result<serde_json::Value, String> {
-    let dev = state.device.lock().await.clone();
-    let s = state.session.lock().await;
-    Ok(serde_json::json!({
-        "device": dev,
-        "local_ip": local_ip(),
-        "session": s.as_ref().map(|s| serde_json::json!({
-            "role": s.role,
-            "addr": s.addr,
-            "pin": s.pin,
-            "members": s.members,
-        })),
-        "history": *state.history.lock().await,
-        "discovered": *state.discovered.lock().await,
-    }))
-}
-
-#[tauri::command]
-async fn create_group(
-    app: AppHandle,
-    state: State<'_, SharedState>,
-    pin: Option<String>,
-    port: Option<u16>,
-) -> Result<serde_json::Value, String> {
-    if state.session.lock().await.is_some() {
-        return Err("ALREADY_IN_GROUP".into());
-    }
-    if !has_lan() {
-        return Err("NO_LAN".into());
-    }
-    let pin = pin.unwrap_or_else(gen_pin);
-    let core_tx = state.core_tx.lock().await.clone().ok_or("core 未初始化")?;
-    let device = state.device.lock().await.clone().unwrap();
-    dlog("act/create", format!("创建群 port={} pin={}", port.unwrap_or(0), pin));
-    let (server, port) = GroupServer::start(port.unwrap_or(0), pin.clone(), device.clone(), core_tx)
-        .await
-        .map_err(|e| {
-            dlog("err/create", format!("{e}"));
-            format!("启动服务失败: {e}")
-        })?;
-
-    let addr = format!("{}:{}", local_ip(), port);
-    dlog("act/create", format!("群已建立 ws://{addr} pin={pin}"));
-    let _ = app.emit("knot://members", vec![device.clone()]);
-
-    // 组主在局域网内广播本组（供其他设备发现；PIN 不随广播发布）
-    let announce_stop = discovery::announce(GroupAd {
-        id: device.id.clone(),
-        name: device.name.clone(),
-        addr: addr.clone(),
-    })
-    .await
-    .ok();
-
-    *state.session.lock().await = Some(Session {
-        role: Role::Owner,
-        server: Some(server),
-        client: None,
-        members: vec![device.clone()],
-        addr: addr.clone(),
-        pin: pin.clone(),
-        announce_stop,
-        standby: None,
-    });
-    Ok(serde_json::json!({ "addr": addr, "pin": pin, "port": port }))
-}
-
-#[tauri::command]
-async fn join_group(
-    state: State<'_, SharedState>,
-    addr: String,
-    pin: String,
-) -> Result<serde_json::Value, String> {
-    if state.session.lock().await.is_some() {
-        return Err("ALREADY_IN_GROUP".into());
-    }
-    let core_tx = state.core_tx.lock().await.clone().ok_or("CORE_INIT")?;
-    let mut device = state.device.lock().await.clone().unwrap();
-    dlog("act/join", format!("加入群 {addr} pin={pin}"));
-    // 预留端口：群主意外离开时本机可能需要承接为群主
-    let standby = tokio::net::TcpListener::bind(("0.0.0.0", 0)).await.map_err(|e| format!("{e}"))?;
-    if let Ok(p) = standby.local_addr() {
-        device.addr = Some(format!("{}:{}", local_ip(), p.port()));
-        dlog("act/join", format!("预留承接端口 {}", p.port()));
-    }
-    let client = GroupClient::connect(&addr, &pin, device.clone(), core_tx).await.inspect_err(|e| {
-        dlog("err/join", format!("{e}"));
-    })?;
-
-    *state.session.lock().await = Some(Session {
-        role: Role::Member,
-        server: None,
-        client: Some(client),
-        members: vec![],
-        addr,
-        pin,
-        announce_stop: None,
-        standby: Some(standby),
-    });
-    Ok(serde_json::json!({ "ok": true }))
-}
-
-#[tauri::command]
-async fn leave_group(
-    state: State<'_, SharedState>,
-    transfer_to: Option<String>,
-) -> Result<(), String> {
-    if let Some(s) = state.session.lock().await.take() {
-        dlog("act/leave", format!("role={:?} transfer_to={:?}", s.role, transfer_to));
-        if let Some(server) = s.server {
-            if let Some(target) = transfer_to {
-                // 转让给指定成员后退群
-                if let Some(info) = s.members.iter().find(|m| m.id == target) {
-                    server.transfer(info).await;
-                } else {
-                    server.shutdown().await;
-                }
-            } else {
-                server.shutdown().await;
-            }
-        }
-        if let Some(stop) = s.announce_stop {
-            stop.send(()).await.ok();
-        }
-        // client 句柄 drop 后写任务退出，连接随之关闭
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn kick_device(state: State<'_, SharedState>, device_id: String) -> Result<(), String> {
-    let s = state.session.lock().await;
-    match &*s {
-        Some(Session { server: Some(server), .. }) => {
-            dlog("act/kick", &device_id);
-            server.kick(&device_id).await;
-            Ok(())
-        }
-        _ => Err("OWNER_ONLY".into()),
-    }
-}
-
-#[tauri::command]
-async fn copy_history_item(state: State<'_, SharedState>, index: usize) -> Result<(), String> {
-    let item = state.history.lock().await.get(index).cloned();
-    if let Some(item) = item {
-        let tx = state.clip_tx.lock().await.clone().ok_or("core 未初始化")?;
-        tx.send(ClipCmd::Set(ClipboardPayload {
-            kind: ClipboardKind::Text,
-            text: Some(item.text.clone()),
-            hash: text_hash(&item.text),
-        }))
-        .await
-        .map_err(|_| "剪贴板线程已退出")?;
-    }
-    Ok(())
-}
-
-/// 前端查询：调试工具是否可用（发布版隐藏入口）。
-#[tauri::command]
-fn debug_tools_enabled() -> bool {
-    cfg!(debug_assertions)
-}
+use knot_core::net::CoreEvent;
+use knot_core::protocol::{ClipboardPayload, DeviceInfo};
+use state::{push_history, Role, SharedState, AppState};
+use tokio::sync::{broadcast, mpsc};
+use tauri::{Emitter, Manager};
 
 pub fn run() {
     // 日志订阅器装配：debug 构建走 debug_server（含 discovery 桥接），release 走纯 fmt
@@ -536,14 +48,14 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
-            let shared: SharedState = Arc::new(AppState {
-                device: Mutex::new(None),
-                session: Mutex::new(None),
-                clip_tx: Mutex::new(None),
-                core_tx: Mutex::new(None),
-                history: Mutex::new(Vec::new()),
-                discovered: Mutex::new(Vec::new()),
-                last_clip_hash: Mutex::new(String::new()),
+            let shared: SharedState = std::sync::Arc::new(AppState {
+                device: tokio::sync::Mutex::new(None),
+                session: tokio::sync::Mutex::new(None),
+                clip_tx: tokio::sync::Mutex::new(None),
+                core_tx: tokio::sync::Mutex::new(None),
+                history: tokio::sync::Mutex::new(Vec::new()),
+                discovered: tokio::sync::Mutex::new(Vec::new()),
+                last_clip_hash: tokio::sync::Mutex::new(String::new()),
             });
 
             // 本机设备身份
@@ -556,7 +68,7 @@ pub fn run() {
 
             // 剪贴板监视线程 + 本机变化通道
             let (local_tx, mut local_rx) = mpsc::channel::<ClipboardPayload>(64);
-            let clip_tx = spawn_clipboard_watcher(local_tx);
+            let clip_tx = clipboard::spawn_clipboard_watcher(local_tx);
 
             // core 事件总线
             let (core_tx, core_rx) = broadcast::channel::<CoreEvent>(128);
@@ -622,7 +134,7 @@ pub fn run() {
                 *shared.clip_tx.lock().await = Some(clip_tx);
                 *shared.core_tx.lock().await = Some(core_tx);
             });
-            tauri::async_runtime::spawn(forward_core_events(handle.clone(), shared.clone(), core_rx));
+            tauri::async_runtime::spawn(bridge::forward_core_events(handle.clone(), shared.clone(), core_rx));
 
             // 本机剪贴板变化 → 广播给组 + 记历史
             let shared_clip = shared.clone();
@@ -671,18 +183,18 @@ pub fn run() {
             // 调试日志服务（仅 debug 构建；浏览器访问 http://127.0.0.1:45692 实时查看）
             #[cfg(debug_assertions)]
             tauri::async_runtime::spawn(debug_server::start());
-            dlog("app", format!("启动完成 device={} ip={}", device.name, local_ip()));
+            dlog("app", format!("启动完成 device={} ip={}", device.name, state::local_ip()));
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_state,
-            create_group,
-            join_group,
-            leave_group,
-            kick_device,
-            copy_history_item,
-            debug_tools_enabled
+            commands::get_state,
+            commands::create_group,
+            commands::join_group,
+            commands::leave_group,
+            commands::kick_device,
+            commands::copy_history_item,
+            commands::debug_tools_enabled
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

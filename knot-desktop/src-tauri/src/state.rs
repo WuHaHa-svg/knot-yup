@@ -1,0 +1,97 @@
+//! 桌面端会话状态与通用工具：设备/会话/历史 + IP/PIN 等辅助。
+
+use knot_core::discovery::GroupAd;
+use knot_core::net::{CoreEvent, GroupClient, GroupServer};
+use knot_core::protocol::DeviceInfo;
+use std::sync::Arc;
+use tokio::sync::{broadcast, mpsc, Mutex};
+
+/// 剪贴板线程收到的指令
+pub(crate) enum ClipCmd {
+    /// 写入剪贴板（来自远端同步或用户点击历史条目）
+    Set(knot_core::protocol::ClipboardPayload),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Role {
+    Owner,
+    Member,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct HistoryItem {
+    pub from: String,
+    pub text: String,
+    pub at_ms: u64,
+}
+
+pub(crate) struct Session {
+    pub role: Role,
+    pub server: Option<Arc<GroupServer>>,
+    pub client: Option<GroupClient>,
+    pub members: Vec<DeviceInfo>,
+    /// Owner: 本机监听地址；Member: 组主地址
+    pub addr: String,
+    pub pin: String,
+    /// 组主停止广播的句柄
+    pub announce_stop: Option<mpsc::Sender<()>>,
+    /// 成员期预留的 TcpListener（承接群主用），端口即 DeviceInfo.addr 中的端口
+    pub standby: Option<tokio::net::TcpListener>,
+}
+
+pub(crate) struct AppState {
+    pub device: Mutex<Option<DeviceInfo>>,
+    pub session: Mutex<Option<Session>>,
+    pub clip_tx: Mutex<Option<mpsc::Sender<ClipCmd>>>,
+    pub core_tx: Mutex<Option<broadcast::Sender<CoreEvent>>>,
+    pub history: Mutex<Vec<HistoryItem>>,
+    pub discovered: Mutex<Vec<GroupAd>>,
+    /// 最近一次同步的剪贴板指纹（防回环：忽略同指纹的远端回声）
+    pub last_clip_hash: Mutex<String>,
+}
+
+pub(crate) type SharedState = Arc<AppState>;
+
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 生成 6 位数字 PIN。
+pub(crate) fn gen_pin() -> String {
+    use rand::Rng;
+    rand::thread_rng().gen_range(100_000..1_000_000).to_string()
+}
+
+pub(crate) fn local_ip() -> String {
+    local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| "127.0.0.1".into())
+}
+
+/// 是否有可用的局域网 IPv4（功能全量依赖局域网，建群前检查）。
+pub(crate) fn has_lan() -> bool {
+    matches!(
+        local_ip_address::local_ip(),
+        Ok(ip) if !ip.is_loopback()
+    )
+}
+
+/// 追加历史记录（新条目置顶，保留 50 条）。
+pub(crate) async fn push_history(state: &SharedState, from: &str, payload: &knot_core::protocol::ClipboardPayload) {
+    if let Some(text) = &payload.text {
+        let mut h = state.history.lock().await;
+        h.insert(
+            0,
+            HistoryItem {
+                from: from.to_string(),
+                text: text.clone(),
+                at_ms: now_ms(),
+            },
+        );
+        h.truncate(50);
+    }
+}

@@ -69,6 +69,11 @@ object AppState {
     private val _joining = MutableStateFlow(false)
     val joining: StateFlow<Boolean> = _joining
 
+    /** 入群 Loading 开关：UI 点击瞬间置 true（三条入群路径共用），成员会话启动后由事件收口 */
+    fun setJoining(v: Boolean) {
+        _joining.value = v
+    }
+
     /** 剪贴板能力模式（进程级，随 Shizuku 状态自动切换） */
     private val _clipMode = MutableStateFlow(com.knotyup.android.clipboard.ClipboardCapability.Mode.FOREGROUND)
     val clipMode: StateFlow<com.knotyup.android.clipboard.ClipboardCapability.Mode> = _clipMode
