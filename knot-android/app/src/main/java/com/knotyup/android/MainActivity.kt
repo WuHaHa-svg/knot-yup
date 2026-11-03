@@ -85,12 +85,24 @@ class MainActivity : ComponentActivity() {
         if (hasFocus) com.knotyup.android.ui.FullScreen.keepFullScreen(window)
     }
 
+    override fun onStart() {
+        super.onStart()
+        AppState.setInForeground(true)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        AppState.setInForeground(false)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // 全屏（沉浸式）：onCreate 尽早配置，避免启动瞬间状态栏闪现
         com.knotyup.android.ui.FullScreen.applyFullScreen(window)
         // 群地址解析需要系统 ConnectivityManager 兜底（见 Discovery.localIpAddress(context)）
         AppState.appContext = applicationContext
+        // 进程级运行时（事件处理/成员会话/剪贴板监听）：幂等，Activity 重建不影响消息链路
+        AppState.startRuntime()
         val sharedText = intent?.takeIf { it.action == android.content.Intent.ACTION_SEND }
             ?.getStringExtra(android.content.Intent.EXTRA_TEXT)
 
@@ -139,10 +151,11 @@ private fun App(
     val session by AppState.session.collectAsState()
     val history by AppState.history.collectAsState()
     val toastMsg by AppState.toast.collectAsState()
-    var discovered by remember { mutableStateOf<List<GroupAd>>(emptyList()) }
+    val joining by AppState.joining.collectAsState()
+    val clipMode = AppState.clipMode.collectAsState().value
+    val discovered = AppState.discovered.collectAsState().value
     var addr by remember { mutableStateOf("") }
     var pin by remember { mutableStateOf("") }
-    var joining by remember { mutableStateOf(false) }
     var sendText by remember { mutableStateOf(sharedText ?: "") }
     var confirmLeave by remember { mutableStateOf(false) }
     var pendingKick by remember { mutableStateOf<String?>(null) }
@@ -162,164 +175,22 @@ private fun App(
     // 返回键拦截见 NavHost 之后（BackHandler 必须晚于 NavHost 组合，
     // 否则导航栈的回调优先生效，back 会 pop 回首页而不是弹退出确认）
 
-    // 手动/弹窗共用的入群流程：立即 loading → 先收起键盘 → 0.5s 后再执行加群逻辑；入群 5s 超时
+    // 手动/弹窗共用的入群流程：立即 loading → 先收起键盘 → 0.5s 后启动进程级成员会话
+    // （连接/心跳/事件处理全在 AppState，横竖屏切换不中断；入群 5s 超时亦在会话内处理）
     val appView = androidx.compose.ui.platform.LocalView.current
     fun startJoin(addrValue: String, pinValue: String) {
-        joining = true // Loading 立即出现
+        AppState.startRuntime()
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? android.view.inputmethod.InputMethodManager
         imm?.hideSoftInputFromWindow(appView.windowToken, 0)
         scope.launch {
             kotlinx.coroutines.delay(500)
-            // 记录会话（重连/承接群主需要同 PIN），预留端口并随 join 上报地址
-            AppState.onJoining(addrValue, pinValue)
-            AppState.setStandby(java.net.ServerSocket(0))
-            val joinJob = launch {
-                AppState.client.join(addrValue, pinValue, AppState.deviceWithStandbyAddr()).collect { result ->
-                    result.fold({ event ->
-                        AppState.emit(event)
-                        when (event) {
-                            is GroupEvent.Members -> joining = false
-                            is GroupEvent.Kicked, GroupEvent.Disconnected -> joining = false
-                            else -> {}
-                        }
-                    }, { e ->
-                        // 错误细节走 logcat，UI 只给本地化文案
-                        android.util.Log.w("KnotYup", "join failed: ${e.message}")
-                        val s = AppState.session.value
-                        if (s.joined && s.role == "member") {
-                            // 已入群后的连接失败（心跳失联/群主消失）→ 选主承接，而不是报错
-                            handleOwnerLost(t, scope, null)
-                        } else if (e.message == "WRONG_PIN") {
-                            AppState.toast(t("wrong_pin"), kind = 2)
-                            joining = false
-                        } else {
-                            AppState.toast(t("join_failed"), kind = 2)
-                            joining = false
-                        }
-                    })
-                }
-            }
-            // 入群超时：5s 内未收到成员表即判失败（取消连接 + 提示）
-            kotlinx.coroutines.delay(5000)
-            if (joining && !AppState.session.value.joined) {
-                android.util.Log.w("KnotYup", "join timeout (5s): $addrValue")
-                joinJob.cancel()
-                AppState.client.leave() // 确保旧 socket 关闭（防双实例）
-                AppState.toast(t("join_failed"), kind = 2)
-                joining = false
-            }
-        }
-    }
-    // 剪贴板指纹闸门[0]：最近一次同步的内容指纹（收/发都记录），防止「写入被当成本机复制」回环
-    val clipGuard = remember { arrayOf("") }
-
-    // 剪贴板能力模式（Shizuku 后台 / 前台）：随 Shizuku binder 与授权状态自动切换
-    var clipMode by remember { mutableStateOf(ClipboardCapability.currentMode()) }
-    LaunchedEffect(Unit) {
-        ClipboardCapability.observeModeChanges { clipMode = it }
-    }
-
-    // 本机剪贴板变化 → 群广播（两种监听模式共用；含指纹闸门防回环）
-    suspend fun sendLocalClip(text: String) {
-        val hash = textHash(text)
-        if (text.isEmpty() || hash == clipGuard[0]) return
-        clipGuard[0] = hash
-        val sent = if (AppState.isOwner()) {
-            AppState.server?.broadcastClipboard(text)
-            AppState.server != null
-        } else {
-            AppState.client.sendClipboard(text)
-        }
-        if (sent) AppState.addLocalHistory(text)
-    }
-
-
-    // 事件处理（含写本机剪贴板，需要 context）
-    LaunchedEffect(Unit) {
-        AppState.events.collect { event ->
-            when (event) {
-                is GroupEvent.Members -> {
-                    // 成员差量 → 加入/离开提示（首次同步与自身变化不提示）
-                    val prev = AppState.session.value.members
-                    if (prev.isNotEmpty()) {
-                        val prevIds = prev.map { it.id }.toSet()
-                        val newIds = event.members.map { it.id }.toSet()
-                        event.members.filter { it.id !in prevIds && it.id != AppState.device.id }
-                            .forEach { AppState.toast(t("member_joined").replace("{name}", it.name)) }
-                        prev.filter { it.id !in newIds && it.id != AppState.device.id }
-                            .forEach { AppState.toast(t("member_left").replace("{name}", it.name)) }
-                    }
-                    AppState.applyEvent(event)
-                }
-                is GroupEvent.Clipboard -> {
-                    clipGuard[0] = event.payload.hash
-                    AppState.applyEvent(event)
-                    ClipboardCapability.setText(context, event.payload.text)
-                }
-                is GroupEvent.Kicked -> {
-                    AppState.reset()
-                    AppState.toast(if (event.reason == "GROUP_DISSOLVED") t("group_dissolved") else t("kicked"), 2)
-                }
-                is GroupEvent.OwnerChange -> handleOwnerLost(t, scope, event.newOwner)
-                GroupEvent.Disconnected -> handleOwnerLost(t, scope, null)
-                is GroupEvent.Error -> {
-                    // 成员期连接错误（如未收到转让通知即断开）→ 同样走选主
-                    val s = AppState.session.value
-                    android.util.Log.w("KnotYup", "ws error: ${event.message}")
-                    if (s.joined && s.role == "member") {
-                        handleOwnerLost(t, scope, null)
-                    } else {
-                        // 原始错误细节已在上面 Log.w，toast 只给本地化文案
-                        AppState.toast(t("op_failed"), 2)
-                    }
-                }
-            }
+            AppState.startMemberSession(addrValue, pinValue)
         }
     }
 
-    // 发现监听：过滤本机 IP 的群（自己广播的群不显示）；仅在首页且 RESUMED 时扫描
-    val myIp = Discovery.localIpAddress()
-    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
-    LaunchedEffect(session.joined, lifecycleOwner) {
-        if (!session.joined) {
-            lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.RESUMED) {
-                Discovery.listen(context).collect { list ->
-                    discovered = if (myIp == null) list else list.filter { !it.addr.startsWith("$myIp:") }
-                }
-            }
-        }
-    }
+    // 发现扫描已下沉 AppState（进程级，旋转不丢结果、不重启扫描周期），见 setInForeground/restartDiscovery
 
-    // 剪贴板监听（按模式自动切换）：SHIZUKU → 1s 轮询摘要指纹（后台可感知）；
-    // FOREGROUND → 系统变更回调（仅前台有效）。两者共用 sendLocalClip 链路。
-    LaunchedEffect(session.joined, clipMode) {
-        if (!session.joined) return@LaunchedEffect
-        if (clipMode == ClipboardCapability.Mode.SHIZUKU) {
-            // 基线：起始指纹不当作新复制（与前台回调「只在变化时报」语义一致）
-            var lastFp = ClipboardCapability.fingerprint(context)
-            while (true) {
-                delay(1_000)
-                val fp = ClipboardCapability.fingerprint(context) ?: continue
-                if (fp == lastFp) continue
-                lastFp = fp
-                ClipboardCapability.getText(context)?.let { sendLocalClip(it) }
-            }
-        } else {
-            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-            val listener = ClipboardManager.OnPrimaryClipChangedListener {
-                // getText 是 suspend（Shizuku binder / IO 线程），回调里起协程
-                scope.launch {
-                    ClipboardCapability.getText(context)?.let { sendLocalClip(it) }
-                }
-            }
-            cm.addPrimaryClipChangedListener(listener)
-            try {
-                while (true) delay(60_000) // 保持监听直到离开组合/入群状态/模式变化
-            } finally {
-                cm.removePrimaryClipChangedListener(listener)
-            }
-        }
-    }
+    // 剪贴板监听/事件处理均已下沉 AppState（进程级，旋转不中断），UI 不再持有消息协程
 
     // 群组前台服务：入群期间保进程存活（后台剪贴板轮询 + ws 连接），退出/被踢停止
     val notifPermLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -337,12 +208,14 @@ private fun App(
         }
     }
 
-    // Sonner 轻提示：toast 请求 → 顶部弹出（独立窗口层，不被弹窗遮罩挡住）
+    // Sonner 轻提示：toast 请求 → 顶部弹出（key 型请求按当前语言解析 i18n 文案并替换 {name} 等）
     val toaster = com.dokar.sonner.rememberToasterState()
     LaunchedEffect(toastMsg) {
         toastMsg?.let { req ->
+            val raw = req.key?.let { t(it) } ?: req.msg ?: return@let
+            val text = req.subs.entries.fold(raw) { acc, (k, v) -> acc.replace("{$k}", v) }
             toaster.show(
-                message = req.msg,
+                message = text,
                 type = when (req.kind) {
                     1 -> com.dokar.sonner.ToastType.Success
                     2 -> com.dokar.sonner.ToastType.Error
@@ -420,7 +293,7 @@ private fun App(
                         onKick = { pendingKick = it },
                         onCopy = { text ->
                             // 点击历史复制：先同步指纹闸门，避免被监听器当作本机复制再发回群
-                            clipGuard[0] = textHash(text)
+                            AppState.clipGuard = textHash(text)
                             scope.launch { ClipboardCapability.setText(context, text) }
                             AppState.toast(t("copied"), 1)
                         },
@@ -1038,70 +911,7 @@ private fun KnotConfirm(
 private fun t0(key: String): String = com.knotyup.android.ui.Strings.t(com.knotyup.android.ui.Strings.currentLang, key)
 
 // —— UI 组件 ————————————————————————————
-
-/** 选主与重连：群主意外离开或主动转让。 */
-private fun handleOwnerLost(
-    t: (String) -> String,
-    scope: kotlinx.coroutines.CoroutineScope,
-    explicit: DeviceInfo?,
-) {
-    // 防重入：错误分支与事件分支可能双路触发（如心跳失联同时产生 flow failure 与事件）
-    if (AppState.ownerLostHandling) {
-        android.util.Log.w("KnotYup", "handleOwnerLost 已在处理中，忽略重复触发")
-        return
-    }
-    AppState.ownerLostHandling = true
-    val s = AppState.session.value
-    val candidates = explicit?.let { listOf(it) } ?: s.members.drop(1) // [0] 是旧群主
-    android.util.Log.d("KnotYup", "owner lost: explicit=${explicit?.name}, candidates=${candidates.map { "${it.name}@${it.addr}" }}")
-    if (candidates.isEmpty()) {
-        AppState.reset()
-        AppState.toast(t("group_lost"), 2)
-        AppState.ownerLostHandling = false
-        return
-    }
-    if (candidates[0].id == AppState.device.id) {
-        // 当选：用预留端口承接为群主
-        val port = AppState.standby?.localPort ?: AppState.reservePort()
-        AppState.becomeOwner(s.pin, port)
-        AppState.toast(t("promoted"), 1)
-        AppState.ownerLostHandling = false
-    } else {
-        // 其余成员：依次尝试候选地址重连
-        AppState.toast(t("reconnecting"))
-        val pin_ = s.pin
-        scope.launch {
-            for (attempt in 0 until 10) {
-                for (c in candidates) {
-                    if (c.id == AppState.device.id || c.addr.isNullOrBlank()) continue
-                    var connected = false
-                    android.util.Log.d("KnotYup", "reconnect attempt=$attempt -> ${c.name}@${c.addr}")
-                    try {
-                        AppState.client.join(c.addr, pin_, AppState.deviceWithStandbyAddr()).collect { res ->
-                            res.fold({ ev ->
-                                if (ev is GroupEvent.Members && !connected) {
-                                    connected = true
-                                    AppState.toast(t("reconnected"), 1)
-                                    AppState.ownerLostHandling = false
-                                }
-                                AppState.emit(ev)
-                            }, { e ->
-                                android.util.Log.w("KnotYup", "reconnect failed: ${e.message}")
-                            })
-                        }
-                    } catch (_: Exception) {
-                    }
-                    if (connected) return@launch // 正常入群；若再次断开，Disconnected 事件会重新触发选主
-                    kotlinx.coroutines.delay(500)
-                }
-                kotlinx.coroutines.delay(1500)
-            }
-            AppState.reset()
-            AppState.toast(t("group_lost"), 2)
-            AppState.ownerLostHandling = false
-        }
-    }
-}
+// （选主/重连 handleOwnerLost 已下沉 AppState.ownerLost——进程级，旋转不中断）
 
 @Composable
 private fun Header(
