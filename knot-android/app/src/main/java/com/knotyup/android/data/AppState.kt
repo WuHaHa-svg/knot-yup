@@ -500,10 +500,19 @@ object AppState {
         _joining.value = false
     }
 
-    // 偏好：主题色 / 语言 key
+    // 偏好：主题色 / 语言 / 首次引导 key
     private const val PREFS = "knotyup"
     private const val KEY_THEME = "theme"
     private const val KEY_LANG = "lang"
+    private const val KEY_ONBOARDED = "onboarded"
+
+    /** 首次启动引导是否已完成（完成/开始使用后置位，永不再现）。 */
+    fun isOnboarded(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_ONBOARDED, false)
+
+    fun saveOnboarded(context: Context) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_ONBOARDED, true).apply()
 
     fun saveTheme(context: Context, id: String) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_THEME, id).apply()

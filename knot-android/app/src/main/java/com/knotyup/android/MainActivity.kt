@@ -47,6 +47,7 @@ import com.knotyup.android.ui.components.Header
 import com.knotyup.android.ui.screens.AppDialogs
 import com.knotyup.android.ui.screens.GroupBody
 import com.knotyup.android.ui.screens.HomeBody
+import com.knotyup.android.ui.screens.OnboardingScreen
 import com.knotyup.android.ui.screens.ScannerScreen
 import com.knotyup.android.ui.screens.SplashScreen
 import kotlinx.coroutines.delay
@@ -153,11 +154,25 @@ private fun App(
     var showShizukuGuide by remember { mutableStateOf(false) }
     // rememberSaveable：横竖屏旋转（Activity 重建）不重播开屏动画
     var showSplash by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(true) }
+    // 首次启动引导：完成/开始使用后置位，永不再现（旋转不重播，saveable）
+    var showOnboarding by androidx.compose.runtime.saveable.rememberSaveable {
+        mutableStateOf(!AppState.isOnboarded(context))
+    }
 
-    // 启动页 → 主界面（Crossfade 优雅过渡）
+    // 启动页 → （首次：引导页）→ 主界面（Crossfade 优雅过渡）
     Crossfade(targetState = showSplash, animationSpec = tween(500)) { splash ->
         if (splash) {
             SplashScreen { showSplash = false }
+            return@Crossfade
+        }
+        if (showOnboarding) {
+            OnboardingScreen(
+                t = t,
+                onStart = {
+                    AppState.saveOnboarded(context)
+                    showOnboarding = false
+                },
+            )
             return@Crossfade
         }
 

@@ -27,6 +27,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -294,7 +296,7 @@ internal fun generateQrBitmap(text: String, size: Int): android.graphics.Bitmap?
     }.getOrNull()
 }
 
-/** Shizuku 后台剪贴板引导弹窗：说明 + 打开 Shizuku + 授权。 */
+/** Shizuku 后台剪贴板引导弹窗：说明 + 打开 Shizuku + 授权；授权成功自动关闭。 */
 @Composable
 internal fun ShizukuGuideDialog(
     t: (String) -> String,
@@ -302,6 +304,11 @@ internal fun ShizukuGuideDialog(
 ) {
     val context = LocalContext.current
     val active = ClipboardCapability.isShizukuActive()
+    // 授权成功（模式翻转为 SHIZUKU）→ 自动关闭弹窗
+    val clipMode by com.knotyup.android.data.AppState.clipMode.collectAsState()
+    LaunchedEffect(clipMode) {
+        if (clipMode == ClipboardCapability.Mode.SHIZUKU) onDismiss()
+    }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         DialogCard(Modifier.padding(horizontal = 40.dp)) {
             Surface(

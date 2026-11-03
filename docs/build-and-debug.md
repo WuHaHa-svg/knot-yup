@@ -2,11 +2,15 @@
 
 > 所有命令的执行目录均标注在命令上方；`tauri`/`cargo tauri` 需已安装（`cargo install tauri-cli`）。
 
-## 0. 一键打包双端测试版
+## 0. 打包脚本
 
 ```bash
-./scripts/build-debug.sh
-# macOS（--debug，含调试日志页）+ Android debug APK，带时间戳放入 dist/
+./scripts/build-debug.sh             # 双端测试版一键打包（macOS --debug + Android debug）
+./scripts/build-desktop-debug.sh     # 单独：macOS 测试版（含调试日志页）
+./scripts/build-android-debug.sh     # 单独：Android 测试版 APK
+./scripts/build-desktop-release.sh   # 单独：macOS 正式版（调试能力编译期剔除）
+./scripts/build-android-release.sh   # 单独：Android 正式版 APK（keystore 签名）
+# 产物统一带时间戳放入 dist/
 ```
 
 ## 1. 启动桌面端 dev
