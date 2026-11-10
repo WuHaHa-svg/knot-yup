@@ -98,7 +98,7 @@ internal fun DevicesTab(
         Spacer(Modifier.height(10.dp))
         Text(t("devices"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         Spacer(Modifier.height(6.dp))
-        members.forEachIndexed { i, m ->
+        members.forEach { m ->
             val self = m.id == AppState.device.id
             // 平台头像：macOS / Windows / Android 各自的图标与配色
             val (iconRes, bg) = when (m.platform) {
@@ -136,7 +136,7 @@ internal fun DevicesTab(
                                 colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.primary),
                             )
                         }
-                        if (i == 0) {
+                        if (m.isOwner) { // v2：群主身份看 role 属性（不再依赖数组位置）
                             Spacer(Modifier.width(6.dp))
                             Image(painterResource(R.drawable.ic_crown), "owner", Modifier.size(13.dp))
                             Spacer(Modifier.width(2.dp))

@@ -45,9 +45,26 @@ object ShizukuProvider {
         else -> Codes(1, 4, 5) // 31+ 插入 setPrimaryClipAsPackage 导致后移
     }
 
-    /** clipboard 服务 binder（阻塞，需 IO 线程）。 */
-    private fun binder(): IBinder =
-        rikka.shizuku.SystemServiceHelper.getSystemService("clipboard")
+    /** clipboard 服务 binder（阻塞，需 IO 线程）。
+     *  进程内缓存：SystemServiceHelper 每次查询都要与 Shizuku 服务往返（延迟大且不稳），
+     *  轮询场景下放大"读到中间态"的竞态窗口；transact 失败时置空重取。 */
+    @Volatile
+    private var cachedBinder: IBinder? = null
+
+    private fun binder(): IBinder {
+        cachedBinder?.let { return it }
+        return rikka.shizuku.SystemServiceHelper.getSystemService("clipboard").also { cachedBinder = it }
+    }
+
+    /** transact 封装：binder 失效（Shizuku 重启等）时清缓存重取，下次调用自动恢复。 */
+    private fun transact(binder: IBinder, code: Int, data: Parcel, reply: Parcel) {
+        try {
+            binder.transact(code, data, reply, 0)
+        } catch (e: Exception) {
+            cachedBinder = null
+            throw e
+        }
+    }
 
     /** 后台读取剪贴板文本（无则 null；Shizuku 不可用/调用失败上抛）。 */
     fun getText(): String? {
@@ -64,7 +81,7 @@ object ShizukuProvider {
             } else {
                 data.writeInt(USER_ID)
             }
-            binder().transact(c.get, data, reply, 0)
+            transact(binder(), c.get, data, reply)
             reply.readException()
             val clip = if (Build.VERSION.SDK_INT >= 31) {
                 reply.readTypedObject(ClipData.CREATOR)
@@ -98,7 +115,7 @@ object ShizukuProvider {
             } else {
                 data.writeInt(USER_ID)
             }
-            binder().transact(c.desc, data, reply, 0)
+            transact(binder(), c.desc, data, reply)
             reply.readException()
             val desc = if (Build.VERSION.SDK_INT >= 31) {
                 reply.readTypedObject(ClipDescription.CREATOR)
@@ -132,7 +149,7 @@ object ShizukuProvider {
             } else {
                 data.writeInt(USER_ID)
             }
-            binder().transact(c.set, data, reply, 0)
+            transact(binder(), c.set, data, reply)
             reply.readException()
         } finally {
             data.recycle()

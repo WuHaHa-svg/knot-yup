@@ -53,13 +53,15 @@ pub(crate) async fn create_group(
     let addr = format!("{}:{}", local_ip(), port);
     dlog("act/create", format!("群已建立 ws://{addr} pin={pin}"));
     let _ = app.emit("knot://members", vec![device.clone()]);
+    // 建群即 1 名成员（成员数原子量此后由 Members 事件驱动更新）
+    state.member_count.store(1, std::sync::atomic::Ordering::Relaxed);
 
-    // 组主在局域网内广播本组（供其他设备发现；PIN 不随广播发布）
-    let announce_stop = discovery::announce(GroupAd {
-        id: device.id.clone(),
-        name: device.name.clone(),
-        addr: addr.clone(),
-    })
+    // v2：群主被动应答发现请求（不再周期广播）；成员数读 AppState 原子计数（bridge 实时更新）
+    let count = state.inner().member_count.clone();
+    let respond_stop = discovery::respond(
+        GroupAd { id: device.id.clone(), name: device.name.clone(), addr: addr.clone(), members: 1 },
+        move || count.load(std::sync::atomic::Ordering::Relaxed),
+    )
     .await
     .ok();
 
@@ -70,8 +72,10 @@ pub(crate) async fn create_group(
         members: vec![device.clone()],
         addr: addr.clone(),
         pin: pin.clone(),
-        announce_stop,
+        announce_stop: respond_stop,
         standby: None,
+        standby_server: None,
+        standby_addr: None,
     });
     Ok(serde_json::json!({ "addr": addr, "pin": pin, "port": port }))
 }
@@ -107,6 +111,8 @@ pub(crate) async fn join_group(
         pin,
         announce_stop: None,
         standby: Some(standby),
+        standby_server: None,
+        standby_addr: None,
     });
     Ok(serde_json::json!({ "ok": true }))
 }
@@ -116,19 +122,25 @@ pub(crate) async fn leave_group(
     state: State<'_, SharedState>,
     transfer_to: Option<String>,
 ) -> Result<(), String> {
-    if let Some(s) = state.session.lock().await.take() {
+    // 注意：必须先把 take() 的结果落到局部变量再 if let——若直接写在 if let 的 scrutinee 里，
+    // MutexGuard 临时量会存活到块结束，转让分支内的二次加锁将自死锁（命令永久挂起）。
+    let taken = state.session.lock().await.take();
+    if let Some(s) = taken {
         dlog("act/leave", format!("role={:?} transfer_to={:?}", s.role, transfer_to));
-        if let Some(server) = s.server {
-            if let Some(target) = transfer_to {
-                // 转让给指定成员后退群
-                if let Some(info) = s.members.iter().find(|m| m.id == target) {
-                    server.transfer(info).await;
-                } else {
-                    server.shutdown().await;
+        if let Some(target) = transfer_to {
+            if s.members.iter().any(|m| m.id == target) {
+                // v2 三方握手：offer→ready→new_service；失败经 TransferFailed 事件提示且原群保留，
+                // 因此会话不能先清——先恢复会话，转让失败路径由用户再操作
+                let server = s.server.clone();
+                *state.session.lock().await = Some(s);
+                if let Some(server) = server {
+                    server.transfer(&target).await;
                 }
-            } else {
-                server.shutdown().await;
+                return Ok(());
             }
+        }
+        if let Some(server) = s.server {
+            server.shutdown().await;
         }
         if let Some(stop) = s.announce_stop {
             stop.send(()).await.ok();

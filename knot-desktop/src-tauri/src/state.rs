@@ -34,10 +34,14 @@ pub(crate) struct Session {
     /// Owner: 本机监听地址；Member: 组主地址
     pub addr: String,
     pub pin: String,
-    /// 组主停止广播的句柄
+    /// 组主停止发现应答的句柄（v2 被动应答）
     pub announce_stop: Option<mpsc::Sender<()>>,
     /// 成员期预留的 TcpListener（承接群主用），端口即 DeviceInfo.addr 中的端口
     pub standby: Option<tokio::net::TcpListener>,
+    /// 被转让者暂存的 standby 服务句柄（transfer_error 时静默关闭；new_service 后转正）
+    pub standby_server: Option<Arc<GroupServer>>,
+    /// standby 服务的对外地址（ip:port，转正时作为群地址）
+    pub standby_addr: Option<String>,
 }
 
 pub(crate) struct AppState {
@@ -49,6 +53,8 @@ pub(crate) struct AppState {
     pub discovered: Mutex<Vec<GroupAd>>,
     /// 最近一次同步的剪贴板指纹（防回环：忽略同指纹的远端回声）
     pub last_clip_hash: Mutex<String>,
+    /// 实时成员数（发现应答 RESP 用；bridge 收到 Members 事件时更新）
+    pub member_count: Arc<std::sync::atomic::AtomicU32>,
 }
 
 pub(crate) type SharedState = Arc<AppState>;

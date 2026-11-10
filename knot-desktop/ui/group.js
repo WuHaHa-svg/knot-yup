@@ -98,7 +98,7 @@ function renderMembers() {
         <div class="member-name" title="${escapeHtml(m.name)}">
           <span class="name-text">${escapeHtml(m.name)}</span>
           ${isSelf ? '<svg class="icon sm self-mark" title="This device"><use href="#i-devices"/></svg>' : ''}
-          ${i === 0 ? '<span class="owner" title="Owner"><svg class="icon sm"><use href="#i-crown"/></svg></span>' : ''}
+          ${m.role === 'owner' ? '<span class="owner" title="Owner"><svg class="icon sm"><use href="#i-crown"/></svg></span>' : ''}
         </div>
         <div class="member-sub">${meta.label}</div>
       </div>

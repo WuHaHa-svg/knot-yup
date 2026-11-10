@@ -11,17 +11,27 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 
-/** 群事件（上行到 UI）。 */
+/** 群事件（上行到 UI/会话层，与 knot-core CoreEvent v2 对应）。 */
 sealed class GroupEvent {
     data class Members(val members: List<DeviceInfo>) : GroupEvent()
     data class Clipboard(val from: String, val payload: ClipboardPayload) : GroupEvent()
     data class Kicked(val reason: String) : GroupEvent()
-    data class OwnerChange(val newOwner: DeviceInfo) : GroupEvent()
+    /** 解散：会话层 0.8s 后自动退出（不回发任何消息） */
+    object Dissolve : GroupEvent()
+    /** 收到转让邀请（本机为被转让者）：起 standby 服务后回 TransferReady */
+    data class TransferOffer(val pin: String) : GroupEvent()
+    /** 转让已失败（迟到 ready）：静默关闭 standby 服务 */
+    object TransferError : GroupEvent()
+    /** 全员迁移到新服务：断开当前连接、用同 PIN 连接新 addr */
+    data class NewService(val addr: String, val pin: String, val owner: DeviceInfo) : GroupEvent()
+    /** 转让失败（群主侧本地事件，不经网络） */
+    object TransferFailed : GroupEvent()
+    /** 转让成功（群主侧本地事件）：服务已停 → 会话层清会话回首页 */
+    object TransferCompleted : GroupEvent()
     data class Error(val message: String) : GroupEvent()
-    data object Disconnected : GroupEvent()
 }
 
-/** 群客户端：连接群主 WebSocket，自动处理加密封装/解封。 */
+/** 群客户端 v2：连接群主 WebSocket，自动处理加密封装/解封、心跳（30s/单次 3s 失联）、回声去重。 */
 class GroupClient(
     private val client: OkHttpClient = OkHttpClient(),
 ) {
@@ -44,10 +54,10 @@ class GroupClient(
         val request = Request.Builder().url(url).build()
         // 防双实例：新连接前确保旧连接取消（遗留 socket 会与心跳/事件竞争）
         ws?.cancel()
-        // 心跳共享状态：最近一次被回执的 ping 序号。
-        // 写在 OkHttp 读线程、读在心跳协程——必须用原子量（普通变量跨线程无可见性保证，
-        // 轮询循环可能永远读到旧值 → 误判群主失联 → 误承接）
+        // 心跳共享状态：最近一次被回执的 ping 序号（onMessage 更新，心跳协程检查）。
+        // 写在 OkHttp 读线程、读在心跳协程——必须用原子量（普通变量跨线程无可见性保证）
         val lastPongSeq = java.util.concurrent.atomic.AtomicLong(0)
+        val echoId = device.id
 
         val socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -72,18 +82,27 @@ class GroupClient(
                     }
                     is Msg.Members -> trySend(Result.success(GroupEvent.Members(msg.members)))
                     is Msg.Pong -> {
-                        android.util.Log.d("KnotYup", "<- pong#${msg.seq} members=${msg.members.size}")
                         lastPongSeq.set(msg.seq)
-                        // Pong 携带群状态快照 → 同步成员表
+                        // Pong 携带成员表快照 → 心跳即状态同步
                         trySend(Result.success(GroupEvent.Members(msg.members)))
                     }
-                    is Msg.Clipboard -> trySend(Result.success(GroupEvent.Clipboard(msg.from, msg.payload)))
+                    is Msg.Clipboard -> {
+                        // from-id 回声去重：自己发出去的广播不再上报
+                        if (msg.from == echoId) return
+                        trySend(Result.success(GroupEvent.Clipboard(msg.from, msg.payload)))
+                    }
                     is Msg.Kick -> {
                         trySend(Result.success(GroupEvent.Kicked(msg.reason ?: "")))
                         close()
                     }
-                    is Msg.OwnerChange -> {
-                        trySend(Result.success(GroupEvent.OwnerChange(msg.newOwner)))
+                    Msg.Dissolve -> {
+                        trySend(Result.success(GroupEvent.Dissolve))
+                        close()
+                    }
+                    is Msg.TransferOffer -> trySend(Result.success(GroupEvent.TransferOffer(msg.pin)))
+                    Msg.TransferError -> trySend(Result.success(GroupEvent.TransferError))
+                    is Msg.NewService -> {
+                        trySend(Result.success(GroupEvent.NewService(msg.addr, msg.pin, msg.owner)))
                         close()
                     }
                     else -> {}
@@ -96,39 +115,34 @@ class GroupClient(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (!intentionalClose) trySend(Result.success(GroupEvent.Disconnected))
+                if (!intentionalClose) {
+                    // 视为连接断开：抛 Error 触发上层的承接（与 Rust 侧语义一致）
+                    trySend(Result.success(GroupEvent.Error("connection closed: server closed connection")))
+                }
                 close()
             }
         })
         ws = socket
 
-        // 心跳：每 5s 发一次 Ping；3s 内未收到对应 seq 的 Pong 计一次未达；
-        // 连续 3 次未达 → 判定群主失联，断开连接（onFailure → 选主流程）
+        // 心跳：每 30s 发一次 Ping；3s 内未收到对应 seq 的 Pong —— 单次即判群主失联 → 断开触发承接
         launch {
-            android.util.Log.i("KnotYup", "心跳任务启动（5s 间隔 / 3s 超时 / 3 次未达失联）")
+            android.util.Log.i("KnotYup", "心跳任务启动（30s 间隔 / 3s 超时 / 单次失联）")
             var seq = 0L
-            var misses = 0
             while (true) {
-                delay(5_000)
+                delay(Proto.HEARTBEAT_MS)
                 seq++
                 android.util.Log.d("KnotYup", "-> ping#$seq")
                 socket.send(Msg.Ping(device, seq, System.currentTimeMillis()).toJson())
-                val deadline = System.currentTimeMillis() + 3_000
+                val deadline = System.currentTimeMillis() + Proto.PONG_TIMEOUT_MS
                 var acked = false
                 while (System.currentTimeMillis() < deadline) {
                     if (lastPongSeq.get() >= seq) { acked = true; break }
                     delay(300)
                 }
-                if (acked) {
-                    misses = 0
-                } else {
-                    misses++
-                    android.util.Log.w("KnotYup", "ping#$seq 3s 未回执，连续未达 $misses/3")
-                    if (misses >= 3) {
-                        android.util.Log.w("KnotYup", "心跳判定群主失联（连续 3 次未回执）")
-                        socket.cancel() // 触发 onFailure → 现有选主逻辑
-                        break
-                    }
+                if (!acked) {
+                    android.util.Log.w("KnotYup", "ping#$seq 3s 未回执 → 判定群主失联")
+                    socket.cancel() // 触发 onFailure → 承接流程
+                    break
                 }
             }
         }
@@ -146,6 +160,13 @@ class GroupClient(
         val socket = ws ?: return false
         val payload = ClipboardPayload("text", text, textHash(text))
         return socket.send(Msg.Clipboard(dev.id, payload).sealed(c).toJson())
+    }
+
+    /** 转让第二步：standby 服务就绪后，通过原 ws 回告群主。 */
+    fun sendTransferReady(addr: String): Boolean {
+        val c = cipher ?: return false
+        val socket = ws ?: return false
+        return socket.send(Msg.TransferReady(addr).sealed(c).toJson())
     }
 
     fun leave() {

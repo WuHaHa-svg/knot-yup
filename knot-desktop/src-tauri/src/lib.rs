@@ -56,6 +56,7 @@ pub fn run() {
                 history: tokio::sync::Mutex::new(Vec::new()),
                 discovered: tokio::sync::Mutex::new(Vec::new()),
                 last_clip_hash: tokio::sync::Mutex::new(String::new()),
+                member_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             });
 
             // 本机设备身份
@@ -64,6 +65,7 @@ pub fn run() {
                 name: format!("{} 的 {}", whoami::devicename(), match std::env::consts::OS { "macos" => "Mac", "windows" => "PC", other => other }),
                 platform: std::env::consts::OS.to_string(),
                 addr: None,
+                role: None,
             };
 
             // 剪贴板监视线程 + 本机变化通道
@@ -73,12 +75,13 @@ pub fn run() {
             // core 事件总线
             let (core_tx, core_rx) = broadcast::channel::<CoreEvent>(128);
 
-            // 局域网发现：仅在首页（无会话）时扫描，进群即停、退群即恢复
+            // 局域网发现 v2（拉取式）：仅在首页（无会话）时扫描，进群即停、退群回首页立即恢复
+            // （scan 状态机自身 3s 周期：REQ → 收集 2s → 静默 1s，每轮整轮直出）
             let (disc_tx, mut disc_rx) = broadcast::channel::<Vec<GroupAd>>(16);
             let (scan_tx, mut scan_rx) = tokio::sync::watch::channel(true);
             let shared_watch = shared.clone();
             tauri::async_runtime::spawn(async move {
-                // 轮询会话状态 → 扫描开关（覆盖建群/入群/退群/被踢/转让/选主全部路径）
+                // 轮询会话状态 → 扫描开关（覆盖建群/入群/退群/被踢/转让/承接全部路径）
                 loop {
                     let active = shared_watch.session.lock().await.is_none();
                     let _ = scan_tx.send(active);
@@ -94,8 +97,8 @@ pub fn run() {
                         }
                     }
                     let listener =
-                        tauri::async_runtime::spawn(discovery::listen(disc_tx.clone()));
-                    dlog("scan", "扫描启动（进入首页）");
+                        tauri::async_runtime::spawn(discovery::scan(disc_tx.clone()));
+                    dlog("scan", "扫描启动（进入首页，3s 周期拉取）");
                     // 等待暂停（进群）
                     while *scan_rx.borrow() {
                         if scan_rx.changed().await.is_err() {
@@ -134,7 +137,12 @@ pub fn run() {
                 *shared.clip_tx.lock().await = Some(clip_tx);
                 *shared.core_tx.lock().await = Some(core_tx);
             });
-            tauri::async_runtime::spawn(bridge::forward_core_events(handle.clone(), shared.clone(), core_rx));
+            tauri::async_runtime::spawn(bridge::forward_core_events(
+                handle.clone(),
+                shared.clone(),
+                core_rx,
+                shared.member_count.clone(),
+            ));
 
             // 本机剪贴板变化 → 广播给组 + 记历史
             let shared_clip = shared.clone();

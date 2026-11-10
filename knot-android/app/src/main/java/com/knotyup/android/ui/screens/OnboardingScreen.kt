@@ -172,6 +172,25 @@ internal fun OnboardingScreen(
                             onGrant = { nearbyLauncher.launch(android.Manifest.permission.NEARBY_WIFI_DEVICES) },
                         )
                     }
+
+                    Spacer(Modifier.height(14.dp))
+                    // 国产 ROM 私有权限提示（系统设置里的安全中心开关，App 侧无法主动申请）
+                    Text(t("ob_note_title"), fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        t("ob_note_body_1"),
+                        fontSize = 10.5.sp,
+                        lineHeight = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        t("ob_note_body_2"),
+                        fontSize = 10.5.sp,
+                        lineHeight = 15.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                    )
                 }
             }
         }

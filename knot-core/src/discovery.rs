@@ -1,7 +1,6 @@
-//! 局域网组发现：UDP 广播（实现比 mDNS 轻，跨平台无 Bonjour 依赖；后续可换 mDNS）。
-//! 组主每 1s 常规广播一次（建群另有突发）；监听端每 5s 一个扫描周期，窗口直出模型：
-//! 一个周期（期望 ~5 个广播包）内收到即在线、未收到即剔除——广播密度下单窗全空
-//! 几乎只意味着群主真的离开；万一误剔，下个窗口收到即自动复活（自愈）。
+//! 局域网组发现 v2（拉取式，见 docs/ws-design.md §2）：
+//! 扫描端周期广播 REQ（→ 收集回应 2s → 静默 1s，周期 3s）；
+//! 群主建群后在发现端口被动监听 REQ、收到即单播回源 RESP。群主不再周期广播。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,15 +10,51 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 pub const DISCOVERY_PORT: u16 = 45691;
-const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(1);
-/// 扫描周期：窗口内收到的群即当前在线群
-const SCAN_INTERVAL: Duration = Duration::from_secs(5);
+/// v2 协议前缀（v1 的 KNOTYUP1 广播已废弃，断旧不兼容）
+const PREFIX_REQ: &str = "KNOTYUP2|REQ|";
+const PREFIX_RESP: &str = "KNOTYUP2|RESP|";
+const PROTOCOL_VER: u32 = 2;
+/// 收集回应窗口
+const COLLECT_WINDOW: Duration = Duration::from_secs(2);
+/// 窗口结束后的静默段（与收集窗口合计 3s 周期）
+const QUIET_GAP: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupAd {
-    pub id: String,      // 组主设备 id
-    pub name: String,    // 组主设备名
-    pub addr: String,    // 组 WebSocket 地址 ip:port
+    pub id: String,      // 群主设备 id
+    pub name: String,    // 群主设备名
+    pub addr: String,    // 群 WebSocket 地址 ip:port
+    #[serde(default)]
+    pub members: u32,    // 群内设备数（含群主）
+}
+
+/// 扫描端 REQ 载荷
+#[derive(Serialize)]
+struct ReqPayload {
+    scan_id: String,
+    ts_ms: u64,
+}
+
+/// 群主端 RESP 载荷
+#[derive(Serialize)]
+struct RespPayload<'a> {
+    id: &'a str,
+    name: &'a str,
+    addr: &'a str,
+    members: u32,
+    ver: u32,
+    ts_ms: u64,
+}
+
+#[derive(Deserialize)]
+struct RespParse {
+    id: String,
+    name: String,
+    addr: String,
+    #[serde(default)]
+    members: u32,
+    #[serde(default)]
+    ver: u32,
 }
 
 /// 收集广播目标：全局广播 + 本机各 IPv4 所在 /24 子网广播（应对 VPN/多网卡下全局广播走错接口）。
@@ -34,60 +69,31 @@ fn broadcast_targets() -> Vec<Ipv4Addr> {
     targets
 }
 
-/// 组主：周期广播（建群初期密集突发，快速建立可见性）。
-/// 返回停止句柄（drop 即停止）。
-pub async fn announce(ad: GroupAd) -> std::io::Result<mpsc::Sender<()>> {
+/// 扫描端状态机（见 ws-design §2.2）：发 REQ → 收集 2s → 静默 1s → 循环。
+/// 每轮整轮直出（本轮 RESP 集合即结果，无历史状态），列表变化时发送完整列表。
+pub async fn scan(event_tx: tokio::sync::broadcast::Sender<Vec<GroupAd>>) -> std::io::Result<()> {
     let sock = UdpSocket::bind(("0.0.0.0", 0)).await?;
     sock.set_broadcast(true)?;
-    let payload = format!("KNOTYUP1|{}", serde_json::to_string(&ad).unwrap());
-    let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
-    tokio::spawn(async move {
-        async fn send_all(sock: &UdpSocket, payload: &str, reason: &str) {
-            let targets = broadcast_targets();
-            tracing::debug!(target: "discovery/announce", "{reason} -> {} 目标", targets.len());
-            for target in targets {
-                let _ = sock.send_to(payload.as_bytes(), (target, DISCOVERY_PORT)).await;
-            }
-        }
-        // 突发期：前 2s 内每 400ms 一发（连丢 4~5 个包也能秒级被发现）
-        let burst_plan: Vec<Duration> = vec![
-            Duration::from_millis(0),
-            Duration::from_millis(400),
-            Duration::from_millis(800),
-            Duration::from_millis(1200),
-            Duration::from_millis(1600),
-        ];
-        for delay in burst_plan {
-            tokio::select! {
-                _ = stop_rx.recv() => return,
-                _ = tokio::time::sleep(delay) => {}
-            }
-            send_all(&sock, &payload, &format!("突发广播 +{delay:?}")).await;
-        }
-        // 常规期：每 1s 一发
-        send_all(&sock, &payload, "常规广播").await;
-        loop {
-            tokio::select! {
-                _ = stop_rx.recv() => break,
-                _ = tokio::time::sleep(ANNOUNCE_INTERVAL) => {
-                    send_all(&sock, &payload, "常规广播").await;
-                }
-            }
-        }
-    });
-    Ok(stop_tx)
-}
-
-/// 监听广播：每个扫描周期（5s）窗口直出——窗口内收到即在线、未收到即剔除，
-/// 列表变化时发送完整列表。
-pub async fn listen(event_tx: tokio::sync::broadcast::Sender<Vec<GroupAd>>) -> std::io::Result<()> {
-    let sock = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await?;
-    // 上次广播的列表（仅在变化时发送，避免每 5s 刷一次 UI）
     let mut last: Vec<GroupAd> = Vec::new();
     let mut buf = [0u8; 1024];
     loop {
-        // —— 一个扫描周期：收集周期内收到的广播 ——
-        let deadline = tokio::time::Instant::now() + SCAN_INTERVAL;
+        // —— 发 REQ（1 个广播包 × 各目标）——
+        let req = format!(
+            "{PREFIX_REQ}{}",
+            serde_json::to_string(&ReqPayload {
+                scan_id: crate::protocol::device_id(),
+                ts_ms: crate::protocol::now_ms(),
+            })
+            .unwrap()
+        );
+        let targets = broadcast_targets();
+        tracing::debug!(target: "discovery/scan", "-> REQ ({} 目标)", targets.len());
+        for target in targets {
+            let _ = sock.send_to(req.as_bytes(), (target, DISCOVERY_PORT)).await;
+        }
+
+        // —— 收集窗口 2s：窗口内所有 RESP = 本轮结果 ——
+        let deadline = tokio::time::Instant::now() + COLLECT_WINDOW;
         let mut got: HashMap<String, GroupAd> = HashMap::new();
         loop {
             let remain = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -96,21 +102,17 @@ pub async fn listen(event_tx: tokio::sync::broadcast::Sender<Vec<GroupAd>>) -> s
             }
             match tokio::time::timeout(remain, sock.recv_from(&mut buf)).await {
                 Ok(Ok((n, peer))) => {
-                    if let Ok(text) = std::str::from_utf8(&buf[..n]) {
-                        if let Some(json) = text.strip_prefix("KNOTYUP1|") {
-                            if let Ok(ad) = serde_json::from_str::<GroupAd>(json) {
-                                tracing::debug!(target: "discovery/recv", "<- 广播 [{peer}] {}@{}", ad.name, ad.addr);
-                                got.insert(ad.id.clone(), ad);
-                            }
-                        }
+                    if let Some(ad) = parse_resp(&buf[..n]) {
+                        tracing::debug!(target: "discovery/scan", "<- RESP [{peer}] {}@{} members={}", ad.name, ad.addr, ad.members);
+                        got.insert(ad.id.clone(), ad);
                     }
                 }
                 Ok(Err(_)) => break,
-                Err(_elapsed) => break, // 周期结束
+                Err(_elapsed) => break, // 窗口结束
             }
         }
 
-        // —— 周期末结算：窗口直出（本窗口收到即在线，未收到即剔除；误剔下窗自愈） ——
+        // —— 本轮结算：整轮直出 ——
         let received = got.len();
         let mut list: Vec<GroupAd> = got.into_values().collect();
         list.sort_by(|a, b| a.name.cmp(&b.name)); // 稳定顺序，避免列表随机抖动
@@ -118,8 +120,70 @@ pub async fn listen(event_tx: tokio::sync::broadcast::Sender<Vec<GroupAd>>) -> s
             event_tx.send(list.clone()).ok();
             last = list;
         }
-        // 每个扫描周期都打点
         let table = last.iter().map(|ad| format!("{}@{}", ad.name, ad.addr)).collect::<Vec<_>>().join(", ");
-        tracing::debug!(target: "discovery/scan", "周期结算: 本周期收到 {received} 个广播, 当前表 [{table}]");
+        tracing::debug!(target: "discovery/scan", "本轮结算: 收到 {received} 个回应, 当前表 [{table}]");
+
+        // —— 静默 1s ——
+        tokio::time::sleep(QUIET_GAP).await;
     }
+}
+
+fn parse_resp(bytes: &[u8]) -> Option<GroupAd> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let json = text.strip_prefix(PREFIX_RESP)?;
+    let p: RespParse = serde_json::from_str(json).ok()?;
+    if p.ver != PROTOCOL_VER {
+        return None; // 版本不匹配忽略（向前演进保护）
+    }
+    Some(GroupAd { id: p.id, name: p.name, addr: p.addr, members: p.members })
+}
+
+/// 群主端：建群后调用——在发现端口被动监听 REQ，收到即单播回源 RESP。
+/// 返回停止句柄（drop 即停止）。members 为实时成员数获取函数（异步闭包由调用方传入当前值）。
+pub async fn respond(
+    ad: GroupAd,
+    members_now: impl Fn() -> u32 + Send + Sync + 'static,
+) -> std::io::Result<mpsc::Sender<()>> {
+    let sock = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await?;
+    let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
+    let ad = std::sync::Arc::new((ad, members_now));
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        loop {
+            tokio::select! {
+                _ = stop_rx.recv() => break,
+                res = sock.recv_from(&mut buf) => match res {
+                    Ok((n, peer)) => {
+                        let text = match std::str::from_utf8(&buf[..n]) {
+                            Ok(t) => t,
+                            Err(_) => continue,
+                        };
+                        if !text.starts_with(PREFIX_REQ) {
+                            continue; // 非 v2 扫描请求（可能是其他实例的 RESP），忽略
+                        }
+                        let (ad, members_now) = &*ad;
+                        let resp = format!(
+                            "{PREFIX_RESP}{}",
+                            serde_json::to_string(&RespPayload {
+                                id: &ad.id,
+                                name: &ad.name,
+                                addr: &ad.addr,
+                                members: members_now(),
+                                ver: PROTOCOL_VER,
+                                ts_ms: crate::protocol::now_ms(),
+                            })
+                            .unwrap()
+                        );
+                        tracing::debug!(target: "discovery/respond", "<- REQ [{peer}] -> RESP members={}", members_now());
+                        let _ = sock.send_to(resp.as_bytes(), peer).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "discovery/respond", "recv error: {e}");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    Ok(stop_tx)
 }

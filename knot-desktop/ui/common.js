@@ -138,6 +138,9 @@ function toast(msg, type = 'info') {
     PROMOTED: t('promoted'),
     RECONNECTING: t('reconnecting'),
     RECONNECTED: t('reconnected'),
+    MIGRATED: t('reconnected'),
+    TRANSFER_FAILED: t('transfer_failed'),
+    TRANSFERRED: t('left'),
   };
   if (codeMap[msg]) msg = codeMap[msg];
   else if (/^连接失败|^Connection|^协议错误|^入组被拒绝|^发送入组请求失败/.test(msg)) msg = t('join_failed');

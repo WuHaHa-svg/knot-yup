@@ -43,7 +43,7 @@ async function main() {
   });
   await listen('knot://kicked', (e) => {
     const p = e.payload;
-    toast(p === 'GROUP_DISSOLVED' ? t('group_dissolved') : p === 'GROUP_LOST' ? t('group_lost') : t('kicked'), 'error');
+    toast(p === 'GROUP_DISSOLVED' || p === 'DISSOLVED' ? t('group_dissolved') : p === 'GROUP_LOST' ? t('group_lost') : p === 'TRANSFERRED' ? t('left') : t('kicked'), 'error');
     hideLoading();
     state.session = null;
     clipItems = [];
@@ -53,8 +53,8 @@ async function main() {
   await listen('knot://error', (e) => toast(e.payload, 'error'));
   await listen('knot://toast', (e) => {
     toast(String(e.payload));
-    // 升主/重连成功后会话已换新，需要刷新视图
-    if (e.payload === 'RECONNECTED' || e.payload === 'PROMOTED') refresh();
+    // 升主/重连/转让完成后会话已换新，需要刷新视图
+    if (e.payload === 'RECONNECTED' || e.payload === 'PROMOTED' || e.payload === 'TRANSFERRED' || e.payload === 'MIGRATED') refresh();
   });
   await listen('knot://member-change', (e) => {
     toast(t(e.payload.type === 'joined' ? 'member_joined' : 'member_left', { name: e.payload.name }));

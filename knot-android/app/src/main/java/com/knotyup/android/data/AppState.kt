@@ -49,11 +49,15 @@ object AppState {
     var server: KnotGroupServer? = null
         private set
 
+    /** 被转让者暂存的 standby 服务句柄（transfer_error 时静默关闭；new_service 后转正） */
+    var standbyServer: KnotGroupServer? = null
+        private set
+
     /** 成员期预留端口（承接群主用） */
     var standby: ServerSocket? = null
         private set
 
-    private var announceJob: Job? = null
+    private var respondJob: kotlinx.coroutines.Job? = null
     private val scope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
 
     // ── 进程级会话协程（横竖屏切换/Activity 重建不中断，UI 层不再持有任何 ws/消息协程）──
@@ -217,7 +221,8 @@ object AppState {
         val ctx = appContext ?: return
         scanJob = scope.launch {
             val myIp = Discovery.localIpAddress()
-            Discovery.listen(ctx).collect { list ->
+            // v2 拉取式扫描：3s 周期（REQ → 收集 2s → 静默 1s），整轮直出
+            Discovery.scan(ctx).collect { list ->
                 _discovered.value = if (myIp == null) list else list.filter { !it.addr.startsWith("$myIp:") }
             }
         }
@@ -241,6 +246,9 @@ object AppState {
                 _joining.value = false
             }
             is GroupEvent.Clipboard -> {
+                // 回声/重复去重：指纹与最近一次相同（自己发出内容的回声、群主转发的重复消息）
+                // 直接忽略——不追加历史、不重写剪贴板，阻断"B/C 互发放大"链路
+                if (event.payload.hash == clipGuard) return
                 clipGuard = event.payload.hash
                 applyEvent(event)
                 appContext?.let {
@@ -249,11 +257,50 @@ object AppState {
             }
             is GroupEvent.Kicked -> {
                 reset()
-                toastKey(if (event.reason == "GROUP_DISSOLVED") "group_dissolved" else "kicked", 2)
+                toastKey("kicked", 2)
                 _joining.value = false
             }
-            is GroupEvent.OwnerChange -> ownerLost(event.newOwner)
-            GroupEvent.Disconnected -> ownerLost(null)
+            GroupEvent.Dissolve -> {
+                // 解散：0.8s 缓冲后自动退出群（不回发任何 ws 消息）
+                android.util.Log.d("KnotYup", "收到解散通知，0.8s 后退出")
+                val delayMs = com.knotyup.android.net.Proto.DISSOLVE_EXIT_MS
+                scope.launch {
+                    delay(delayMs)
+                    reset()
+                    toastKey("group_dissolved", 2)
+                }
+            }
+            is GroupEvent.TransferOffer -> {
+                // 被转让者：standby 端口起服务 → 通过原 ws 回 ready
+                handleTransferOffer(event.pin)
+            }
+            GroupEvent.TransferError -> {
+                // 转让已失败（迟到 ready）：静默关闭 standby 服务，不影响成员状态
+                android.util.Log.d("KnotYup", "转让失败（transfer_error）：静默关闭 standby 服务")
+                standbyServer?.let { runCatching { it.stop(0) } }
+                standbyServer = null
+            }
+            is GroupEvent.NewService -> {
+                if (event.owner.id == device.id) {
+                    // 本机即新群主：standby 服务转正（绝不能自连接入自己的群 → 那会造出重复成员）
+                    android.util.Log.d("KnotYup", "收到 new_service（owner=自己）：standby 服务转正")
+                    promoteStandby()
+                } else {
+                    // 其他成员：断开旧连接 → 用同 PIN 连接新服务
+                    android.util.Log.d("KnotYup", "收到 new_service addr=${event.addr} → 迁移")
+                    migrateToNewService(event.addr, event.pin)
+                }
+            }
+            GroupEvent.TransferFailed -> {
+                // 群主侧本地事件：转让失败，原群继续
+                toastKey("transfer_failed", 2)
+            }
+            GroupEvent.TransferCompleted -> {
+                // 群主侧本地事件：转让完成，清会话回首页
+                android.util.Log.d("KnotYup", "转让完成：清会话回首页")
+                reset()
+                toastKey("left")
+            }
             is GroupEvent.Error -> {
                 android.util.Log.w("KnotYup", "ws error: ${event.message}")
                 val s = session.value
@@ -300,8 +347,8 @@ object AppState {
     }
 
     /**
-     * 群主容灾（进程级）：候选[0]是自己 → standby 承接；否则依次重连候选地址。
-     * 与 UI 完全解耦（原 MainActivity.handleOwnerLost 下沉）。
+     * 群主容灾（v2 简化版）：候选 = 成员表中 role != owner 的设备按序；
+     * 候选[0]是自己 → standby 承接；否则依次重连候选地址（10 轮）。
      */
     private fun ownerLost(explicit: DeviceInfo?) {
         if (ownerLostHandling) {
@@ -310,7 +357,7 @@ object AppState {
         }
         ownerLostHandling = true
         val s = session.value
-        val candidates = explicit?.let { listOf(it) } ?: s.members.drop(1) // [0] 是旧群主
+        val candidates = explicit?.let { listOf(it) } ?: s.members.filter { !it.isOwner }
         android.util.Log.d("KnotYup", "owner lost: explicit=${explicit?.name}, candidates=${candidates.map { "${it.name}@${it.addr}" }}")
         if (candidates.isEmpty()) {
             reset()
@@ -367,13 +414,23 @@ object AppState {
             if (com.knotyup.android.clipboard.ClipboardCapability.currentMode() ==
                 com.knotyup.android.clipboard.ClipboardCapability.Mode.SHIZUKU
             ) {
-                var lastFp = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx)
-                while (true) {
-                    delay(1_000)
-                    val fp = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx) ?: continue
-                    if (fp == lastFp) continue
-                    lastFp = fp
-                    com.knotyup.android.clipboard.ClipboardCapability.getText(ctx)?.let { sendLocalClip(it) }
+                // 后台复制同步依赖 1s 轮询：Doze 会冻结/限流协程定时器，持部分 WakeLock 保轮询
+                // （随 watcher 取消/离群在 finally 释放；仅 Shizuku 模式持有，前台回调模式不需要）
+                @Suppress("WakelockTimeout")
+                val wl = (ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
+                    .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "knotyup:clipwatch")
+                    .apply { setReferenceCounted(false); acquire() }
+                try {
+                    var lastFp = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx)
+                    while (true) {
+                        delay(1_000)
+                        val fp = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx) ?: continue
+                        if (fp == lastFp) continue
+                        lastFp = fp
+                        com.knotyup.android.clipboard.ClipboardCapability.getText(ctx)?.let { sendLocalClip(it) }
+                    }
+                } finally {
+                    runCatching { wl.release() }
                 }
             } else {
                 val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -397,6 +454,7 @@ object AppState {
         val hash = com.knotyup.android.net.textHash(text)
         if (text.isEmpty() || hash == clipGuard) return
         clipGuard = hash
+        android.util.Log.d("KnotYup", "本机复制 → 广播 len=${text.length} hash=${hash.take(8)}")
         val sent = if (isOwner()) {
             server?.broadcastClipboard(text)
             server != null
@@ -442,7 +500,7 @@ object AppState {
                 role = "owner", addr = addr, pin = pin,
                 members = listOf(device), joined = true,
             )
-            startAnnounce(addr)
+            startRespond(addr)
         } else {
             android.util.Log.w("KnotYup", "becomeOwner: 无法解析本机局域网 IP，群主已承接但暂不广播（地址显示为 :$boundPort）")
             _session.value = SessionState(
@@ -453,18 +511,23 @@ object AppState {
         return _session.value.addr to boundPort
     }
 
-    /** 停止广播与服务端。 */
+    /** 停止发现应答与服务端。 */
     fun stopServer() {
-        announceJob?.cancel()
-        announceJob = null
+        respondJob?.cancel()
+        respondJob = null
         server?.let { runCatching { it.stop(0) } }
         server = null
     }
 
-    private fun startAnnounce(addr: String) {
-        announceJob?.cancel()
-        announceJob = scope.launch {
-            Discovery.announce(GroupAd(device.id, device.name, addr)).collect {}
+    /** v2 群主被动应答发现请求（成员数实时取自服务端）。 */
+    private fun startRespond(addr: String) {
+        respondJob?.cancel()
+        val ctx = appContext ?: return
+        val s = server ?: return
+        scope.launch {
+            respondJob = runCatching {
+                Discovery.respond(ctx, GroupAd(device.id, device.name, addr), memberCount = { s.memberCount() })
+            }.getOrNull()
         }
     }
 
@@ -475,15 +538,72 @@ object AppState {
         reset()
     }
 
-    /** 群主转让给指定成员后退群。 */
+    /**
+     * 群主转让（v2 三方握手）：发起 offer 后立即返回，不退出群。
+     * 成功 → NewService 广播 + 服务停止（本机经 reset 回首页）；失败 → TransferFailed 提示，原群继续。
+     */
     fun transferOwner(targetId: String) {
-        val target = _session.value.members.firstOrNull { it.id == targetId } ?: run {
-            dissolveOwner()
+        val target = _session.value.members.firstOrNull { it.id == targetId } ?: return
+        val s = server ?: return
+        s.transfer(target.id)
+    }
+
+    /** 被转让者：standby 端口起服务 → 通过原 ws 回 ready。失败不回（群主 5s 超时即转让失败）。 */
+    private fun handleTransferOffer(pin: String) {
+        val ctx = appContext ?: return
+        // 先取端口再关预留 socket（关后 localPort 即失效）
+        val port = standby?.let { l ->
+            val p = runCatching { l.localPort }.getOrDefault(0)
+            runCatching { l.close() }
+            p
+        } ?: reservePort()
+        standby = null
+        val dev = device.copy(role = "owner")
+        val s = KnotGroupServer(port, pin, dev, ::emit)
+        s.start()
+        standbyServer = s
+        val ip = Discovery.localIpAddress(ctx)
+        if (ip != null) {
+            val addr = "$ip:${s.boundPort()}"
+            android.util.Log.d("KnotYup", "standby 服务就绪 $addr -> transfer_ready")
+            client.sendTransferReady(addr)
+        } else {
+            // 无法解析地址：不起响应直接关服务（群主超时判失败）
+            android.util.Log.w("KnotYup", "transfer_offer: 无法解析本机 IP，放弃承接")
+            runCatching { s.stop(0) }
+            standbyServer = null
+        }
+    }
+
+    /** 其他成员：断开旧连接 → 用同 PIN 连接新服务（复用成员会话机制，保留 standby 承接资格）。 */
+    private fun migrateToNewService(addr: String, pin: String) {
+        android.util.Log.d("KnotYup", "迁移到新服务 $addr")
+        startMemberSession(addr, pin)
+    }
+
+    /** 被转让者收到 new_service（owner=自己）后转正：standby 服务 → 正式群主会话 + 发现应答。 */
+    private fun promoteStandby() {
+        val s = standbyServer
+        if (s == null) {
+            // standby 已被清理（异常路径）：直接回首页
+            android.util.Log.w("KnotYup", "promoteStandby: standby 服务不存在，清会话")
+            reset()
             return
         }
-        server?.transfer(target)
-        stopServer()
-        reset()
+        standbyServer = null
+        val ctx = appContext
+        val ip = ctx?.let { Discovery.localIpAddress(it) }
+        val addr = if (ip != null) "$ip:${s.boundPort()}" else ":${s.boundPort()}"
+        memberJob?.cancel()
+        memberJob = null
+        client.leave()
+        server = s
+        _session.value = SessionState(
+            role = "owner", addr = addr, pin = _session.value.pin,
+            members = listOf(device.copy(role = "owner")), joined = true,
+        )
+        if (ip != null) startRespond(addr)
+        toastKey("promoted", 1)
     }
 
     fun reset() {
@@ -491,6 +611,8 @@ object AppState {
         memberJob = null
         watcherJob?.cancel()
         watcherJob = null
+        standbyServer?.let { runCatching { it.stop(0) } }
+        standbyServer = null
         client.leave()
         stopServer()
         standby?.let { runCatching { it.close() } }
