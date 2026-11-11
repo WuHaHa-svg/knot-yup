@@ -10,7 +10,7 @@
     /* 开屏层：内联样式确保先于 JS/CSS 就绪即渲染，消除白屏 */
     #boot-splash {
       position: fixed; inset: 0; z-index: 9999;
-      background: #ffffff;
+      /* 透明：露出底层液态流动背景 */
       display: grid; place-items: center;
       transition: opacity .45s cubic-bezier(.22, 1, .36, 1);
     }
@@ -54,6 +54,8 @@
   </style>
 </head>
 <body>
+  <!-- 液态流动背景：Canvas 绘制（liquid.js），与移动端同源算法 -->
+  <canvas id="liquid-bg" aria-hidden="true"></canvas>
   <!-- 开屏：绳结描线 + 品牌浮现，JS 初始化完成后淡出 -->
   <div id="boot-splash">
     <div class="boot-inner">
@@ -262,6 +264,7 @@
     </div>
   </div>
   <script src="i18n.js"></script>
+  <script src="liquid.js"></script>
   <script src="qrcode.min.js"></script>
   <script src="toastify.min.js"></script>
   <script src="common.js"></script>

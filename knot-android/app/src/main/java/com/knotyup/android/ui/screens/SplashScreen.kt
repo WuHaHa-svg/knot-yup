@@ -1,5 +1,10 @@
 package com.knotyup.android.ui.screens
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -9,10 +14,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,21 +30,20 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.lerp
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.cos
 import kotlin.math.min
+import kotlin.math.sin
 
 /**
- * 启动页（纯白底，三幕动画）：
+ * 启动页（液态流动背景，两幕动画）：
  * 1) 黑色绳结逐笔「打出」
- * 2) 打结完成后 KnotYup 文字逐字蹦跳出现
- * 3) 绳结与文字一起染上品牌渐变色，随后关闭启动动画
+ * 2) 打结完成后 KnotYup 文字逐字蹦跳出现，随后关闭启动动画
  */
 @Composable
 internal fun SplashScreen(onFinish: () -> Unit) {
@@ -48,20 +52,19 @@ internal fun SplashScreen(onFinish: () -> Unit) {
     // 第二幕：逐字蹦跳（每个字独立的透明度 + 上浮弹簧）
     val charAlphas = remember { word.map { androidx.compose.animation.core.Animatable(0f) } }
     val charOffsets = remember { word.map { androidx.compose.animation.core.Animatable(26f) } }
-    val colorPhase = remember { androidx.compose.animation.core.Animatable(0f) }   // 渐变上色
 
     LaunchedEffect(Unit) {
         // 第一幕：打结
         draw.animateTo(
             1f,
-            androidx.compose.animation.core.tween(1100, easing = androidx.compose.animation.core.CubicBezierEasing(.4f, 0f, .2f, 1f)),
+            tween(1100, easing = androidx.compose.animation.core.CubicBezierEasing(.4f, 0f, .2f, 1f)),
         )
         // 第二幕：文字逐字蹦跳（低阻尼弹簧回弹，交错 55ms）
         coroutineScope {
             word.forEachIndexed { i, _ ->
                 launch {
                     delay(i * 55L)
-                    launch { charAlphas[i].animateTo(1f, androidx.compose.animation.core.tween(200)) }
+                    launch { charAlphas[i].animateTo(1f, tween(200)) }
                     charOffsets[i].animateTo(
                         0f,
                         androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 420f),
@@ -69,19 +72,15 @@ internal fun SplashScreen(onFinish: () -> Unit) {
                 }
             }
         }
-        delay(250)
-        // 第三幕：渐变上色
-        colorPhase.animateTo(1f, androidx.compose.animation.core.tween(650))
         delay(400)
         onFinish()
     }
 
-    val accent = MaterialTheme.colorScheme.primary
-    val accent2 = lerp(accent, Color(0xFFA855F7), 0.45f)
-    val gradient = Brush.linearGradient(listOf(accent, accent2))
-    Box(Modifier.fillMaxSize().background(Color.White), contentAlignment = Alignment.Center) {
+    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        // 液态流动背景（共享组件，与首页一致）
+        com.knotyup.android.ui.components.LiquidBackground()
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            // 绳结：4 条笔画独立 Path，按总长预算顺序截取；黑色描线 + 渐变叠层淡入
+            // 绳结：4 条笔画独立 Path，按总长预算顺序截取
             val strokes = remember {
                 listOf(
                     Path().apply {
@@ -125,55 +124,32 @@ internal fun SplashScreen(onFinish: () -> Unit) {
                     translate(dx, dy)
                     scale(scale, scale, Offset.Zero)
                 }) {
-                    val style = Stroke(
-                        width = 1.7f, cap = StrokeCap.Round,
+                    drawPath(
+                        segment,
+                        color = Color.Black,
+                        style = Stroke(width = 1.7f, cap = StrokeCap.Round),
                     )
-                    // 黑色基底
-                    drawPath(segment, color = Color.Black, style = style)
-                    // 渐变叠层（第三幕淡入）
-                    if (colorPhase.value > 0f) {
-                        drawPath(
-                            segment, brush = gradient, alpha = colorPhase.value, style = style,
-                        )
-                    }
                 }
             }
             Spacer(Modifier.height(22.dp))
-            // 文字：逐字蹦跳（黑色基底 + 渐变叠层）
-            Box {
-                Row {
-                    word.forEachIndexed { i, ch ->
-                        Text(
-                            text = ch.toString(),
-                            color = Color.Black,
-                            fontSize = 30.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp,
-                            modifier = Modifier.graphicsLayer {
-                                alpha = charAlphas[i].value
-                                translationY = charOffsets[i].value
-                            },
-                        )
-                    }
-                }
-                if (colorPhase.value > 0f) {
-                    Row(
-                        Modifier.graphicsLayer { alpha = colorPhase.value },
-                    ) {
-                        word.forEach { ch ->
-                            Text(
-                                text = ch.toString(),
-                                style = TextStyle(
-                                    fontSize = 30.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    letterSpacing = 1.sp,
-                                    brush = gradient,
-                                ),
-                            )
-                        }
-                    }
+            // 文字：逐字蹦跳（黑色）
+            Row {
+                word.forEachIndexed { i, ch ->
+                    Text(
+                        text = ch.toString(),
+                        color = Color.Black,
+                        fontSize = 30.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp,
+                        modifier = Modifier.graphicsLayer {
+                            alpha = charAlphas[i].value
+                            translationY = charOffsets[i].value
+                        },
+                    )
                 }
             }
         }
     }
 }
+
+// 液态流动背景已抽为共享组件 ui/components/LiquidBackground.kt（开屏与首页共用）

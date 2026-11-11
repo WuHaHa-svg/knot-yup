@@ -50,7 +50,7 @@ import com.knotyup.android.net.GroupAd
 import com.knotyup.android.ui.components.CardHead
 import com.knotyup.android.ui.components.KnotEnter
 
-/** 首页：Hero + 双卡片（对齐桌面端布局逻辑；窄屏上下、宽屏左右）。 */
+/** 首页：Hero + 双卡片（对齐桌面端布局逻辑；窄屏上下、宽屏左右）；液态流动背景与开屏一致。 */
 @Composable
 internal fun HomeBody(
     t: (String) -> String,
@@ -61,12 +61,15 @@ internal fun HomeBody(
     onPickGroup: (GroupAd) -> Unit,
     onJoin: () -> Unit, onCreate: () -> Unit,
 ) {
-    Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 36.dp, bottom = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        // 顶部对齐：容器高度变化只把下方元素往下挤，上方元素位置稳定不跳
-        verticalArrangement = Arrangement.Top,
-    ) {
+    androidx.compose.foundation.layout.Box(Modifier.fillMaxSize()) {
+        // 液态流动背景（共享组件，与开屏同款；不随内容滚动）
+        com.knotyup.android.ui.components.LiquidBackground()
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 36.dp, bottom = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            // 顶部对齐：容器高度变化只把下方元素往下挤，上方元素位置稳定不跳
+            verticalArrangement = Arrangement.Top,
+        ) {
         // Hero：主标题（第二段渐变）+ 副标题
         val accent = MaterialTheme.colorScheme.primary
         val accent2 = lerp(accent, Color(0xFFA855F7), 0.45f)
@@ -110,6 +113,7 @@ internal fun HomeBody(
                 DiscoveredCard(t, discovered, Modifier.fillMaxWidth(), onPickGroup)
             }
         }
+        }
     }
 }
 
@@ -124,7 +128,8 @@ private fun JoinCard(
 ) {
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface,
+        // 半透明：让液态背景的色彩从卡片后面微微透出（溶解感）
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
         shadowElevation = 0.dp,
         modifier = modifier,
     ) {
@@ -186,7 +191,8 @@ private fun DiscoveredCard(
 ) {
     Surface(
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.surface,
+        // 半透明：让液态背景的色彩从卡片后面微微透出（溶解感）
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
         shadowElevation = 0.dp,
         modifier = modifier,
     ) {

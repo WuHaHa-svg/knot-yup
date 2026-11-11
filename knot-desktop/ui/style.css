@@ -32,14 +32,23 @@
 html, body { height: 100%; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  background: var(--bg);
+  background: #ffffff;
   color: var(--text);
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
   user-select: none;
 }
 
-.app { display: flex; flex-direction: column; height: 100vh; }
+/* ── 液态流动背景（Canvas：liquid.js 绘制；CSS 动画在该 webview 不可靠，弃用）──
+ * Canvas 天然裁剪越界绘制；窗口隐藏时 rAF 停帧。 */
+#liquid-bg {
+  position: fixed; inset: 0;
+  width: 100%; height: 100%;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.app { display: flex; flex-direction: column; height: 100vh; position: relative; z-index: 1; }
 
 /* ── 顶栏 ─────────────────────────── */
 .topbar {
@@ -163,7 +172,10 @@ body {
 .loading-text { margin-top: 14px; font-size: 13px; color: var(--text-2); }
 .card {
   width: 280px; padding: 26px;
-  background: var(--surface); border: 1px solid var(--border);
+  /* 半透明：让液态背景色彩从卡片后微微透出（与移动端 0.72 一致）；毛玻璃增强溶解感 */
+  background: color-mix(in srgb, var(--surface) 72%, transparent);
+  backdrop-filter: blur(14px);
+  border: 1px solid var(--border);
   border-radius: var(--radius); box-shadow: var(--shadow);
   display: flex; flex-direction: column; gap: 10px;
   animation: riseIn .55s var(--ease) backwards;
