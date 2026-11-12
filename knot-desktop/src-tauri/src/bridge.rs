@@ -1,7 +1,7 @@
 //! 桥接层 v2：core 事件 → Tauri 事件 → 前端；群主失联承接；转让三方握手的桌面侧执行。
 
 use crate::dlog;
-use crate::state::{local_ip, push_history, Role, Session, SharedState};
+use crate::state::{local_ip, now_ms, push_history, Role, Session, SharedState};
 use knot_core::discovery::{self, GroupAd};
 use knot_core::net::{CoreEvent, GroupClient, GroupServer};
 use knot_core::protocol::{self, DeviceInfo};
@@ -36,8 +36,14 @@ pub(crate) async fn forward_core_events(
                     }
                 };
                 let _ = app.emit("knot://members", &members);
+                // 升主后 6s 静默期 / 转让进行中：迁移潮造成的成员差量不提示（不是「有人入群/离群」）
+                let promoted_recently = {
+                    let at = state.promoted_at.load(std::sync::atomic::Ordering::Relaxed);
+                    at > 0 && now_ms().saturating_sub(at) < 6_000
+                };
+                let transferring = state.transferring.load(std::sync::atomic::Ordering::Relaxed);
                 // 成员差量 → 加入/离开通知（首次同步与自身变化不提示）
-                if had_session && !prev.is_empty() {
+                if had_session && !prev.is_empty() && !promoted_recently && !transferring {
                     use std::collections::HashSet;
                     let prev_ids: HashSet<String> = prev.iter().map(|d| d.id.clone()).collect();
                     let new_ids: HashSet<String> = members.iter().map(|d| d.id.clone()).collect();
@@ -118,10 +124,12 @@ pub(crate) async fn forward_core_events(
             }
             Ok(CoreEvent::TransferFailed) => {
                 dlog("err/transfer", "转让失败（5s 未收到 ready），原群继续");
+                state.transferring.store(false, std::sync::atomic::Ordering::Relaxed);
                 let _ = app.emit("knot://toast", "TRANSFER_FAILED");
             }
             Ok(CoreEvent::TransferCompleted) => {
                 dlog("act/transfer-done", "转让完成：清会话回首页");
+                state.transferring.store(false, std::sync::atomic::Ordering::Relaxed);
                 *state.session.lock().await = None;
                 let _ = app.emit("knot://toast", "TRANSFERRED");
                 let _ = app.emit("knot://kicked", "TRANSFERRED");
@@ -184,6 +192,7 @@ async fn handle_promote_standby(app: AppHandle, state: SharedState) {
         // standby 已被清理（异常路径）：直接清会话
         *s = None;
         drop(s);
+        state.promoted_at.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
         let _ = app.emit("knot://toast", "PROMOTED");
         return;
     };
@@ -210,6 +219,7 @@ async fn handle_promote_standby(app: AppHandle, state: SharedState) {
         standby_addr: None,
     });
     drop(s);
+    state.promoted_at.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
     let _ = app.emit("knot://members", vec![device]);
     let _ = app.emit("knot://toast", "PROMOTED");
 }
@@ -305,6 +315,7 @@ pub(crate) async fn handle_owner_lost(app: AppHandle, state: SharedState) {
                     standby_server: None,
                 standby_addr: None,
                 });
+                state.promoted_at.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
                 let _ = app.emit("knot://members", vec![device]);
                 let _ = app.emit("knot://toast", "PROMOTED");
             }

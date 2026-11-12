@@ -10,9 +10,12 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
@@ -32,6 +35,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -142,6 +146,7 @@ private fun App(
     val history by AppState.history.collectAsState()
     val toastMsg by AppState.toast.collectAsState()
     val joining by AppState.joining.collectAsState()
+    val transferring by AppState.transferring.collectAsState()
     val clipMode = AppState.clipMode.collectAsState().value
     val discovered = AppState.discovered.collectAsState().value
     var addr by remember { mutableStateOf("") }
@@ -364,16 +369,13 @@ private fun App(
             onConfirmLeaveOk = { selected ->
                 confirmLeave = false
                 val ownerLeave = AppState.isOwner()
-                if (ownerLeave) {
-                    if (selected != null) {
-                        AppState.transferOwner(selected)
-                    } else {
-                        AppState.dissolveOwner()
-                    }
+                if (ownerLeave && selected != null) {
+                    // 转让：Loading 遮罩全程静默，终态（TransferCompleted/Failed）统一提示
+                    AppState.transferOwner(selected)
                 } else {
-                    AppState.reset()
+                    if (ownerLeave) AppState.dissolveOwner() else AppState.reset()
+                    AppState.toast(t("left"))
                 }
-                AppState.toast(t("left"))
             },
             onPendingKick = { pendingKick = it },
             onPinDialogFor = { pinDialogFor = it },
@@ -381,6 +383,28 @@ private fun App(
             onShowShizukuGuide = { showShizukuGuide = it },
             startJoin = { a, p -> startJoin(a, p) },
         )
+
+        // 转让进行中：全屏 Loading 遮罩（迁移期间静默，终态统一提示后关闭）
+        if (transferring) {
+            androidx.compose.foundation.layout.Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.35f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                androidx.compose.foundation.layout.Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    androidx.compose.material3.CircularProgressIndicator(
+                        color = androidx.compose.ui.graphics.Color.White,
+                    )
+                    androidx.compose.foundation.layout.Spacer(Modifier.height(14.dp))
+                    androidx.compose.material3.Text(
+                        t("transferring"),
+                        color = androidx.compose.ui.graphics.Color.White,
+                        fontSize = 14.sp,
+                    )
+                }
+            }
+        }
     }
     } // Crossfade
 }

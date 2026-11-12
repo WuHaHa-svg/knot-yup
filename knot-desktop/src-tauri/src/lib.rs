@@ -57,6 +57,8 @@ pub fn run() {
                 discovered: tokio::sync::Mutex::new(Vec::new()),
                 last_clip_hash: tokio::sync::Mutex::new(String::new()),
                 member_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+                promoted_at: std::sync::atomic::AtomicU64::new(0),
+                transferring: std::sync::atomic::AtomicBool::new(false),
             });
 
             // 本机设备身份

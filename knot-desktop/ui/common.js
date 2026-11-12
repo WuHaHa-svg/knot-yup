@@ -119,8 +119,8 @@ function showConfirm(title, msg, okText, cancelText, members = null) {
 
 // ── 加入群 Loading ────────────────────────
 
-function showLoading() {
-  $('loadingText').textContent = t('joining');
+function showLoading(textKey = 'joining') {
+  $('loadingText').textContent = t(textKey);
   $('loadingModal').classList.remove('hidden');
 }
 

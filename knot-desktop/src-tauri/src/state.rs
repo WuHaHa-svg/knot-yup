@@ -55,6 +55,12 @@ pub(crate) struct AppState {
     pub last_clip_hash: Mutex<String>,
     /// 实时成员数（发现应答 RESP 用；bridge 收到 Members 事件时更新）
     pub member_count: Arc<std::sync::atomic::AtomicU32>,
+    /// 最近一次升主时间（unix 毫秒）：升主后老成员迁移涌入会连环触发 member_joined，
+    /// 静默期内（+6s）不弹成员差量提示，成员表 UI 照常更新
+    pub promoted_at: std::sync::atomic::AtomicU64,
+    /// 转让进行中：转出方会看到成员陆续离开（迁移潮），期间成员差量不提示；
+    /// TransferFailed/TransferCompleted 时清除
+    pub transferring: std::sync::atomic::AtomicBool,
 }
 
 pub(crate) type SharedState = Arc<AppState>;

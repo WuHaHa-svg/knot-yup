@@ -187,7 +187,12 @@ $('btnLeave').onclick = async () => {
   }
   try {
     await invoke('leave_group', { transferTo });
-    toast(t('left'));
+    if (transferTo) {
+      // 转让：Loading 遮罩全程静默，终态事件（TRANSFERRED/TRANSFER_FAILED）统一提示并关 Loading
+      showLoading('transferring');
+    } else {
+      toast(t('left'));
+    }
     clipItems = [];
     await refresh();
   } catch (e) {

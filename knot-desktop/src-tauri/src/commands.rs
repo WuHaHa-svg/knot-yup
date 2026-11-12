@@ -132,6 +132,8 @@ pub(crate) async fn leave_group(
                 // v2 三方握手：offer→ready→new_service；失败经 TransferFailed 事件提示且原群保留，
                 // 因此会话不能先清——先恢复会话，转让失败路径由用户再操作
                 let server = s.server.clone();
+                // 转让进行中：成员陆续迁移离开本服务器，差量提示静默直到成功/失败终态
+                state.transferring.store(true, std::sync::atomic::Ordering::Relaxed);
                 *state.session.lock().await = Some(s);
                 if let Some(server) = server {
                     server.transfer(&target).await;

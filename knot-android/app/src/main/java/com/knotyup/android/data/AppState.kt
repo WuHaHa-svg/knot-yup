@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -63,6 +64,15 @@ object AppState {
     // ── 进程级会话协程（横竖屏切换/Activity 重建不中断，UI 层不再持有任何 ws/消息协程）──
     private var memberJob: Job? = null
     private var watcherJob: Job? = null
+
+    /** 最近一次升主时间（unix 毫秒）：升主后老成员迁移涌入会连环触发 member_joined，6s 内静默 */
+    @Volatile
+    private var promotedAt = 0L
+
+    /** 转让进行中（UI 观察此流显示全屏 Loading）：转出方静默等待迁移完成，终态只弹一条提示；
+     *  置位期间成员差量不提示（看到的是成员迁移潮） */
+    private val _transferring = MutableStateFlow(false)
+    val transferring = _transferring.asStateFlow()
     private var runtimeJob: Job? = null
 
     /** 剪贴板指纹闸门：最近一次同步内容指纹（收/发都记录），防「写入被当成本机复制」回环 */
@@ -234,7 +244,11 @@ object AppState {
             is GroupEvent.Members -> {
                 // 成员差量 → 加入/离开提示（首次同步与自身变化不提示）
                 val prev = session.value.members
-                if (prev.isNotEmpty()) {
+                // 升主后 6s 静默期：老成员迁移涌入造成的差量不提示（迁移潮不是「有人入群」）
+                val promotedRecently =
+                    promotedAt > 0 && System.currentTimeMillis() - promotedAt < 6_000L
+                // 转让进行中：转出方看到的是成员迁移潮，同样不提示
+                if (prev.isNotEmpty() && !promotedRecently && !_transferring.value) {
                     val prevIds = prev.map { it.id }.toSet()
                     val newIds = event.members.map { it.id }.toSet()
                     event.members.filter { it.id !in prevIds && it.id != device.id }
@@ -267,7 +281,8 @@ object AppState {
                 scope.launch {
                     delay(delayMs)
                     reset()
-                    toastKey("group_dissolved", 2)
+                    // 解散是群主主动操作的结果，普通提示即可，不用错误色
+                    toastKey("group_dissolved")
                 }
             }
             is GroupEvent.TransferOffer -> {
@@ -293,11 +308,13 @@ object AppState {
             }
             GroupEvent.TransferFailed -> {
                 // 群主侧本地事件：转让失败，原群继续
+                _transferring.value = false
                 toastKey("transfer_failed", 2)
             }
             GroupEvent.TransferCompleted -> {
-                // 群主侧本地事件：转让完成，清会话回首页
+                // 群主侧本地事件：转让完成，清会话回首页（终态统一提示，Loading 关闭）
                 android.util.Log.d("KnotYup", "转让完成：清会话回首页")
+                _transferring.value = false
                 reset()
                 toastKey("left")
             }
@@ -367,6 +384,7 @@ object AppState {
         }
         if (candidates[0].id == device.id) {
             val port = standby?.localPort ?: reservePort()
+            promotedAt = System.currentTimeMillis()
             becomeOwner(s.pin, port)
             toastKey("promoted", 1)
             ownerLostHandling = false
@@ -545,6 +563,7 @@ object AppState {
     fun transferOwner(targetId: String) {
         val target = _session.value.members.firstOrNull { it.id == targetId } ?: return
         val s = server ?: return
+        _transferring.value = true
         s.transfer(target.id)
     }
 
@@ -603,10 +622,12 @@ object AppState {
             members = listOf(device.copy(role = "owner")), joined = true,
         )
         if (ip != null) startRespond(addr)
+        promotedAt = System.currentTimeMillis()
         toastKey("promoted", 1)
     }
 
     fun reset() {
+        _transferring.value = false
         memberJob?.cancel()
         memberJob = null
         watcherJob?.cancel()

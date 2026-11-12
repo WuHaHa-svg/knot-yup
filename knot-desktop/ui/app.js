@@ -43,7 +43,12 @@ async function main() {
   });
   await listen('knot://kicked', (e) => {
     const p = e.payload;
-    toast(p === 'GROUP_DISSOLVED' || p === 'DISSOLVED' ? t('group_dissolved') : p === 'GROUP_LOST' ? t('group_lost') : p === 'TRANSFERRED' ? t('left') : t('kicked'), 'error');
+    // 提示策略：异常终态才弹 error；解散是群主主动操作的结果用普通色；
+    // 转让完成已由 knot://toast TRANSFERRED 弹过一次 left，这里只重置 UI 不再弹（修双弹）
+    if (p === 'TRANSFERRED') { /* 静默 */ }
+    else if (p === 'GROUP_DISSOLVED' || p === 'DISSOLVED') toast(t('group_dissolved'));
+    else if (p === 'GROUP_LOST') toast(t('group_lost'), 'error');
+    else toast(t('kicked'), 'error');
     hideLoading();
     state.session = null;
     clipItems = [];
@@ -53,6 +58,8 @@ async function main() {
   await listen('knot://error', (e) => toast(e.payload, 'error'));
   await listen('knot://toast', (e) => {
     toast(String(e.payload));
+    // 转让终态：关 Loading（成功弹 left / 失败弹 transfer_failed 由上面的 toast 完成）
+    if (e.payload === 'TRANSFERRED' || e.payload === 'TRANSFER_FAILED') hideLoading();
     // 升主/重连/转让完成后会话已换新，需要刷新视图
     if (e.payload === 'RECONNECTED' || e.payload === 'PROMOTED' || e.payload === 'TRANSFERRED' || e.payload === 'MIGRATED') refresh();
   });
