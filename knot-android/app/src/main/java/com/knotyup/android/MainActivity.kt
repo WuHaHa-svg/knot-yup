@@ -78,6 +78,9 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         AppState.setInForeground(true)
+        // 后台切回前台：正在群页面（成员身份）时立即 ping 一次，尽快拿回成员表快照刷新状态
+        val s = AppState.session.value
+        if (s.joined && s.role == "member") AppState.client.pingNow()
     }
 
     override fun onStop() {
@@ -143,6 +146,7 @@ private fun App(
     val toastMsg by AppState.toast.collectAsState()
     val joining by AppState.joining.collectAsState()
     val transferring by AppState.transferring.collectAsState()
+    val connLost by AppState.connLost.collectAsState()
     val clipMode = AppState.clipMode.collectAsState().value
     val discovered = AppState.discovered.collectAsState().value
     var addr by remember { mutableStateOf("") }
@@ -291,9 +295,13 @@ private fun App(
                         groupAddr = session.addr, groupPin = session.pin,
                         onKick = { pendingKick = it },
                         onCopy = { text ->
-                            // 点击历史复制：先同步指纹闸门，避免被监听器当作本机复制再发回群
+                            // 点击历史复制：先同步指纹/文本闸门并刷新轮询基线，避免被监听器当作本机复制再发回群
                             AppState.clipGuard = textHash(text)
-                            scope.launch { ClipboardCapability.setText(context, text) }
+                            AppState.lastSyncText = text
+                            scope.launch {
+                                ClipboardCapability.setText(context, text)
+                                AppState.refreshClipBaseline()
+                            }
                             AppState.toast(t("copied"), 1)
                         },
                         onSendText = { sendText = it },
@@ -359,6 +367,7 @@ private fun App(
         // ── App 级弹窗集合（平台 Dialog：原生窗口层 + 系统遮罩）──
         AppDialogs(
             t = t, session = session, joining = joining, transferring = transferring,
+            connLost = connLost,
             confirmLeave = confirmLeave, pendingKick = pendingKick,
             pinDialogFor = pinDialogFor, showQr = showQr, showShizukuGuide = showShizukuGuide,
             onDismissConfirmLeave = { confirmLeave = false },

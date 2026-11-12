@@ -106,14 +106,12 @@ function showConfirm(title, msg, okText, cancelText, members = null) {
     modal.classList.remove('hidden');
     const close = (val) => {
       modal.classList.add('hidden');
-      $('confirmOk').onclick = $('confirmCancel').onclick = modal.onclick = null;
+      $('confirmOk').onclick = $('confirmCancel').onclick = null;
       resolve(val);
     };
     $('confirmOk').onclick = () => close(selected === null ? true : { transfer: selected });
     $('confirmCancel').onclick = () => close(null);
-    modal.onclick = (e) => {
-      if (e.target === modal) close(null);
-    };
+    // 规范：带操作按钮的弹窗不允许点空白处关闭——必须显式选择某个操作
   });
 }
 
@@ -136,8 +134,6 @@ function toast(msg, type = 'info') {
     WRONG_PIN: t('wrong_pin'),
     NO_LAN: t('no_lan'),
     PROMOTED: t('promoted'),
-    RECONNECTING: t('reconnecting'),
-    RECONNECTED: t('reconnected'),
     MIGRATED: t('reconnected'),
     TRANSFER_FAILED: t('transfer_failed'),
     TRANSFERRED: t('left'),

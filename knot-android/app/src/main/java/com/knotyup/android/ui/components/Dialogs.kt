@@ -303,7 +303,13 @@ internal fun ShizukuGuideDialog(
     onDismiss: () -> Unit,
 ) {
     val context = LocalContext.current
-    val active = ClipboardCapability.isShizukuActive()
+    // 本机 Shizuku 服务运行态（仅 binder，不含授权）：binder 收到/断开时实时刷新
+    var shizukuRunning by remember { mutableStateOf(ClipboardCapability.isShizukuRunning()) }
+    LaunchedEffect(Unit) {
+        ClipboardCapability.observeModeChanges {
+            shizukuRunning = ClipboardCapability.isShizukuRunning()
+        }
+    }
     // 授权成功（模式翻转为 SHIZUKU）→ 自动关闭弹窗
     val clipMode by com.knotyup.android.data.AppState.clipMode.collectAsState()
     LaunchedEffect(clipMode) {
@@ -327,24 +333,22 @@ internal fun ShizukuGuideDialog(
                     )
                     Spacer(Modifier.height(18.dp))
                     Row {
-                        // 打开 Shizuku App（已激活则隐藏此按钮）
-                        if (!active) {
+                        // 打开 Shizuku App（已授权则隐藏此按钮）
+                        if (!ClipboardCapability.isShizukuActive()) {
                             Text(
                                 t("open_shizuku"),
                                 modifier = Modifier
                                     .weight(1f)
                                     .clip(RoundedCornerShape(10.dp))
                                     .clickable {
-                                        runCatching {
-                                            context.startActivity(
-                                                android.content.Intent(
-                                                    android.content.Intent.ACTION_MAIN
-                                                ).apply {
-                                                    addCategory(android.content.Intent.CATEGORY_LAUNCHER)
-                                                    setPackage("moe.shizuku.privileged.api")
-                                                }
-                                            )
-                                        }
+                                        // 直接按包名打开 Shizuku；打开失败（未安装/被系统拦截）toast 提示
+                                        val launched = runCatching {
+                                            val intent = context.packageManager
+                                                .getLaunchIntentForPackage("moe.shizuku.privileged.api")
+                                            intent?.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            intent?.let { context.startActivity(it) } != null
+                                        }.getOrDefault(false)
+                                        if (!launched) AppState.toast(t("shizuku_open_failed"), 2)
                                     }
                                     .padding(vertical = 10.dp),
                                 fontSize = 13.sp, fontWeight = FontWeight.Medium,
@@ -353,20 +357,33 @@ internal fun ShizukuGuideDialog(
                             )
                             Spacer(Modifier.width(10.dp))
                         }
-                        // 授权（需 Shizuku 已运行）
+                        // 授权（Shizuku 服务未运行时禁用——授权弹窗起不来，只会静默失败）
                         Text(
                             t("grant_permission"),
                             modifier = Modifier
                                 .weight(1f)
                                 .clip(RoundedCornerShape(10.dp))
-                                .clickable {
-                                    ClipboardCapability.requestShizukuPermission()
-                                }
-                                .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp))
+                                .then(
+                                    if (shizukuRunning) Modifier
+                                        .clickable { ClipboardCapability.requestShizukuPermission() }
+                                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp))
+                                    else Modifier.background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
+                                )
                                 .padding(vertical = 10.dp),
                             fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onPrimary,
+                            color = if (shizukuRunning) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center,
+                        )
+                    }
+                    // 未运行提示（引导用户先去启动服务）
+                    if (!shizukuRunning) {
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            t("shizuku_not_running"),
+                            fontSize = 11.5.sp,
+                            lineHeight = 16.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -375,8 +392,59 @@ internal fun ShizukuGuideDialog(
     }
 }
 
-/** 不可关闭的等待弹窗（加入群 / 转让群共用，文案键可换）。 */
+/** 连接断开弹窗：仅「重新加入」与「退出群」两个出口，点外部/返回键不关闭。 */
 @Composable
+internal fun ConnLostDialog(
+    t: (String) -> String,
+    ownerName: String,
+    onRejoin: () -> Unit,
+    onLeave: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = {},
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false,
+        ),
+    ) {
+        DialogCard(Modifier.padding(horizontal = 40.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 0.dp,
+            ) {
+                Column(Modifier.padding(24.dp)) {
+                    Text(t("conn_lost_title"), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        t("conn_lost_msg").replace("{name}", ownerName),
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(
+                            onClick = onLeave,
+                            modifier = Modifier.weight(1f).heightIn(min = 42.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        ) { Text(t("leave"), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
+                        Button(
+                            onClick = onRejoin,
+                            modifier = Modifier.weight(1f).heightIn(min = 42.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                        ) { Text(t("rejoin"), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 不可关闭的等待弹窗（加入群 / 转让群共用，文案键可换）。 */@Composable
 internal fun JoiningDialog(t: (String) -> String, textKey: String = "joining") {
     Dialog(
         onDismissRequest = {},

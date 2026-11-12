@@ -45,6 +45,9 @@ class GroupClient(
     var localDevice: DeviceInfo? = null
         private set
 
+    /** ping 序号（心跳协程与 pingNow 共用，避免前台即时 ping 与心跳序号撞车） */
+    private val pingSeq = java.util.concurrent.atomic.AtomicLong(0)
+
     /** 连接并加入群。返回事件流；流的取消（collect 结束）即断开。 */
     fun join(addr: String, pin: String, device: DeviceInfo): Flow<Result<GroupEvent>> = callbackFlow {
         intentionalClose = false
@@ -127,10 +130,9 @@ class GroupClient(
         // 心跳：每 30s 发一次 Ping；3s 内未收到对应 seq 的 Pong —— 单次即判群主失联 → 断开触发承接
         launch {
             android.util.Log.i("KnotYup", "心跳任务启动（30s 间隔 / 3s 超时 / 单次失联）")
-            var seq = 0L
             while (true) {
                 delay(Proto.HEARTBEAT_MS)
-                seq++
+                val seq = pingSeq.incrementAndGet()
                 android.util.Log.d("KnotYup", "-> ping#$seq")
                 socket.send(Msg.Ping(device, seq, System.currentTimeMillis()).toJson())
                 val deadline = System.currentTimeMillis() + Proto.PONG_TIMEOUT_MS
@@ -151,6 +153,16 @@ class GroupClient(
             socket.cancel()
             ws = null
         }
+    }
+
+    /** 立即发一次心跳（后台切回前台且在群页面时调用）：Pong 携带成员表快照，即刻刷新状态。
+     *  只发不查——失联判定仍由 30s 心跳协程负责，这里只求快速同步。 */
+    fun pingNow(): Boolean {
+        val dev = localDevice ?: return false
+        val socket = ws ?: return false
+        val seq = pingSeq.incrementAndGet()
+        android.util.Log.d("KnotYup", "-> ping#$seq (前台即时)")
+        return socket.send(Msg.Ping(dev, seq, System.currentTimeMillis()).toJson())
     }
 
     /** 发送本机剪贴板变化（加密信封）。 */

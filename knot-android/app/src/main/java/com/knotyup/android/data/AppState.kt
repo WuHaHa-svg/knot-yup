@@ -79,9 +79,29 @@ object AppState {
     @Volatile
     var clipGuard = ""
 
+    /** 回声闸门（文本级）：最近一次「远端同步 / 本机主动复制」写入的文本。
+     *  轮询读到相同内容时静默——指纹通道与全文通道不一致（读到陈旧值）时的第二道保险 */
+    @Volatile
+    var lastSyncText: String? = null
+
+    /** 轮询指纹基线：本机写完剪贴板后立刻刷新，轮询从此只见「真正的外部复制」 */
+    @Volatile
+    private var clipFpBase: String? = null
+
+    /** 本机写剪贴板完成后刷新指纹基线（远端同步写入 / 点击历史复制后调用）。 */
+    suspend fun refreshClipBaseline() {
+        appContext?.let { ctx ->
+            runCatching { clipFpBase = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx) }
+        }
+    }
+
     /** 入群 Loading（进程级：旋转不重置） */
     private val _joining = MutableStateFlow(false)
     val joining: StateFlow<Boolean> = _joining
+
+    /** 连接断开（弹窗标记）：UI 观察显示「连接已断开」弹窗，用户选重新加入或退出群 */
+    private val _connLost = MutableStateFlow(false)
+    val connLost = _connLost.asStateFlow()
 
     /** 入群 Loading 开关：UI 点击瞬间置 true（三条入群路径共用），成员会话启动后由事件收口 */
     fun setJoining(v: Boolean) {
@@ -125,10 +145,6 @@ object AppState {
     /** 网络事件总线（连接协程 → UI 协程）。 */
     private val _events = MutableSharedFlow<GroupEvent>(extraBufferCapacity = 64)
     val events = _events.asSharedFlow()
-
-    /** 选主/重连处理中标志：防止 handleOwnerLost 被重复触发（错误分支与事件分支双路到达） */
-    @Volatile
-    var ownerLostHandling = false
 
     fun emit(event: GroupEvent) {
         _events.tryEmit(event)
@@ -267,6 +283,10 @@ object AppState {
                 applyEvent(event)
                 appContext?.let {
                     runCatching { com.knotyup.android.clipboard.ClipboardCapability.setText(it, event.payload.text) }
+                    // 写完刷新基线与文本闸门：轮询不会把自己的写入当作「外部复制」，
+                    // 即使指纹通道读到变化而全文通道读到陈旧值（xxx/yyy 回发的根源），也被文本闸门拦下
+                    lastSyncText = event.payload.text
+                    refreshClipBaseline()
                 }
             }
             is GroupEvent.Kicked -> {
@@ -321,7 +341,12 @@ object AppState {
             is GroupEvent.Error -> {
                 android.util.Log.w("KnotYup", "ws error: ${event.message}")
                 val s = session.value
-                if (s.joined && s.role == "member") ownerLost(null) else toastKey("op_failed", 2)
+                // 连接断开：不再自动走选主重连，交给用户决策（弹窗：重新加入 / 退出群）
+                when {
+                    event.message.startsWith("connection closed") && s.joined && s.role == "member" ->
+                        _connLost.value = true
+                    else -> toastKey("op_failed", 2)
+                }
             }
         }
     }
@@ -334,16 +359,20 @@ object AppState {
         memberJob = scope.launch {
             onJoining(addr, pin)
             setStandby(ServerSocket(0))
+            // 本次连接是否已拿到成员表：重新加入时旧会话 joined 仍为 true，
+            // 超时判断不能依赖 session.joined，必须看本次握手结果
+            var gotMembers = false
             val collector = launch {
                 client.join(addr, pin, deviceWithStandbyAddr()).collect { result ->
                     result.fold({ event ->
+                        if (event is GroupEvent.Members) gotMembers = true
                         emit(event)
                     }, { e ->
                         android.util.Log.w("KnotYup", "join failed: ${e.message}")
-                        val s = session.value
-                        if (s.joined && s.role == "member") {
-                            // 已入群后的连接失败（心跳失联/群主消失）→ 选主承接
-                            ownerLost(null)
+                        if (session.value.joined && session.value.role == "member") {
+                            // 已入群后的连接失败（心跳失联/重新加入失败）→ 弹窗交用户决策
+                            _connLost.value = true
+                            _joining.value = false
                         } else {
                             toastKey(if (e.message == "WRONG_PIN") "wrong_pin" else "join_failed", 2)
                             _joining.value = false
@@ -353,73 +382,17 @@ object AppState {
             }
             // 入群超时：5s 内未收到成员表即判失败
             delay(5000)
-            if (_joining.value && !session.value.joined) {
+            if (_joining.value && !gotMembers) {
                 android.util.Log.w("KnotYup", "join timeout (5s): $addr")
                 collector.cancel()
                 client.leave()
-                toastKey("join_failed", 2)
-                _joining.value = false
-            }
-        }
-    }
-
-    /**
-     * 群主容灾（v2 简化版）：候选 = 成员表中 role != owner 的设备按序；
-     * 候选[0]是自己 → standby 承接；否则依次重连候选地址（10 轮）。
-     */
-    private fun ownerLost(explicit: DeviceInfo?) {
-        if (ownerLostHandling) {
-            android.util.Log.w("KnotYup", "ownerLost 已在处理中，忽略重复触发")
-            return
-        }
-        ownerLostHandling = true
-        val s = session.value
-        val candidates = explicit?.let { listOf(it) } ?: s.members.filter { !it.isOwner }
-        android.util.Log.d("KnotYup", "owner lost: explicit=${explicit?.name}, candidates=${candidates.map { "${it.name}@${it.addr}" }}")
-        if (candidates.isEmpty()) {
-            reset()
-            toastKey("group_lost", 2)
-            ownerLostHandling = false
-            return
-        }
-        if (candidates[0].id == device.id) {
-            val port = standby?.localPort ?: reservePort()
-            promotedAt = System.currentTimeMillis()
-            becomeOwner(s.pin, port)
-            toastKey("promoted", 1)
-            ownerLostHandling = false
-        } else {
-            toastKey("reconnecting")
-            val pin_ = s.pin
-            scope.launch {
-                for (attempt in 0 until 10) {
-                    for (c in candidates) {
-                        if (c.id == device.id || c.addr.isNullOrBlank()) continue
-                        var connected = false
-                        android.util.Log.d("KnotYup", "reconnect attempt=$attempt -> ${c.name}@${c.addr}")
-                        try {
-                            client.join(c.addr, pin_, deviceWithStandbyAddr()).collect { res ->
-                                res.fold({ ev ->
-                                    if (ev is GroupEvent.Members && !connected) {
-                                        connected = true
-                                        toastKey("reconnected", 1)
-                                        ownerLostHandling = false
-                                    }
-                                    emit(ev)
-                                }, { e ->
-                                    android.util.Log.w("KnotYup", "reconnect failed: ${e.message}")
-                                })
-                            }
-                        } catch (_: Exception) {
-                        }
-                        if (connected) return@launch // 正常入群；若再次断开，Disconnected 会重新触发选主
-                        delay(500)
-                    }
-                    delay(1500)
+                if (session.value.joined && session.value.role == "member") {
+                    // 重新加入超时：回到断连弹窗让用户再决策，不无限 Loading
+                    _connLost.value = true
+                } else {
+                    toastKey("join_failed", 2)
                 }
-                reset()
-                toastKey("group_lost", 2)
-                ownerLostHandling = false
+                _joining.value = false
             }
         }
     }
@@ -439,12 +412,14 @@ object AppState {
                     .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "knotyup:clipwatch")
                     .apply { setReferenceCounted(false); acquire() }
                 try {
-                    var lastFp = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx)
+                    // 监听启动即以当前指纹为基线（入群/模式切换后不广播既有剪贴板）；
+                    // 运行期间基线由写入侧即时刷新（refreshClipBaseline），轮询只见真正的外部复制
+                    clipFpBase = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx)
                     while (true) {
                         delay(1_000)
                         val fp = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx) ?: continue
-                        if (fp == lastFp) continue
-                        lastFp = fp
+                        if (fp == clipFpBase) continue
+                        clipFpBase = fp
                         com.knotyup.android.clipboard.ClipboardCapability.getText(ctx)?.let { sendLocalClip(it) }
                     }
                 } finally {
@@ -467,11 +442,12 @@ object AppState {
         }
     }
 
-    /** 本机剪贴板变化 → 群广播（含指纹闸门防回环）。 */
+    /** 本机剪贴板变化 → 群广播（含指纹 + 文本双闸门防回环）。 */
     private suspend fun sendLocalClip(text: String) {
         val hash = com.knotyup.android.net.textHash(text)
-        if (text.isEmpty() || hash == clipGuard) return
+        if (text.isEmpty() || text == lastSyncText || hash == clipGuard) return
         clipGuard = hash
+        lastSyncText = text
         android.util.Log.d("KnotYup", "本机复制 → 广播 len=${text.length} hash=${hash.take(8)}")
         val sent = if (isOwner()) {
             server?.broadcastClipboard(text)
@@ -626,8 +602,24 @@ object AppState {
         toastKey("promoted", 1)
     }
 
+    /** 连接断开弹窗 → 重新加入：用会话里记录的地址 + PIN 重走完整入群流程。 */
+    fun reconnect() {
+        val s = session.value
+        if (!s.joined || s.addr.isBlank()) return
+        _connLost.value = false
+        startMemberSession(s.addr, s.pin)
+    }
+
+    /** 连接断开弹窗 → 退出群。 */
+    fun leaveAfterConnLost() {
+        _connLost.value = false
+        reset()
+        toastKey("left")
+    }
+
     fun reset() {
         _transferring.value = false
+        _connLost.value = false
         memberJob?.cancel()
         memberJob = null
         watcherJob?.cancel()

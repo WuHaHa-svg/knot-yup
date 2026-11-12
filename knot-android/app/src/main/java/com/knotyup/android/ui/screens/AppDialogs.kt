@@ -3,6 +3,7 @@ package com.knotyup.android.ui.screens
 import com.knotyup.android.data.AppState
 import com.knotyup.android.data.SessionState
 import com.knotyup.android.net.GroupAd
+import com.knotyup.android.ui.components.ConnLostDialog
 import com.knotyup.android.ui.components.JoiningDialog
 import com.knotyup.android.ui.components.KnotConfirm
 import com.knotyup.android.ui.components.PinDialog
@@ -20,6 +21,7 @@ internal fun AppDialogs(
     session: SessionState,
     joining: Boolean,
     transferring: Boolean,
+    connLost: Boolean,
     confirmLeave: Boolean,
     pendingKick: String?,
     pinDialogFor: GroupAd?,
@@ -93,6 +95,17 @@ internal fun AppDialogs(
         ShizukuGuideDialog(
             t = t,
             onDismiss = { onShowShizukuGuide(false) },
+        )
+    }
+
+    // 连接断开弹窗：用户决策重新加入或退出群（不走自动选主重连）
+    if (connLost && session.joined) {
+        val ownerName = session.members.firstOrNull { it.isOwner }?.name ?: ""
+        ConnLostDialog(
+            t = t,
+            ownerName = ownerName,
+            onRejoin = { AppState.reconnect() },
+            onLeave = { AppState.leaveAfterConnLost() },
         )
     }
 

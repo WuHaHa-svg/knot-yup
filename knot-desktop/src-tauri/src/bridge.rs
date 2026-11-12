@@ -4,7 +4,7 @@ use crate::dlog;
 use crate::state::{local_ip, now_ms, push_history, Role, Session, SharedState};
 use knot_core::discovery::{self, GroupAd};
 use knot_core::net::{CoreEvent, GroupClient, GroupServer};
-use knot_core::protocol::{self, DeviceInfo};
+use knot_core::protocol;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -136,14 +136,34 @@ pub(crate) async fn forward_core_events(
             }
             Ok(CoreEvent::Error(e)) => {
                 dlog("evt/error", &e);
-                let is_member = {
-                    let s = state.session.lock().await;
-                    matches!(&*s, Some(Session { role: Role::Member, .. }))
-                };
-                if is_member && e.starts_with("connection closed") {
-                    // 群主意外离开 → 承接
-                    handle_owner_lost(app.clone(), state.clone()).await;
-                } else if !e.starts_with("connection closed") {
+                if e.starts_with("connection closed") {
+                    // 连接断开（成员侧群主失联）：不再自动承接/重连——清会话并通知前端
+                    // 弹「连接已断开」对话框，由用户决策重新加入或退出群
+                    let (is_member, addr, pin, owner_name) = {
+                        let mut s = state.session.lock().await;
+                        match s.take() {
+                            Some(Session { role: Role::Member, addr, pin, members, .. }) => {
+                                // 群主名取自成员表（断连弹窗展示用）
+                                let owner = members
+                                    .iter()
+                                    .find(|d| d.is_owner())
+                                    .map(|d| d.name.clone())
+                                    .unwrap_or_default();
+                                (true, addr, pin, owner)
+                            }
+                            other => {
+                                *s = other; // 群主侧等其他会话：不处理
+                                (false, String::new(), String::new(), String::new())
+                            }
+                        }
+                    };
+                    if is_member {
+                        let _ = app.emit(
+                            "knot://conn-lost",
+                            serde_json::json!({ "addr": addr, "pin": pin, "owner": owner_name }),
+                        );
+                    }
+                } else {
                     let _ = app.emit("knot://error", e);
                 }
             }
@@ -260,111 +280,5 @@ async fn handle_migrate(app: AppHandle, state: SharedState, addr: String, pin: S
     }
 }
 
-/// 群主失联承接（v2 简化版）：候选 = 成员表中 role==member 的设备按序；
-/// 候选[0]是自己 → standby 承接；否则重连候选地址（10 轮）。
-pub(crate) async fn handle_owner_lost(app: AppHandle, state: SharedState) {
-    let Some(mut s) = state.session.lock().await.take() else {
-        return;
-    };
-    let candidates: Vec<DeviceInfo> = s.members.iter().filter(|d| !d.is_owner()).cloned().collect();
-    let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
-    let pin = s.pin.clone();
-    let core_tx = state.core_tx.lock().await.clone().unwrap_or_else(|| {
-        tokio::sync::broadcast::channel::<CoreEvent>(128).0
-    });
-
-    if candidates.is_empty() {
-        dlog("err/owner-lost", "无候选，群丢失");
-        let _ = app.emit("knot://kicked", "GROUP_LOST");
-        return;
-    }
-    dlog("act/owner-lost", format!("候选: {}", candidates.iter().map(|c| c.name.clone()).collect::<Vec<_>>().join(" → ")));
-
-    if candidates[0].id == my_id {
-        // 当选：用预留端口升为群主
-        let standby_port = s
-            .standby
-            .as_ref()
-            .and_then(|l| l.local_addr().ok())
-            .map(|a| a.port())
-            .unwrap_or(0);
-        s.standby = None; // 释放端口
-        drop(s);
-        let device = state.device.lock().await.clone().unwrap_or_else(|| candidates[0].clone());
-        match GroupServer::start(standby_port, pin.clone(), device.clone(), core_tx).await {
-            Ok((server, port)) => {
-                let addr = format!("{}:{}", local_ip(), port);
-                // v2：群主被动应答发现请求
-                let member_count = Arc::new(AtomicU32::new(1));
-                let respond_stop = discovery::respond(
-                    GroupAd { id: device.id.clone(), name: device.name.clone(), addr: addr.clone(), members: 1 },
-                    { let c = member_count.clone(); move || c.load(Ordering::Relaxed) },
-                )
-                .await
-                .ok();
-                dlog("act/promoted", format!("承接群主 {addr}"));
-                *state.session.lock().await = Some(Session {
-                    role: Role::Owner,
-                    server: Some(server),
-                    client: None,
-                    members: vec![device.clone()],
-                    addr,
-                    pin,
-                    announce_stop: respond_stop,
-                    standby: None,
-                    standby_server: None,
-                standby_addr: None,
-                });
-                state.promoted_at.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
-                let _ = app.emit("knot://members", vec![device]);
-                let _ = app.emit("knot://toast", "PROMOTED");
-            }
-            Err(_) => {
-                let _ = app.emit("knot://kicked", "GROUP_LOST");
-                dlog("err/promoted", "承接群主失败（端口被占）");
-            }
-        }
-    } else {
-        // 重连：依次尝试候选地址（当选者未就绪时退避重试）
-        drop(s);
-        let _ = app.emit("knot://toast", "RECONNECTING");
-        dlog("act/reconnecting", "开始重连候选");
-        tauri::async_runtime::spawn(async move {
-            for _attempt in 0..10 {
-                for c in &candidates {
-                    let Some(addr) = &c.addr else { continue };
-                    if c.id == my_id {
-                        continue;
-                    }
-                    let device = state.device.lock().await.clone().unwrap();
-                    dlog("act/reconnect-try", format!("attempt={_attempt} -> {addr}"));
-                    if let Ok(client) = GroupClient::connect(addr, &pin, device, core_tx.clone()).await {
-                        let mut guard = state.session.lock().await;
-                        if guard.is_some() {
-                            return; // 已经被其他路径处理
-                        }
-                        *guard = Some(Session {
-                            role: Role::Member,
-                            server: None,
-                            client: Some(client),
-                            members: vec![],
-                            addr: addr.clone(),
-                            pin: pin.clone(),
-                            announce_stop: None,
-                            standby: None,
-                            standby_server: None,
-                standby_addr: None,
-                        });
-                        drop(guard);
-                        let _ = app.emit("knot://toast", "RECONNECTED");
-                        dlog("act/reconnected", format!("已重连 {addr}"));
-                        return;
-                    }
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            }
-            let _ = app.emit("knot://kicked", "GROUP_LOST");
-            dlog("err/reconnect", "10 轮重连全部失败，群丢失");
-        });
-    }
-}
+// 自动承接/重连机制已移除：成员侧连接断开（connection closed）统一改为清会话 +
+// 发 knot://conn-lost 事件，由前端弹「连接已断开」对话框交用户决策（见 forward_core_events）。

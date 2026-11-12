@@ -36,6 +36,13 @@ object ClipboardCapability {
         false
     }
 
+    /** 本机 Shizuku 服务是否在运行（仅看 binder，不看授权）：授权按钮的启用前提。 */
+    fun isShizukuRunning(): Boolean = try {
+        Shizuku.pingBinder()
+    } catch (_: Exception) {
+        false
+    }
+
     fun isShizukuPermissionGranted(): Boolean = try {
         Shizuku.checkSelfPermission() == android.content.pm.PackageManager.PERMISSION_GRANTED
     } catch (_: Exception) {

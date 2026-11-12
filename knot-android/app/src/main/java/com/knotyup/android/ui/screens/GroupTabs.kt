@@ -24,7 +24,18 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.slideInVertically
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,6 +52,7 @@ import com.knotyup.android.clipboard.ClipboardCapability
 import com.knotyup.android.data.AppState
 import com.knotyup.android.data.HistoryItem
 import com.knotyup.android.net.DeviceInfo
+import com.knotyup.android.ui.Motion
 import com.knotyup.android.ui.components.InfoRow
 
 /** Tab 1：群信息卡（地址/PIN/剪贴板模式）+ 设备列表 + 退出群。 */
@@ -188,21 +200,34 @@ internal fun ClipboardTab(
             }
         } else {
             history.forEach { item ->
-                Column(
-                    Modifier.fillMaxWidth().padding(vertical = 4.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .clickable { onCopy(item.text) }
-                        .background(MaterialTheme.colorScheme.surface)
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                ) {
-                    val name = members.firstOrNull { it.id == item.from }?.name
-                        ?: if (item.from == AppState.device.id) AppState.device.name else item.from.take(6)
-                    Text(
-                        name, fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(item.text, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                // key = 条目身份：新记录插入头部时 remember 跟着条目走，
+                // 只有真正新出现的条目做挂载动画，旧条目位移不重播
+                key(item.atMs) {
+                    var shown by remember { mutableStateOf(false) }
+                    LaunchedEffect(Unit) { shown = true }
+                    AnimatedVisibility(
+                        visible = shown,
+                        enter = fadeIn(tween(220)) +
+                            slideInVertically(tween(240, easing = Motion.Easing)) { -it / 3 } +
+                            expandVertically(tween(200)),
+                    ) {
+                        Column(
+                            Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { onCopy(item.text) }
+                                .background(MaterialTheme.colorScheme.surface)
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                        ) {
+                            val name = members.firstOrNull { it.id == item.from }?.name
+                                ?: if (item.from == AppState.device.id) AppState.device.name else item.from.take(6)
+                            Text(
+                                name, fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(item.text, fontSize = 13.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                 }
             }
         }

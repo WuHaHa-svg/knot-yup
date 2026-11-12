@@ -56,12 +56,51 @@ async function main() {
     renderClipboard();
   });
   await listen('knot://error', (e) => toast(e.payload, 'error'));
+  // 连接断开（成员侧群主失联）：留在群页面弹「连接已断开」，用户决策重新加入或退出
+  await listen('knot://conn-lost', async (e) => {
+    const { addr, pin, owner } = e.payload || {};
+    hideLoading();
+    const msg = t('conn_lost_msg').replaceAll('{name}', owner || '');
+    // 循环弹窗（与安卓一致）：重新加入全程 Loading 静默——
+    // 成功/已在群中 → 关 Loading 刷新，无提示；失败 → 关 Loading 重新弹窗，无提示
+    for (;;) {
+      const rejoin = await showConfirm(t('conn_lost_title'), msg, t('rejoin'), t('leave'));
+      if (!rejoin) break;
+      try {
+        showLoading('joining');
+        // 5s 内未加入成功即判失败，不无限 Loading
+        await Promise.race([
+          invoke('join_group', { addr, pin }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('JOIN_TIMEOUT')), 5000)),
+        ]);
+        await refresh();
+        hideLoading();
+        return;
+      } catch (err) {
+        // 已在群中（误判断连/会话仍在）：直接按加入成功处理
+        if (String(err).includes('ALREADY_IN_GROUP')) {
+          await refresh();
+          hideLoading();
+          return;
+        }
+        hideLoading();
+      }
+    }
+    // 退出群：清 UI 回首页
+    state.session = null;
+    clipItems = [];
+    renderSession();
+    renderClipboard();
+    try { await invoke('leave_group', { transferTo: null }); } catch { /* 无会话时是 no-op */ }
+    toast(t('left'));
+    await refresh();
+  });
   await listen('knot://toast', (e) => {
     toast(String(e.payload));
     // 转让终态：关 Loading（成功弹 left / 失败弹 transfer_failed 由上面的 toast 完成）
     if (e.payload === 'TRANSFERRED' || e.payload === 'TRANSFER_FAILED') hideLoading();
     // 升主/重连/转让完成后会话已换新，需要刷新视图
-    if (e.payload === 'RECONNECTED' || e.payload === 'PROMOTED' || e.payload === 'TRANSFERRED' || e.payload === 'MIGRATED') refresh();
+    if (e.payload === 'PROMOTED' || e.payload === 'TRANSFERRED' || e.payload === 'MIGRATED') refresh();
   });
   await listen('knot://member-change', (e) => {
     toast(t(e.payload.type === 'joined' ? 'member_joined' : 'member_left', { name: e.payload.name }));
