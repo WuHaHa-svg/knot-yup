@@ -375,9 +375,9 @@ internal fun ShizukuGuideDialog(
     }
 }
 
-/** 加入群 Loading（不可关闭）。 */
+/** 不可关闭的等待弹窗（加入群 / 转让群共用，文案键可换）。 */
 @Composable
-internal fun JoiningDialog(t: (String) -> String) {
+internal fun JoiningDialog(t: (String) -> String, textKey: String = "joining") {
     Dialog(
         onDismissRequest = {},
         properties = DialogProperties(
@@ -403,7 +403,7 @@ internal fun JoiningDialog(t: (String) -> String) {
                     )
                     Spacer(Modifier.height(16.dp))
                     Text(
-                        t("joining"), fontSize = 13.sp,
+                        t(textKey), fontSize = 13.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }

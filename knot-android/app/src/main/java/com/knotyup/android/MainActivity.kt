@@ -10,12 +10,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.WindowInsets
@@ -35,7 +32,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -362,7 +358,7 @@ private fun App(
 
         // ── App 级弹窗集合（平台 Dialog：原生窗口层 + 系统遮罩）──
         AppDialogs(
-            t = t, session = session, joining = joining,
+            t = t, session = session, joining = joining, transferring = transferring,
             confirmLeave = confirmLeave, pendingKick = pendingKick,
             pinDialogFor = pinDialogFor, showQr = showQr, showShizukuGuide = showShizukuGuide,
             onDismissConfirmLeave = { confirmLeave = false },
@@ -383,28 +379,6 @@ private fun App(
             onShowShizukuGuide = { showShizukuGuide = it },
             startJoin = { a, p -> startJoin(a, p) },
         )
-
-        // 转让进行中：全屏 Loading 遮罩（迁移期间静默，终态统一提示后关闭）
-        if (transferring) {
-            androidx.compose.foundation.layout.Box(
-                Modifier
-                    .fillMaxSize()
-                    .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.35f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                androidx.compose.foundation.layout.Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    androidx.compose.material3.CircularProgressIndicator(
-                        color = androidx.compose.ui.graphics.Color.White,
-                    )
-                    androidx.compose.foundation.layout.Spacer(Modifier.height(14.dp))
-                    androidx.compose.material3.Text(
-                        t("transferring"),
-                        color = androidx.compose.ui.graphics.Color.White,
-                        fontSize = 14.sp,
-                    )
-                }
-            }
-        }
     }
     } // Crossfade
 }

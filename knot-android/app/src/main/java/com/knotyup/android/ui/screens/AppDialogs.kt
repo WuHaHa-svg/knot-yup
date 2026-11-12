@@ -19,6 +19,7 @@ internal fun AppDialogs(
     t: (String) -> String,
     session: SessionState,
     joining: Boolean,
+    transferring: Boolean,
     confirmLeave: Boolean,
     pendingKick: String?,
     pinDialogFor: GroupAd?,
@@ -95,8 +96,11 @@ internal fun AppDialogs(
         )
     }
 
-    // 加入群 Loading（不可关闭）
+    // 加入群 / 转让群 Loading（不可关闭，同一组件换文案）
     if (joining) {
         JoiningDialog(t)
+    }
+    if (transferring) {
+        JoiningDialog(t, "transferring")
     }
 }
