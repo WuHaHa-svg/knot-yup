@@ -78,10 +78,13 @@ internal fun Header(
         Text("KnotYup", fontWeight = FontWeight.Bold, fontSize = 18.sp)
         Spacer(Modifier.weight(1f))
 
+        // 顶栏图标统一灰调：tint 到 onSurfaceVariant（xml 里的 #6B7280 只对浅色合适）
+        val iconTint = ColorFilter.tint(MaterialTheme.colorScheme.onSurfaceVariant)
+
         // 扫码加群（仅首页显示）
         if (showScan) {
             HeaderIconBtn(onClick = onScan) {
-                Image(painterResource(R.drawable.ic_scan), "scan", Modifier.size(18.dp))
+                Image(painterResource(R.drawable.ic_scan), "scan", Modifier.size(18.dp), colorFilter = iconTint)
             }
             Spacer(Modifier.width(8.dp))
         }
@@ -89,7 +92,7 @@ internal fun Header(
         // 群信息二维码（仅群页面显示）
         if (showShare) {
             HeaderIconBtn(onClick = onShare) {
-                Image(painterResource(R.drawable.ic_qr), "qr", Modifier.size(18.dp))
+                Image(painterResource(R.drawable.ic_qr), "qr", Modifier.size(18.dp), colorFilter = iconTint)
             }
             Spacer(Modifier.width(8.dp))
         }
@@ -97,7 +100,7 @@ internal fun Header(
         // 主题色：点击弹出锚定色板（与桌面端 pop 一致）
         Box {
             HeaderIconBtn(onClick = { themeOpen = true }) {
-                Image(painterResource(R.drawable.ic_palette), "theme", Modifier.size(18.dp))
+                Image(painterResource(R.drawable.ic_palette), "theme", Modifier.size(18.dp), colorFilter = iconTint)
             }
             DropdownMenu(
                 expanded = themeOpen,

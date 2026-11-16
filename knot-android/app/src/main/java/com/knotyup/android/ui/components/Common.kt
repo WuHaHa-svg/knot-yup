@@ -86,9 +86,11 @@ internal fun InfoRow(label: String, value: String, mono: Boolean = false) {
 /** 卡片头：彩色图标 + 标题 + 副文字（对齐桌面端卡片结构）。 */
 @Composable
 internal fun CardHead(iconRes: Int, iconBg: Color, title: String, subtitle: String, modifier: Modifier = Modifier) {
+    // 深色模式：浅色 chip 底会刺眼，降为同色低透明度（品牌色图标在深浅底都可见）
+    val chipBg = if (androidx.compose.foundation.isSystemInDarkTheme()) iconBg.copy(alpha = 0.22f) else iconBg
     Row(modifier, verticalAlignment = Alignment.CenterVertically) {
         androidx.compose.foundation.layout.Box(
-            Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(iconBg),
+            Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(chipBg),
             contentAlignment = Alignment.Center,
         ) {
             Image(

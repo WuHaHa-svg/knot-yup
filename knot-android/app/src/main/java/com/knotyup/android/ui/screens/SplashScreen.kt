@@ -76,9 +76,13 @@ internal fun SplashScreen(onFinish: () -> Unit) {
         onFinish()
     }
 
+    // 前景色随系统深浅色：浅色纯黑 / 深色纯白（背景由 LiquidBackground 处理）
+    val dark = androidx.compose.foundation.isSystemInDarkTheme()
+    val ink = if (dark) Color.White else Color.Black
+
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         // 液态流动背景（共享组件，与首页一致）
-        com.knotyup.android.ui.components.LiquidBackground()
+        com.knotyup.android.ui.components.LiquidBackground(dark)
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             // 绳结：4 条笔画独立 Path，按总长预算顺序截取
             val strokes = remember {
@@ -126,7 +130,7 @@ internal fun SplashScreen(onFinish: () -> Unit) {
                 }) {
                     drawPath(
                         segment,
-                        color = Color.Black,
+                        color = ink,
                         style = Stroke(width = 1.7f, cap = StrokeCap.Round),
                     )
                 }
@@ -137,7 +141,7 @@ internal fun SplashScreen(onFinish: () -> Unit) {
                 word.forEachIndexed { i, ch ->
                     Text(
                         text = ch.toString(),
-                        color = Color.Black,
+                        color = ink,
                         fontSize = 30.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp,

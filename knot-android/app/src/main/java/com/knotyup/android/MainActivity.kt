@@ -357,6 +357,8 @@ private fun App(
         // Sonner 顶部轻提示（独立于内容层的弹出队列）：显式 TopCenter + 顶部留出刘海安全距离
         com.dokar.sonner.Toaster(
             state = toaster,
+            // 库默认恒深色样式；跟随系统深浅色
+            darkTheme = androidx.compose.foundation.isSystemInDarkTheme(),
             alignment = Alignment.TopCenter,
             modifier = Modifier
                 .align(Alignment.TopCenter)

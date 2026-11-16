@@ -30,7 +30,7 @@ import kotlin.math.sin
  * 性能：30fps 节流（跳帧）+ 退后台时 withFrameNanos 无帧回调、循环自动挂起（零后台开销）。
  */
 @Composable
-internal fun LiquidBackground() {
+internal fun LiquidBackground(dark: Boolean = androidx.compose.foundation.isSystemInDarkTheme()) {
     // 每色斑 5 个独立相位累加器（x主/x副/y主/y副/呼吸），全部有界回绕
     val phases = remember { FloatArray(BLOB_COUNT * PHASE_PER_BLOB) }
     // 各分量速度 = 色斑基速 × 分量倍率（见 LaunchedEffect 内计算），基速互为无理数倍
@@ -71,7 +71,8 @@ internal fun LiquidBackground() {
             .clipToBounds()
     ) {
         @Suppress("UNUSED_EXPRESSION") tick // 读快照状态：tick 变化即触发本绘制块重绘
-        drawRect(Color.White)
+        // 底色随系统深浅色：浅色纯白 / 深色纯黑（色斑颜色不变）
+        drawRect(if (dark) Color.Black else Color.White)
         val w = size.width
         val h = size.height
         val minDim = size.minDimension

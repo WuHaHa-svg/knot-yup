@@ -113,12 +113,15 @@ internal fun DevicesTab(
         members.forEach { m ->
             val self = m.id == AppState.device.id
             // 平台头像：macOS / Windows / Android 各自的图标与配色
-            val (iconRes, bg) = when (m.platform) {
+            // 深色模式：浅色 chip 底降为低透明度；mac 图标近黑，深色下 tint 提亮
+            val dark = androidx.compose.foundation.isSystemInDarkTheme()
+            val (iconRes, rawBg) = when (m.platform) {
                 "macos" -> R.drawable.ic_os_mac to Color(0xFFECECF1)
                 "windows" -> R.drawable.ic_os_win to Color(0xFFE7F0FB)
                 "android" -> R.drawable.ic_os_android to Color(0xFFE6F4EA)
                 else -> R.drawable.ic_devices to MaterialTheme.colorScheme.surfaceVariant
             }
+            val bg = if (dark) rawBg.copy(alpha = 0.22f) else rawBg
             Row(
                 Modifier.fillMaxWidth().padding(vertical = 4.dp)
                     .clip(RoundedCornerShape(12.dp))
@@ -130,7 +133,12 @@ internal fun DevicesTab(
                     Modifier.size(32.dp).background(bg, RoundedCornerShape(9.dp)),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Image(painterResource(iconRes), null, Modifier.size(18.dp))
+                    Image(
+                        painterResource(iconRes), null, Modifier.size(18.dp),
+                        colorFilter = if (m.platform == "macos" && dark) {
+                            ColorFilter.tint(Color(0xFFE8E8ED))
+                        } else null,
+                    )
                 }
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {

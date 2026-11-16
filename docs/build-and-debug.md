@@ -27,9 +27,7 @@ cargo tauri dev
 ## 2. 启动 Android dev
 
 ```bash
-cd knot-android
-./gradlew installDebug        # 构建 + 安装到已连接设备
-adb shell am start -n com.knotyup.android/.MainActivity   # 启动
+./knot-android/gradlew installDebug && adb shell am start -n com.knotyup.android/.MainActivity
 ```
 
 常用配套：
