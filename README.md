@@ -1,12 +1,13 @@
 # KnotYup
 
-> 把设备打成一个结 —— 局域网内的 Win / macOS / Android 剪贴板共享 + Android 触控板 + 自由组群
+> 把设备打成一个结 —— 局域网内的 Win / macOS / Android 剪贴板共享 + 文件共享 + Android 触控板 + 自由组群
 
-在同一 Wi-Fi 下，任意多台设备组成一个「**群**」：任何设备可以创建群或加入群（PIN 码），群主可以移出成员、转让群主。群内实时同步剪贴板；手机可以作为电脑的无线触控板（开发中）。
+在同一 Wi-Fi 下，任意多台设备组成一个「**群**」：任何设备可以创建群或加入群（PIN 码），群主可以移出成员、转让群主。群内实时同步剪贴板；手机可以作为电脑的无线触控板（开发中）。文件共享进入设计阶段，见 [docs/file-sharing.md](docs/file-sharing.md)。
 
 ## 功能
 
-- **剪贴板同步**：Windows、macOS、Android 之间实时共享文本（图片/文件规划中）
+- **剪贴板同步**：Windows、macOS、Android 之间实时共享文本（已完结）
+- **文件共享**：每台设备一个持久共享文件夹（群内一级按设备名分组、二级是文件）；入群即上报文件夹清单，文件从所属设备 P2P 直取，下载后写入自己文件夹即成为供种者（跨群可见，见 [docs/file-sharing.md](docs/file-sharing.md)）
 - **局域网发现**：扫描端广播请求、群主应答（UDP 拉取式），附近设备可见，输入 PIN 即加入
 - **群管理**：创建/加入/退出、群主移出成员、群主三方握手转让、解散
 - **通信加密**：入群后业务消息以 AES-256-GCM 加密（PIN 派生密钥）
@@ -31,10 +32,12 @@ cargo run        # 或 cargo install tauri-cli && cargo tauri dev
 │  发现：成员广播 REQ → 群主单播 RESP（UDP 45691）      │
 │  通信：设备A(群主) ── WebSocket(星型) ──> 成员B / C  │
 │         成员表 · 踢出 · 转让 · 加密广播剪贴板         │
+│  文件：设备级共享文件夹，入群上报清单 → P2P 直取  │
+│        下载完成自动成为供种者，群主零字节中转      │
 └────────────────────────────────────────────────────┘
 ```
 
-详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（架构）、[docs/ws-design.md](docs/ws-design.md)（协议）、[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)（开发指南）。
+详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)（架构）、[docs/ws-design.md](docs/ws-design.md)（协议）、[docs/file-sharing.md](docs/file-sharing.md)（文件共享设计）、[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)（开发指南）。
 
 ## 技术栈
 
@@ -63,7 +66,8 @@ Android 10+ 禁止后台应用读取剪贴板，KnotYup 因此按前后台分层
 - [x] **M2.2a Android**：群组前台服务 + 后台新剪贴板悬浮通知（一键复制）
 - [ ] **M2.2b Android**：悬浮窗/快捷磁贴、内置 IME（14+ 后台读正解）、评估迁移 UniFFI 复用 knot-core
 - [ ] **M3 触控板**：触摸采集 → 鼠标注入、手势、延迟调优
-- [ ] **M4 打磨**：图片/文件传输、防休眠、打包分发
+- [ ] **M4 文件共享**：设备级持久共享文件夹 + 入群全量上报 + P2P 分块直传 + 下载转种子，桌面/安卓群页面新增文件 tab，设计见 [docs/file-sharing.md](docs/file-sharing.md)
+- [ ] **M5 打磨**：图片预览、防休眠、打包分发
 
 ## 仓库结构
 

@@ -74,6 +74,12 @@
 | `transfer_error` | 群主→被转让者 | 加密 | `{"type":"transfer_error"}`——转让已失败（群主收到 ready 已超时），目标静默关闭多余的 standby 服务 |
 | `new_service` | 群主→全员 | 加密 | `{"type":"new_service","addr":"10.0.0.9:41235","pin":"510443","owner":{…DeviceInfo…}}` |
 | `encrypted` | 双向 | — | `{"type":"encrypted","data":"<base64(nonce‖AES-256-GCM 密文)>"}` |
+| `file_announce` | 成员→群主→全员 | 加密 | `{"type":"file_announce","from":"<id>","files":[{…SharedFile…}]}`——**入群/重连全量上报**自己文件夹（全量替换该设备条目） |
+| `file_list` | 群主→新入群成员 | 加密 | `{"type":"file_list","files":[[device_id, [SharedFile…]],…]}`——入群成功后群主下发的**全量列表快照**，新成员并入自己的数据（不放明文 `join_result`，避免文件名泄露） |
+| `file_add` | 任意→群主→全员 | 加密 | `{"type":"file_add","from":"<id>","file":{…SharedFile…}}`——自己文件夹新增；上传与下载完成共用，下载所得用**全新 file_id**（不沿用来源） |
+| `file_remove` | 任意→群主→全员 | 加密 | `{"type":"file_remove","from":"<id>","file_ids":["<uuid>",…]}`——删除自己文件夹内的一条或多条（带设备 + id 数组；仅移清单，不动磁盘） |
+
+> 文件共享的完整设计（设备文件夹=供种者、群内同步 `Map<device_id, SharedFile[]>`、两级目录 UI、P2P 分块直传、跨群可见）见 [file-sharing.md](file-sharing.md)。上表三条仅覆盖经群主转发的**控制面信令**；文件本体走成员直连，群主零字节中转。已删 `file_seed` / `file_req`（文件夹归属即供种者，点谁的文件直接连谁）与 `SharedFile` 的 `owner` / `seeders` 字段。
 
 > 群主身份判定：`members` 中 `role=="owner"` 的那条（不再依赖数组位置）。
 
@@ -155,4 +161,5 @@ Android 侧闸门为双层：`clipGuard`（内容哈希）+ `lastSyncText`（文
 ## 8. 遗留问题（不在本次范围）
 
 - PIN 明文传输 + 10⁶ 密钥空间（规划 ECDH + QR 配对）
-- `try_send` 无背压、剪贴板无分块上限
+- `try_send` 无背压：小信令仍走 try_send；文件本体改走 P2P 直连 + TCP 背压（见 file-sharing.md）
+- 剪贴板无分块上限：文本量大时仍需分片（文件共享通道就绪后可复用其分块能力）

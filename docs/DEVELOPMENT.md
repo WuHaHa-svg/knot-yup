@@ -58,7 +58,8 @@ knot-core/src/
 ├── net/           群主服务端(server.rs) + 成员客户端(client.rs)
 ├── crypto.rs      AES-256-GCM（PIN 派生密钥）
 ├── discovery.rs   UDP 拉取式发现（REQ/RESP，扫描状态机 + 群主应答）
-└── clipboard.rs   剪贴板轮询 + 指纹去重
+├── clipboard.rs   剪贴板轮询 + 指纹去重
+├── file.rs        （规划）文件共享：设备级清单 + announce 信令 + P2P 分块直传，见 docs/file-sharing.md
 
 knot-desktop/src-tauri/src/
 ├── lib.rs         Tauri 入口 + 命令注册
@@ -77,6 +78,7 @@ knot-android/app/src/main/java/com/knotyup/android/
 ├── data/AppState.kt     进程级单例：会话/历史/事件处理/剪贴板监听/UI 状态流
 ├── net/                 Protocol.kt / GroupClient.kt / KnotGroupServer.kt / Discovery.kt
 ├── clipboard/           ClipboardCapability.kt（前台剪贴板读写）
+├── file/                （规划）FileIndex.kt（持久清单）/ FileService.kt（P2P 供种与下载）
 ├── service/             KnotForegroundService.kt（入群期前台服务）
 │                        ClipboardNotification.kt / ClipboardCopyReceiver.kt（后台悬浮通知 + 复制）
 └── ui/                  screens（首页/群页/扫码/引导）+ components + Strings.kt（三语）
