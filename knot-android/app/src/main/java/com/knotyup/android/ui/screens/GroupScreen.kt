@@ -5,7 +5,9 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -36,6 +38,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,12 +69,21 @@ internal fun GroupBody(
 ) {
     val pagerState = rememberPagerState { 2 }
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
     // 已播过挂载动画的条目时间戳：提升到 pager 之外，HorizontalPager 切页 dispose 页面时不丢失。
     // 切回剪贴板页时列表项据此直接以 visible 初始，不会重播动画（只有真正新条目才播）。
     val seenClipItems = remember { mutableSetOf<Long>() }
     // imePadding：Android 15 强制 edge-to-edge，adjustResize 不再自动让位键盘，
     // 由 padding 把整页顶到键盘上方，避免输入框被遮。
-    Box(Modifier.fillMaxSize().imePadding()) {
+    // 点击输入框外部空白区：清焦点 → 键盘收起；点输入框本身时它消费事件，此处不触发。
+    Box(
+        Modifier
+            .fillMaxSize()
+            .imePadding()
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { focusManager.clearFocus() })
+            }
+    ) {
         // 内容区：全屏延伸，左右滑动切换 Tab；页间转场（缩放 + 淡入淡出视差）
         HorizontalPager(
             state = pagerState,
@@ -175,9 +187,15 @@ internal fun GroupTabBar(
                     // 在 tab 栏上横滑：只累加本地 dragOffset 让色块跟手，绝不驱动 pager。
                     .pointerInput(Unit) {
                         detectHorizontalDragGestures(
-                            onDragStart = {
-                                // 打断上一次未完成的归零动画，从当前偏移继续拖
+                            onDragStart = { startOffset ->
+                                // 打断上一次未完成的归零动画
                                 settleJob?.cancel()
+                                // 按下瞬间色块立即跳到手指底下：落点 x 换算成 tab 位置，
+                                // 以色块中心对齐落点；clamp 保证色块不出栏。页面不动，等松手再决定切换。
+                                val stepPx = (segW + gap).toPx()
+                                val desiredPos = ((startOffset.x - segW.toPx() / 2f) / stepPx)
+                                    .coerceIn(0f, 1f)
+                                dragOffset = desiredPos - pageState.value
                             },
                             onHorizontalDrag = { change, dragAmount ->
                                 change.consume()
@@ -216,12 +234,18 @@ internal fun GroupTabBar(
                         val active = visualPos > i - 0.5f && visualPos < i + 0.5f
                         val fg = if (active) androidx.compose.material3.MaterialTheme.colorScheme.primary
                         else androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        // 无 indication：点击不出淡灰 ripple，仅色块与文字色变化表示激活
+                        val noRipple = remember { MutableInteractionSource() }
                         Box(
                             Modifier
                                 .weight(1f)
                                 .fillMaxHeight()
                                 .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
-                                .clickable { onSelect(i) },
+                                .clickable(
+                                    interactionSource = noRipple,
+                                    indication = null,
+                                    onClick = { onSelect(i) },
+                                ),
                             contentAlignment = Alignment.Center,
                         ) {
                             androidx.compose.foundation.layout.Row(verticalAlignment = Alignment.CenterVertically) {
