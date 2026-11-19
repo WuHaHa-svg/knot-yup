@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -12,12 +13,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -35,6 +38,7 @@ import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 
 /** 群页面：左右分页（群信息 / 剪贴板）+ 悬浮 Tab 栏。 */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 internal fun GroupBody(
     t: (String) -> String,
@@ -52,7 +56,12 @@ internal fun GroupBody(
 ) {
     val pagerState = rememberPagerState { 2 }
     val scope = rememberCoroutineScope()
-    Box(Modifier.fillMaxSize()) {
+    // 已播过挂载动画的条目时间戳：提升到 pager 之外，HorizontalPager 切页 dispose 页面时不丢失。
+    // 切回剪贴板页时列表项据此直接以 visible 初始，不会重播动画（只有真正新条目才播）。
+    val seenClipItems = remember { mutableSetOf<Long>() }
+    // imePadding：Android 15 强制 edge-to-edge，adjustResize 不再自动让位键盘，
+    // 由 padding 把整页顶到键盘上方，避免输入框被遮。
+    Box(Modifier.fillMaxSize().imePadding()) {
         // 内容区：全屏延伸，左右滑动切换 Tab；页间转场（缩放 + 淡入淡出视差）
         HorizontalPager(
             state = pagerState,
@@ -74,7 +83,7 @@ internal fun GroupBody(
             ) {
                 when (page) {
                     0 -> DevicesTab(t, members, role, groupAddr, groupPin, onKick, onLeave)
-                    else -> ClipboardTab(t, members, history, sendText, onCopy, onSendText, onSend)
+                    else -> ClipboardTab(t, members, history, sendText, seenClipItems, onCopy, onSendText, onSend)
                 }
             }
         }
