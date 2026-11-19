@@ -105,7 +105,7 @@ cd knot-android
 
 - **`android.util.Log`，统一 tag `KnotYup`**，`adb logcat -s KnotYup` 过滤。
   现有埋点集中在：`AppState`（会话/剪贴板/事件收发）、`GroupClient`（心跳/join 失败）、
-  `KnotGroupServer`（成员连接/转让）、`ClipboardCapability`（Shizuku 降级警告）。
+  `KnotGroupServer`（成员连接/转让）、`ClipboardNotification`（后台通知触发）。
 - 级别约定：`Log.d` 常规流程（心跳 ping、本机复制广播），`Log.i` 阶段启动，
   `Log.w` 降级/异常可恢复，`Log.e` 保留给致命错误。
 - **release 构建未做日志剔除**：`isMinifyEnabled = true` + `proguard-android-optimize.txt`

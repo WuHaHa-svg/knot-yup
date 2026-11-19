@@ -44,19 +44,19 @@
             </intent-filter>
         </activity>
 
-        <!-- 群组前台服务：入群期间常驻（Shizuku 剪贴板轮询 + ws 保活） -->
+        <!-- 群组前台服务：入群期间常驻，保 ws 连接（后台剪贴板改由悬浮通知告知） -->
         <service
             android:name=".service.KnotForegroundService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
-        <!-- Shizuku provider（声明即生效，能力探测在运行时） -->
-        <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
-            android:multiprocess="false"
-            android:enabled="true"
-            android:exported="true"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
+        <!-- 悬浮通知「复制」按钮：写入剪贴板并同步防回环闸门 -->
+        <receiver
+            android:name=".service.ClipboardCopyReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.knotyup.android.COPY_CLIPBOARD" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

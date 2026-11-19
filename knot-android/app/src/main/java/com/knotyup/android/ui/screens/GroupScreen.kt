@@ -28,7 +28,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
-import com.knotyup.android.clipboard.ClipboardCapability
 import com.knotyup.android.data.HistoryItem
 import com.knotyup.android.net.DeviceInfo
 import com.knotyup.android.ui.components.KnotEnter
@@ -45,8 +44,6 @@ internal fun GroupBody(
     role: String,
     groupAddr: String,
     groupPin: String,
-    clipMode: ClipboardCapability.Mode,
-    onModeClick: () -> Unit,
     onKick: (String) -> Unit,
     onCopy: (String) -> Unit,
     onSendText: (String) -> Unit,
@@ -76,7 +73,7 @@ internal fun GroupBody(
                     }
             ) {
                 when (page) {
-                    0 -> DevicesTab(t, members, role, groupAddr, groupPin, clipMode, onModeClick, onKick, onLeave)
+                    0 -> DevicesTab(t, members, role, groupAddr, groupPin, onKick, onLeave)
                     else -> ClipboardTab(t, members, history, sendText, onCopy, onSendText, onSend)
                 }
             }

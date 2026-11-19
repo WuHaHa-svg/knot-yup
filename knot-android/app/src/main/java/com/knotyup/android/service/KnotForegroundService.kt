@@ -10,9 +10,9 @@ import android.content.Intent
 import android.os.IBinder
 
 /**
- * 群组前台服务（M2.2）：入群期间常驻，保进程不被冻结——
- * Shizuku 轮询监听与 ws 连接都依赖进程存活。
- * 通知内容：群组同步中；点击回到 App。退出/解散/被踢时停止。
+ * 群组前台服务：入群期间常驻，保 ws 连接不被系统冻结——
+ * 后台靠它持续接收群消息，新剪贴板经悬浮通知告知（见 ClipboardNotification）。
+ * 常驻通知内容：群组同步中；点击回到 App。退出/解散/被踢时停止。
  */
 class KnotForegroundService : Service() {
 

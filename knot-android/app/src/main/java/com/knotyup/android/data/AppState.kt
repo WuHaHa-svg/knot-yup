@@ -80,20 +80,9 @@ object AppState {
     var clipGuard = ""
 
     /** 回声闸门（文本级）：最近一次「远端同步 / 本机主动复制」写入的文本。
-     *  轮询读到相同内容时静默——指纹通道与全文通道不一致（读到陈旧值）时的第二道保险 */
+     *  监听器读到相同内容时静默——指纹闸门之外的第二道保险 */
     @Volatile
     var lastSyncText: String? = null
-
-    /** 轮询指纹基线：本机写完剪贴板后立刻刷新，轮询从此只见「真正的外部复制」 */
-    @Volatile
-    private var clipFpBase: String? = null
-
-    /** 本机写剪贴板完成后刷新指纹基线（远端同步写入 / 点击历史复制后调用）。 */
-    suspend fun refreshClipBaseline() {
-        appContext?.let { ctx ->
-            runCatching { clipFpBase = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx) }
-        }
-    }
 
     /** 入群 Loading（进程级：旋转不重置） */
     private val _joining = MutableStateFlow(false)
@@ -107,10 +96,6 @@ object AppState {
     fun setJoining(v: Boolean) {
         _joining.value = v
     }
-
-    /** 剪贴板能力模式（进程级，随 Shizuku 状态自动切换） */
-    private val _clipMode = MutableStateFlow(com.knotyup.android.clipboard.ClipboardCapability.Mode.FOREGROUND)
-    val clipMode: StateFlow<com.knotyup.android.clipboard.ClipboardCapability.Mode> = _clipMode
 
     private val _session = MutableStateFlow(SessionState())
     val session: StateFlow<SessionState> = _session
@@ -204,17 +189,11 @@ object AppState {
     // ── 进程级运行时（事件处理 / 成员会话 / 本机剪贴板监听，全部与 UI 生命周期解耦）──
 
     /**
-     * 启动进程级运行时：事件处理协程 + 剪贴板模式观察 + 入群状态驱动监听启停。
+     * 启动进程级运行时：事件处理协程 + 入群状态驱动监听启停。
      * MainActivity onCreate 调用一次（幂等）；此后 Activity 任意重建都不再影响消息链路。
      */
     fun startRuntime() {
         if (runtimeJob?.isActive == true) return
-        _clipMode.value = com.knotyup.android.clipboard.ClipboardCapability.currentMode()
-        com.knotyup.android.clipboard.ClipboardCapability.observeModeChanges { mode ->
-            _clipMode.value = mode
-            // 模式切换时重启监听（轮询 ↔ 前台回调两种方式互换）
-            if (session.value.joined) restartClipWatcher()
-        }
         runtimeJob = scope.launch {
             // 事件总线 → 状态应用（原 UI 层事件收集器整体下沉）
             launch {
@@ -277,16 +256,25 @@ object AppState {
             }
             is GroupEvent.Clipboard -> {
                 // 回声/重复去重：指纹与最近一次相同（自己发出内容的回声、群主转发的重复消息）
-                // 直接忽略——不追加历史、不重写剪贴板，阻断"B/C 互发放大"链路
+                // 直接忽略——不追加历史、不通知，阻断"B/C 互发放大"链路
                 if (event.payload.hash == clipGuard) return
                 clipGuard = event.payload.hash
-                applyEvent(event)
-                appContext?.let {
-                    runCatching { com.knotyup.android.clipboard.ClipboardCapability.setText(it, event.payload.text) }
-                    // 写完刷新基线与文本闸门：轮询不会把自己的写入当作「外部复制」，
-                    // 即使指纹通道读到变化而全文通道读到陈旧值（xxx/yyy 回发的根源），也被文本闸门拦下
-                    lastSyncText = event.payload.text
-                    refreshClipBaseline()
+                applyEvent(event) // 前后台都记历史
+                val text = event.payload.text
+                if (inForeground) {
+                    // 前台：直接写本机剪贴板；文本闸门防止监听器把它当成「本机复制」再发回群
+                    appContext?.let {
+                        runCatching { com.knotyup.android.clipboard.ClipboardCapability.setText(it, text) }
+                        lastSyncText = text
+                    }
+                } else {
+                    // 后台：Android 禁止读剪贴板，也不静默写（用户无感）→ 发悬浮通知告知，
+                    // 由用户点「复制」按钮才写入（见 ClipboardCopyReceiver）
+                    val fromName = _session.value.members.firstOrNull { it.id == event.from }?.name ?: ""
+                    appContext?.let {
+                        android.util.Log.d("KnotYup", "后台收到剪贴板 from=$fromName len=${text.length} → 悬浮通知")
+                        com.knotyup.android.service.ClipboardNotification.show(it, text, fromName)
+                    }
                 }
             }
             is GroupEvent.Kicked -> {
@@ -397,49 +385,39 @@ object AppState {
         }
     }
 
-    /** 本机剪贴板监听（按模式）：SHIZUKU 1s 轮询摘要指纹；FOREGROUND 系统回调。 */
+    /**
+     * 本机剪贴板监听（仅前台系统回调）：Android 10+ 后台无焦点读不到剪贴板，
+     * 故不再轮询，只注册 OnPrimaryClipChangedListener；切后台现在是省电的，
+     * 群内新内容由悬浮通知告知（见 handleEvent 的 Clipboard 分支）。
+     */
     fun restartClipWatcher() {
         watcherJob?.cancel()
         val ctx = appContext ?: return
         watcherJob = scope.launch {
-            if (com.knotyup.android.clipboard.ClipboardCapability.currentMode() ==
-                com.knotyup.android.clipboard.ClipboardCapability.Mode.SHIZUKU
-            ) {
-                // 后台复制同步依赖 1s 轮询：Doze 会冻结/限流协程定时器，持部分 WakeLock 保轮询
-                // （随 watcher 取消/离群在 finally 释放；仅 Shizuku 模式持有，前台回调模式不需要）
-                @Suppress("WakelockTimeout")
-                val wl = (ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager)
-                    .newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "knotyup:clipwatch")
-                    .apply { setReferenceCounted(false); acquire() }
-                try {
-                    // 监听启动即以当前指纹为基线（入群/模式切换后不广播既有剪贴板）；
-                    // 运行期间基线由写入侧即时刷新（refreshClipBaseline），轮询只见真正的外部复制
-                    clipFpBase = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx)
-                    while (true) {
-                        delay(1_000)
-                        val fp = com.knotyup.android.clipboard.ClipboardCapability.fingerprint(ctx) ?: continue
-                        if (fp == clipFpBase) continue
-                        clipFpBase = fp
-                        com.knotyup.android.clipboard.ClipboardCapability.getText(ctx)?.let { sendLocalClip(it) }
-                    }
-                } finally {
-                    runCatching { wl.release() }
-                }
-            } else {
-                val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-                val listener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
-                    scope.launch {
-                        com.knotyup.android.clipboard.ClipboardCapability.getText(ctx)?.let { sendLocalClip(it) }
-                    }
-                }
-                cm.addPrimaryClipChangedListener(listener)
-                try {
-                    while (true) delay(60_000)
-                } finally {
-                    cm.removePrimaryClipChangedListener(listener)
+            val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+            val listener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
+                scope.launch {
+                    com.knotyup.android.clipboard.ClipboardCapability.getText(ctx)?.let { sendLocalClip(it) }
                 }
             }
+            cm.addPrimaryClipChangedListener(listener)
+            try {
+                while (true) delay(60_000)
+            } finally {
+                cm.removePrimaryClipChangedListener(listener)
+            }
         }
+    }
+
+    /**
+     * 通知「复制」按钮：写入剪贴板并同步双闸门，避免监听器把这次写入当成本机复制再发回群。
+     * 在 IO 线程调用（BroadcastReceiver 侧已切 IO）。
+     */
+    fun copyFromNotification(context: Context, text: String) {
+        if (text.isEmpty()) return
+        clipGuard = com.knotyup.android.net.textHash(text)
+        lastSyncText = text
+        runCatching { com.knotyup.android.clipboard.ClipboardCapability.setTextBlocking(context, text) }
     }
 
     /** 本机剪贴板变化 → 群广播（含指纹 + 文本双闸门防回环）。 */

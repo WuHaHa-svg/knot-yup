@@ -48,14 +48,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.knotyup.android.R
-import com.knotyup.android.clipboard.ClipboardCapability
 import com.knotyup.android.data.AppState
 import com.knotyup.android.data.HistoryItem
 import com.knotyup.android.net.DeviceInfo
 import com.knotyup.android.ui.Motion
 import com.knotyup.android.ui.components.InfoRow
 
-/** Tab 1：群信息卡（地址/PIN/剪贴板模式）+ 设备列表 + 退出群。 */
+/** Tab 1：群信息卡（地址/PIN）+ 设备列表 + 退出群。 */
 @Composable
 internal fun DevicesTab(
     t: (String) -> String,
@@ -63,8 +62,6 @@ internal fun DevicesTab(
     role: String,
     groupAddr: String,
     groupPin: String,
-    clipMode: ClipboardCapability.Mode,
-    onModeClick: () -> Unit,
     onKick: (String) -> Unit,
     onLeave: () -> Unit,
 ) {
@@ -73,8 +70,7 @@ internal fun DevicesTab(
     ) {
         Text(t("group_info"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
         Spacer(Modifier.height(6.dp))
-        // 群信息卡：地址 / PIN / 剪贴板模式（前台模式可点击看 Shizuku 引导）
-        val shizuku = clipMode == ClipboardCapability.Mode.SHIZUKU
+        // 群信息卡：地址 / PIN
         Column(
             Modifier.fillMaxWidth().padding(vertical = 4.dp)
                 .clip(RoundedCornerShape(12.dp))
@@ -84,28 +80,6 @@ internal fun DevicesTab(
             InfoRow(t("group_addr"), groupAddr, mono = true)
             Spacer(Modifier.height(7.dp))
             InfoRow(t("group_pin"), groupPin, mono = true)
-            Spacer(Modifier.height(7.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(t("clip_mode"), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.width(8.dp))
-                Box(
-                    Modifier.size(6.dp).background(
-                        if (shizuku) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.outline,
-                        RoundedCornerShape(50),
-                    )
-                )
-                Spacer(Modifier.width(5.dp))
-                Text(
-                    t(if (shizuku) "shizuku_mode_hint" else "fg_mode_hint"),
-                    fontSize = 11.sp, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
-                    color = if (shizuku) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = if (!shizuku) {
-                        Modifier.clip(RoundedCornerShape(6.dp)).clickable { onModeClick() }
-                    } else Modifier,
-                )
-            }
         }
         Spacer(Modifier.height(10.dp))
         Text(t("devices"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)

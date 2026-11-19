@@ -49,13 +49,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.knotyup.android.R
-import com.knotyup.android.clipboard.ClipboardCapability
 import com.knotyup.android.data.AppState
 import com.knotyup.android.net.DeviceInfo
 import com.knotyup.android.net.GroupAd
 import com.knotyup.android.ui.Strings
 
-/** 弹窗集合：确认 / PIN 入群 / 群二维码 / Shizuku 引导 / 入群 Loading。 */
+/** 弹窗集合：确认 / PIN 入群 / 群二维码 / 连接断开 / 入群 Loading。 */
 
 /** KnotConfirm 内部使用的文案辅助（避免在非参数位置捕获 t）。 */
 private fun t0(key: String): String = Strings.t(Strings.currentLang, key)
@@ -294,102 +293,6 @@ internal fun generateQrBitmap(text: String, size: Int): android.graphics.Bitmap?
         }
         bmp
     }.getOrNull()
-}
-
-/** Shizuku 后台剪贴板引导弹窗：说明 + 打开 Shizuku + 授权；授权成功自动关闭。 */
-@Composable
-internal fun ShizukuGuideDialog(
-    t: (String) -> String,
-    onDismiss: () -> Unit,
-) {
-    val context = LocalContext.current
-    // 本机 Shizuku 服务运行态（仅 binder，不含授权）：binder 收到/断开时实时刷新
-    var shizukuRunning by remember { mutableStateOf(ClipboardCapability.isShizukuRunning()) }
-    LaunchedEffect(Unit) {
-        ClipboardCapability.observeModeChanges {
-            shizukuRunning = ClipboardCapability.isShizukuRunning()
-        }
-    }
-    // 授权成功（模式翻转为 SHIZUKU）→ 自动关闭弹窗
-    val clipMode by com.knotyup.android.data.AppState.clipMode.collectAsState()
-    LaunchedEffect(clipMode) {
-        if (clipMode == ClipboardCapability.Mode.SHIZUKU) onDismiss()
-    }
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        DialogCard(Modifier.padding(horizontal = 40.dp)) {
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 0.dp,
-            ) {
-                Column(Modifier.padding(24.dp)) {
-                    Text(t("shizuku_guide_title"), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.height(8.dp))
-                    Text(
-                        t("shizuku_guide_body"),
-                        fontSize = 13.sp,
-                        lineHeight = 19.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(18.dp))
-                    Row {
-                        // 打开 Shizuku App（已授权则隐藏此按钮）
-                        if (!ClipboardCapability.isShizukuActive()) {
-                            Text(
-                                t("open_shizuku"),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .clip(RoundedCornerShape(10.dp))
-                                    .clickable {
-                                        // 直接按包名打开 Shizuku；打开失败（未安装/被系统拦截）toast 提示
-                                        val launched = runCatching {
-                                            val intent = context.packageManager
-                                                .getLaunchIntentForPackage("moe.shizuku.privileged.api")
-                                            intent?.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                                            intent?.let { context.startActivity(it) } != null
-                                        }.getOrDefault(false)
-                                        if (!launched) AppState.toast(t("shizuku_open_failed"), 2)
-                                    }
-                                    .padding(vertical = 10.dp),
-                                fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = TextAlign.Center,
-                            )
-                            Spacer(Modifier.width(10.dp))
-                        }
-                        // 授权（Shizuku 服务未运行时禁用——授权弹窗起不来，只会静默失败）
-                        Text(
-                            t("grant_permission"),
-                            modifier = Modifier
-                                .weight(1f)
-                                .clip(RoundedCornerShape(10.dp))
-                                .then(
-                                    if (shizukuRunning) Modifier
-                                        .clickable { ClipboardCapability.requestShizukuPermission() }
-                                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(10.dp))
-                                    else Modifier.background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
-                                )
-                                .padding(vertical = 10.dp),
-                            fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
-                            color = if (shizukuRunning) MaterialTheme.colorScheme.onPrimary
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                    // 未运行提示（引导用户先去启动服务）
-                    if (!shizukuRunning) {
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            t("shizuku_not_running"),
-                            fontSize = 11.5.sp,
-                            lineHeight = 16.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-        }
-    }
 }
 
 /** 连接断开弹窗：仅「重新加入」与「退出群」两个出口，点外部/返回键不关闭。 */

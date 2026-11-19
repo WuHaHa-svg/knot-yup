@@ -147,7 +147,6 @@ private fun App(
     val joining by AppState.joining.collectAsState()
     val transferring by AppState.transferring.collectAsState()
     val connLost by AppState.connLost.collectAsState()
-    val clipMode = AppState.clipMode.collectAsState().value
     val discovered = AppState.discovered.collectAsState().value
     var addr by remember { mutableStateOf("") }
     var pin by remember { mutableStateOf("") }
@@ -156,7 +155,6 @@ private fun App(
     var pendingKick by remember { mutableStateOf<String?>(null) }
     var pinDialogFor by remember { mutableStateOf<GroupAd?>(null) }
     var showQr by remember { mutableStateOf(false) }
-    var showShizukuGuide by remember { mutableStateOf(false) }
     // rememberSaveable：横竖屏旋转（Activity 重建）不重播开屏动画
     var showSplash by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(true) }
     // 首次启动引导：完成/开始使用后置位，永不再现（旋转不重播，saveable）
@@ -195,16 +193,10 @@ private fun App(
         }
     }
 
-    // 群组前台服务：入群期间保进程存活（后台剪贴板轮询 + ws 连接），退出/被踢停止
-    val notifPermLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) {}
+    // 群组前台服务：入群期间保进程存活（ws 连接保活），退出/被踢停止。
+    // 通知权限统一在首次启动引导页申请（见 OnboardingScreen），此处不再重复弹系统权限框。
     LaunchedEffect(session.joined) {
         if (session.joined) {
-            if (android.os.Build.VERSION.SDK_INT >= 33 &&
-                androidx.core.content.ContextCompat.checkSelfPermission(
-                    context, android.Manifest.permission.POST_NOTIFICATIONS
-                ) != android.content.pm.PackageManager.PERMISSION_GRANTED
-            ) notifPermLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
             com.knotyup.android.service.KnotForegroundService.start(context, t("sync_notif"))
         } else {
             com.knotyup.android.service.KnotForegroundService.stop(context)
@@ -290,18 +282,14 @@ private fun App(
                 }
                 composable(Routes.GROUP) {
                     GroupBody(t, session.members, history, sendText,
-                        role = session.role, clipMode = clipMode,
-                        onModeClick = { showShizukuGuide = true },
+                        role = session.role,
                         groupAddr = session.addr, groupPin = session.pin,
                         onKick = { pendingKick = it },
                         onCopy = { text ->
-                            // 点击历史复制：先同步指纹/文本闸门并刷新轮询基线，避免被监听器当作本机复制再发回群
+                            // 点击历史复制：先同步指纹/文本闸门，避免被监听器当作本机复制再发回群
                             AppState.clipGuard = textHash(text)
                             AppState.lastSyncText = text
-                            scope.launch {
-                                ClipboardCapability.setText(context, text)
-                                AppState.refreshClipBaseline()
-                            }
+                            scope.launch { ClipboardCapability.setText(context, text) }
                             AppState.toast(t("copied"), 1)
                         },
                         onSendText = { sendText = it },
@@ -371,7 +359,7 @@ private fun App(
             t = t, session = session, joining = joining, transferring = transferring,
             connLost = connLost,
             confirmLeave = confirmLeave, pendingKick = pendingKick,
-            pinDialogFor = pinDialogFor, showQr = showQr, showShizukuGuide = showShizukuGuide,
+            pinDialogFor = pinDialogFor, showQr = showQr,
             onDismissConfirmLeave = { confirmLeave = false },
             onConfirmLeaveOk = { selected ->
                 confirmLeave = false
@@ -387,7 +375,6 @@ private fun App(
             onPendingKick = { pendingKick = it },
             onPinDialogFor = { pinDialogFor = it },
             onShowQr = { showQr = it },
-            onShowShizukuGuide = { showShizukuGuide = it },
             startJoin = { a, p -> startJoin(a, p) },
         )
     }

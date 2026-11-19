@@ -1,9 +1,9 @@
 # KnotYup v2 群组通信设计（发现 + WebSocket）
 
-> 状态：**v2 已实现**（双端代码落地，knot-core 集成测试 6/6 通过）。v2 断旧不兼容 v1，双端需同版发布。
+> 状态：**v2 已实现**（双端代码落地，knot-core 集成测试 6/6 通过）。双端需同版发布。
 > 消息面代码：`knot-core/src/{protocol.rs, net/server.rs, net/client.rs, discovery.rs}`；
 > `knot-android/.../net/{Protocol.kt, KnotGroupServer.kt, GroupClient.kt, Discovery.kt}`。
-> 本文件是协议唯一事实来源（原 v1 版 PROTOCOL.md 已删除）。
+> 本文件是协议唯一事实来源。
 
 ## 1. 总览
 
@@ -11,7 +11,7 @@
 - **端口**：发现 UDP 45691（拉取式 REQ/RESP）；ws 端口群主动态分配。
 - **发现模型（v2 拉取式）**：扫描端周期发 REQ，群主被动应答 RESP。群主不再周期广播。
 - **心跳**：30s 一次，pong 携带成员表 + 身份；单次 3s 超时即判失联。
-- **编码**：JSON 文本帧 `{"type":"snake_case", ...}`；握手与 ping/pong 明文，业务消息全部装 `encrypted` 信封（AES-256-GCM，密钥 = SHA256("knotyup-v1|PIN")，与 v1 相同）。
+- **编码**：JSON 文本帧 `{"type":"snake_case", ...}`；握手与 ping/pong 明文，业务消息全部装 `encrypted` 信封（AES-256-GCM，密钥 = SHA256("knotyup-v1|PIN")）。
 
 ## 2. 发现协议（UDP 45691，KNOTYUP2）
 
@@ -36,7 +36,7 @@
 ```
 
 - **启停规则**：进入群页面（群主或成员）→ 停扫描；退群回首页 → **立即补一轮**，随后进入周期。
-- 空闲流量：每设备 3s 1 个广播包（v1 为每群主每秒 2-3 包，降幅约 90%）。
+- 空闲流量：每设备 3s 1 个广播包。
 
 ### 2.3 群主端
 
@@ -81,7 +81,7 @@
 
 - **成员侧**：每 **30s** 发 ping；发出后 **3s** 内未收到对应 seq 的 pong → **判群主失联（单次即判）** → 断连弹窗（见 §6.4）。
 - **群主侧看门狗**：每连接 **35s**（30s + 3s 超时 + 余量）无任何入站消息 → 断开连接并广播 members（假死剔除）。
-- 读循环退出（被踢/服务端关闭/出错）时心跳任务静默结束，不误报失联（v1 机制保留）。
+- 读循环退出（被踢/服务端关闭/出错）时心跳任务静默结束，不误报失联。
 - Android 从后台切回前台且在群页面时，立即补发一次 ping（`GroupClient.pingNow()`，序号与心跳共用）。
 
 ## 5. 剪贴板同步
@@ -92,14 +92,16 @@
   ② 发 clipboard{from=自己 id} → 群主广播全员
 接收方
   from == 自己 id ？→ 忽略（不进历史、不写剪贴板）   ← 主去重：from 比对
-  否则             → 进历史 + 写本机剪贴板            ← 指纹闸门保留为第二道保险
+  hash == clipGuard？→ 忽略（回声/重复）              ← 指纹闸门
+  前台             → 进历史 + 写本机剪贴板（同步双闸门）
+  后台（Android）   → 进历史 + 悬浮通知（不写剪贴板）；点「复制」才写入并同步闸门
 群内点击历史条目复制
-  → 只写本机剪贴板，不发任何 ws（指纹闸门防本机 watcher 回环）
+  → 只写本机剪贴板，不发任何 ws（双闸门防本机 watcher 回环）
 ```
 
-Android 侧闸门为三层：`clipGuard`（内容哈希）→ `lastSyncText`（文本级回声，读写两侧都记录）
-→ `clipFpBase`（轮询指纹基线，写入侧完成后 `refreshClipBaseline()` 立即刷新，
-轮询从此只见「真正的外部复制」）。
+Android 侧闸门为双层：`clipGuard`（内容哈希）+ `lastSyncText`（文本级回声）；前台写入、
+后台通知复制、点击历史复制三条路径都即时同步，系统监听器读到相同内容即静默。
+受 Android 10+ 后台读剪贴板限制，后台不轮询/不读，改由悬浮通知告知（见 ARCHITECTURE.md）。
 
 ## 6. 生命周期事件
 
@@ -130,8 +132,7 @@ Android 侧闸门为三层：`clipGuard`（内容哈希）→ `lastSyncText`（�
 
 ### 6.4 群主失联 → 断连弹窗（无自动重连/承接）
 
-**自动重连与群主顺位承接机制已整体移除**（候选承接、10 轮重连均废弃）。
-成员判失联（§4）或 ws 出错断开 → **双端统一弹「连接已断开」弹窗**：
+当前不支持自动重连与群主顺位承接；成员判失联（§4）或 ws 出错断开 → **双端统一弹「连接已断开」弹窗**：
 
 - 弹窗显示群主名称（取成员表 `role=="owner"`），按钮「重新加入」（主操作）/「退出群」（描边）。
 - **重新加入**：用会话内记录的 addr + PIN 重走完整入群流程，全程静默 Loading；
@@ -149,10 +150,9 @@ Android 侧闸门为三层：`clipGuard`（内容哈希）→ `lastSyncText`（�
 | 发现扫描 | 双端同一状态机（3s 周期）；Android 前台判定用 setInForeground，桌面用会话状态轮询 |
 | 心跳定时器精度 | Android 协程 delay / Rust tokio sleep；后台冻结由 FGS + WakeLock 兜底（Android） |
 | transfer 三方握手 | 双端消息语义逐字段一致；超时常量 3s 双端统一 |
-| UI 错误码 | WRONG_PIN / ALREADY_IN_GROUP / OWNER_ONLY / NO_LAN / GROUP_LOST / PROMOTED / KICKED / DISSOLVED / TRANSFERRED / TRANSFER_FAILED / MIGRATED（桌面迁移完成）—— 双端 i18n 映射；RECONNECTING/RECONNECTED 已随自动重连机制删除 |
+| UI 错误码 | WRONG_PIN / ALREADY_IN_GROUP / OWNER_ONLY / NO_LAN / GROUP_LOST / PROMOTED / KICKED / DISSOLVED / TRANSFERRED / TRANSFER_FAILED / MIGRATED（桌面迁移完成）—— 双端 i18n 映射 |
 
 ## 8. 遗留问题（不在本次范围）
 
 - PIN 明文传输 + 10⁶ 密钥空间（规划 ECDH + QR 配对）
 - `try_send` 无背压、剪贴板无分块上限
-- 承接前回试旧群主（脑裂自愈增强）

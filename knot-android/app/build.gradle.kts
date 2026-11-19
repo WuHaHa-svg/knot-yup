@@ -61,10 +61,6 @@ dependencies {
     // 轻提示：Sonner for Compose（顶部 toast）
     implementation("io.github.dokar3:sonner-android:0.3.2")
 
-    // Shizuku：shell uid 代理（后台剪贴板，M2.2 启用 IClipboard 代理）
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
-
     // 扫码加群：CameraX + ZXing
     implementation("com.google.zxing:core:3.5.3")
     val camerax = "1.3.4"

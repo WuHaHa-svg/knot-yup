@@ -10,7 +10,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 pub const DISCOVERY_PORT: u16 = 45691;
-/// v2 协议前缀（v1 的 KNOTYUP1 广播已废弃，断旧不兼容）
+/// v2 协议前缀（与旧版不兼容）
 const PREFIX_REQ: &str = "KNOTYUP2|REQ|";
 const PREFIX_RESP: &str = "KNOTYUP2|RESP|";
 const PROTOCOL_VER: u32 = 2;

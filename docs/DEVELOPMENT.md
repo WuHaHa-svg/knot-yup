@@ -76,8 +76,9 @@ knot-desktop/ui/                  （纯静态，无构建步骤）
 knot-android/app/src/main/java/com/knotyup/android/
 ├── data/AppState.kt     进程级单例：会话/历史/事件处理/剪贴板监听/UI 状态流
 ├── net/                 Protocol.kt / GroupClient.kt / KnotGroupServer.kt / Discovery.kt
-├── clipboard/           ClipboardCapability.kt（能力分层）/ ShizukuProvider.kt（binder 代理）
+├── clipboard/           ClipboardCapability.kt（前台剪贴板读写）
 ├── service/             KnotForegroundService.kt（入群期前台服务）
+│                        ClipboardNotification.kt / ClipboardCopyReceiver.kt（后台悬浮通知 + 复制）
 └── ui/                  screens（首页/群页/扫码/引导）+ components + Strings.kt（三语）
 ```
 

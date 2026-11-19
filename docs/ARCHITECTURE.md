@@ -12,41 +12,41 @@
         ┌──────────────┐   ┌──────────────┐
         │ knot-android │   │ knot-desktop │
         │ Kotlin/Compose│  │ Tauri 2      │
-        │ Shizuku/前台   │  │ Win:SendInput│
-        │ 降级链         │  │ Mac:CGEvent  │
+        │ 前台同步/后台  │  │ Win:SendInput│
+        │ 悬浮通知       │  │ Mac:CGEvent  │
         └──────────────┘   └──────────────┘
 ```
 
 - 拓扑：**星型**。群主 = WebSocket 服务端，负责成员表、移出、消息广播与密文转发。
 - 发现：UDP 拉取式 REQ/RESP（比 mDNS 轻、跨平台零依赖）；广播不含 PIN。
 - 加密：入群后所有业务消息套 `encrypted` 信封（AES-256-GCM，PIN 派生密钥）。
-- 防回环（Android）：三层闸门——clipGuard（内容哈希）+ lastSyncText（文本级回声）+
-  clipFpBase（轮询基线，本机写入后立即刷新，轮询只见真正的外部复制）。
+- 防回环（Android）：双闸门——clipGuard（内容哈希）+ lastSyncText（文本级回声）；
+  前台写入/通知复制后都即时同步，监听器读到相同内容即静默。
 - 断连策略：**无自动重连/承接**。成员与群主的 ws 断开（含心跳失联）→ 双端统一弹
   「连接已断开」弹窗（显示群主名称），用户决策「重新加入」（5s 超时判失败、弹窗重现）
   或「退出群」。
 - 大文件（M4）：分块 + 背压，成员直传不经群主。
 
-## Android 剪贴板能力分层（minSdk 29）
+## Android 剪贴板前后台策略（minSdk 29）
+
+**平台限制**：Android 10+ 只有焦点窗口/默认 IME 能读剪贴板，后台读不到。因此不做后台轮询，
+也不依赖 Shizuku（shell uid 豁免在 Android 14+ 已被平台封死），改为前后台分流：
 
 ```
-ClipboardCapability 自动选择：
- 1. ShizukuProvider   — binder 代理 IClipboard，后台读写（需 Shizuku 运行中 + 已授权）
- 2. ForegroundProvider — 前台 App（系统剪贴板变化回调）+ 分享发送（保底）
- 3.（规划）ImeProvider — 内置输入法：默认 IME 全版本恒可读，14+ 的正解
+前台（App 可见）
+  本机复制 → OnPrimaryClipChangedListener → 读文本 → 广播到群
+  群内剪贴板 → 直接写本机剪贴板（记历史 + 同步双闸门）
+后台（App 不可见，前台服务保 ws 连接）
+  本机剪贴板 → 不读不传（省电、无感）
+  群内剪贴板 → 悬浮通知（IMPORTANCE_HIGH，显示来源 + 内容预览）
+              → 点「复制」按钮 → ClipboardCopyReceiver 写剪贴板 + 同步双闸门
 ```
 
-**平台限制（实测结论，2026-11）**：AOSP 10+ 的 `ClipboardService` 读剪贴板豁免仅限
-焦点 uid / 默认输入法 / `READ_CLIPBOARD_IN_BACKGROUND` 签名权限 / 系统服务，
-**不含 shell/root uid，也不含已启用的无障碍服务**（空无障碍服务方案对 AOSP 全版本无效，
-已实测证伪；MIUI/HyperOS 自家「剪贴板=永远允许」权限待验证）。
-
-- **Shizuku 读实际边界**：Android 10–13 经 `ShizukuBinderWrapper` 中转（transact 以
-  shell uid 执行）可用，已在 Android 11 实机验证；**Android 14+ 平台封死，服务端直接
-  返回 null**，自动降级前台模式。parcel 编码两端均为 typed-object 风格
-  （`readTypedObject`/`writeTypedObject`），勿用 `readParcelable`。
-- **写入不受限**：任何版本前后台均可写（`OP_WRITE_CLIPBOARD` 无焦点要求）。
-- Shizuku 每次重启需重新激活，模式掉线静默降级前台——已知体验问题（群页面徽章可见）。
+- **写入不受焦点限制**：`OP_WRITE_CLIPBOARD` 前后台均可写，故通知复制动作在后台也能完成。
+- **悬浮通知**：独立渠道 `knotyup_clipboard`（IMPORTANCE_HIGH）支持 heads-up；复用单一
+  通知 ID（新消息覆盖旧的），避免后台刷屏；内容点击回 App。
+- **通知权限**：`POST_NOTIFICATIONS` 已在清单声明，入群时请求；引导页清单项说明用途。
+- **内置 IME**（规划）：默认 IME 全版本恒可读，是 Android 14+ 后台读的正解。
 
 ## 触控板（M3）
 
@@ -72,8 +72,8 @@ ws 断开(成员) ──bridge take 会话──> knot://conn-lost {addr,pin,own
 - [x] M1 群管理：PIN 入群 / 移出 / UDP 发现 / AES-256-GCM 加密 / i18n（简繁英）
 - [x] M2.1 Android：Kotlin/Compose 客户端，v2 协议（join/encrypted/发现/心跳），
       前台剪贴板模式 + 分享发送
-- [x] M2.2a Android：Shizuku IClipboard binder 代理（10–13 后台读写）+ 1s 轮询 +
-      群组前台服务（KnotForegroundService）+ 模式徽章/引导弹窗；失败自动降级前台模式
+- [x] M2.2a Android：废除 Shizuku，前台系统回调同步 + 分享发送；群组前台服务
+      （KnotForegroundService）保 ws；后台新剪贴板悬浮通知（一键复制，双闸门防回环）
 - [x] v2 群事件：转让三方握手 / 解散 0.8s 缓冲 / 30s 心跳 / 35s 看门狗 / 发现拉取式扫描
 - [x] 断连弹窗机制：废除全部自动重连与群主承接，双端统一「重新加入 / 退出群」弹窗
 - [x] 体验细节：剪贴板列表挂载动画、深色模式全量适配（图标/卡片/toast/液态背景）、

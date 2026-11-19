@@ -8,11 +8,10 @@ import com.knotyup.android.ui.components.JoiningDialog
 import com.knotyup.android.ui.components.KnotConfirm
 import com.knotyup.android.ui.components.PinDialog
 import com.knotyup.android.ui.components.QrDialog
-import com.knotyup.android.ui.components.ShizukuGuideDialog
 import androidx.compose.runtime.Composable
 
 /**
- * App 级弹窗集合（确认/移出/PIN/二维码/Shizuku 引导/入群 Loading）。
+ * App 级弹窗集合（确认/移出/PIN/二维码/入群 Loading）。
  * 状态由组合根持有，本组件只做展示与回调分发。
  */
 @Composable
@@ -26,13 +25,11 @@ internal fun AppDialogs(
     pendingKick: String?,
     pinDialogFor: GroupAd?,
     showQr: Boolean,
-    showShizukuGuide: Boolean,
     onDismissConfirmLeave: () -> Unit,
     onConfirmLeaveOk: (String?) -> Unit,
     onPendingKick: (String?) -> Unit,
     onPinDialogFor: (GroupAd?) -> Unit,
     onShowQr: (Boolean) -> Unit,
-    onShowShizukuGuide: (Boolean) -> Unit,
     startJoin: (String, String) -> Unit,
 ) {
     // 退出群二次确认
@@ -87,14 +84,6 @@ internal fun AppDialogs(
             addr = session.addr,
             pin = session.pin,
             onClose = { onShowQr(false) },
-        )
-    }
-
-    // Shizuku 后台剪贴板引导弹窗（群页面模式徽章点击弹出）
-    if (showShizukuGuide) {
-        ShizukuGuideDialog(
-            t = t,
-            onDismiss = { onShowShizukuGuide(false) },
         )
     }
 
