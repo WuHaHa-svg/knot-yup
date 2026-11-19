@@ -303,7 +303,6 @@ private fun App(
                                 }
                                 if (sent) {
                                     AppState.addLocalHistory(sendText)
-                                    AppState.toast(t("sent"), 1)
                                     sendText = ""
                                 }
                             }

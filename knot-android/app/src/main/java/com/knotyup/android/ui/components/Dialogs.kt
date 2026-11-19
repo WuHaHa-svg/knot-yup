@@ -180,13 +180,11 @@ internal fun PinDialog(
                         fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
                     )
                     Spacer(Modifier.height(12.dp))
-                    OutlinedTextField(
+                    KnotInput(
                         value = pinValue, onValueChange = { pinValue = it },
                         modifier = Modifier.fillMaxWidth(),
-                        placeholder = { Text(t("pin_hint"), fontSize = 13.sp) },
-                        singleLine = true,
+                        placeholder = t("pin_hint"),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        shape = RoundedCornerShape(10.dp),
                     )
                     Spacer(Modifier.height(20.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

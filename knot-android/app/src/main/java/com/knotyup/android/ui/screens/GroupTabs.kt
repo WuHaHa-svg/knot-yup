@@ -21,8 +21,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -42,6 +43,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -243,19 +245,16 @@ internal fun ClipboardTab(
                 }
             }
         }
-        // ── 下部：固定发送区（输入框 + 发送按钮）──
+        // ── 下部：固定发送区（输入框 + 软键盘发送键）──
+        // 发送动作交给键盘右下角的 Send 键（不同输入法标签可能是「发送/Send/回车」），
+        // 屏幕上不再放独立按钮，输入框占满宽度。
         Spacer(Modifier.height(12.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(
-                value = sendText, onValueChange = onSendText,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text(t("send_hint"), fontSize = 13.sp) },
-                shape = RoundedCornerShape(10.dp),
-            )
-            Spacer(Modifier.width(8.dp))
-            Button(onClick = onSend, shape = RoundedCornerShape(10.dp), modifier = Modifier.height(52.dp)) {
-                Text(t("send"), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
-            }
-        }
+        com.knotyup.android.ui.components.KnotInput(
+            value = sendText, onValueChange = onSendText,
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = t("send_hint"),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { onSend() }),
+        )
     }
 }

@@ -140,17 +140,17 @@ private fun JoinCard(
                 title = t("join_group"),
                 subtitle = t("join_desc"),
             )
-            OutlinedTextField(
-                value = addr, onValueChange = onAddr, modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text(t("addr_hint"), fontSize = 13.sp) }, singleLine = true,
-                shape = RoundedCornerShape(10.dp),
+            com.knotyup.android.ui.components.KnotInput(
+                value = addr, onValueChange = onAddr,
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = t("addr_hint"),
             )
             Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = pin, onValueChange = onPin, modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text(t("pin_hint"), fontSize = 13.sp) }, singleLine = true,
+            com.knotyup.android.ui.components.KnotInput(
+                value = pin, onValueChange = onPin,
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = t("pin_hint"),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                shape = RoundedCornerShape(10.dp),
             )
             Spacer(Modifier.height(14.dp))
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {

@@ -1,6 +1,8 @@
 package com.knotyup.android.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -27,7 +30,58 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.Image
 import com.knotyup.android.ui.Motion
 
-/** 通用小组件：弹窗卡片容器 / 挂载入场 / 信息行 / 卡片头 / 顶栏小圆钮。 */
+/** 通用小组件：弹窗卡片容器 / 挂载入场 / 信息行 / 卡片头 / 顶栏小圆钮 / 紧凑输入框。 */
+
+/** 紧凑单行输入框：BasicTextField 自绘描边（M3 OutlinedTextField 无 contentPadding 参数，
+ *  内边距固定 16dp 偏松）；此处水平 10 / 垂直 8，聚焦描边切主题色。 */
+@Composable
+internal fun KnotInput(
+    value: String,
+    onValueChange: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    placeholder: String,
+    keyboardOptions: androidx.compose.foundation.text.KeyboardOptions = androidx.compose.foundation.text.KeyboardOptions.Default,
+    keyboardActions: androidx.compose.foundation.text.KeyboardActions = androidx.compose.foundation.text.KeyboardActions.Default,
+) {
+    val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val focused by interaction.collectIsFocusedAsState()
+    androidx.compose.foundation.text.BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .border(
+                1.dp,
+                if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
+                RoundedCornerShape(10.dp),
+            )
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        textStyle = androidx.compose.ui.text.TextStyle(
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+        ),
+        cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+        singleLine = true,
+        interactionSource = interaction,
+        keyboardOptions = keyboardOptions,
+        keyboardActions = keyboardActions,
+        decorationBox = { inner ->
+            androidx.compose.foundation.layout.Box(
+                Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                if (value.isEmpty()) {
+                    Text(
+                        placeholder, fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                inner()
+            }
+        },
+    )
+}
 
 /** 弹窗卡片入场动画：官方 AnimatedVisibility（scaleIn + fadeIn），阴影原生合成。 */
 @Composable

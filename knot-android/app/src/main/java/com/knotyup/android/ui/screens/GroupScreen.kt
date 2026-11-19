@@ -1,8 +1,11 @@
 package com.knotyup.android.ui.screens
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -20,13 +23,19 @@ import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -36,6 +45,7 @@ import com.knotyup.android.net.DeviceInfo
 import com.knotyup.android.ui.components.KnotEnter
 import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
+import kotlin.math.roundToInt
 
 /** 群页面：左右分页（群信息 / 剪贴板）+ 悬浮 Tab 栏。 */
 @OptIn(ExperimentalLayoutApi::class)
@@ -104,7 +114,13 @@ internal fun GroupBody(
     }
 }
 
-/** 悬浮分段 Tab 栏：容器 + tab item + 激活指示块（点击切换，块随页面偏移联动）。 */
+/** 独立悬浮分段 Tab 栏：容器 + tab item + 激活指示块。
+ *
+ *  交互完全自治，不直接操作 pager（悬浮组件与内容页解耦）：
+ *  - 点 item / 内容页左右滑：page 由外部传入（pager 位置），色块跟随；
+ *  - 在 tab 栏上横滑：只改本地 [dragOffset] 让色块跟手，页面纹丝不动；
+ *  - 松手：按色块最终位置算目标 tab，回调 [onSelect] 让外部切页，同时色块偏移动画归零。
+ *  拖动期间零携程操作 pager，避免高频 launch 冲击 pager 状态机导致崩溃。 */
 @Composable
 internal fun GroupTabBar(
     t: (String) -> String,
@@ -112,11 +128,31 @@ internal fun GroupTabBar(
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val scope = rememberCoroutineScope()
     val items = listOf(
         t("group_info") to com.knotyup.android.R.drawable.ic_devices,
         t("clipboard") to com.knotyup.android.R.drawable.ic_clip,
     )
-    val pos = page
+    // tab 拖动产生的本地页偏移（单位=tab）；仅影响色块显示，不驱动 pager。
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+    val settleAnim = remember { Animatable(0f) }
+    var settleJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    // pointerInput 闭包只启动一次，会捕获创建时的 page（旧值）。用 rememberUpdatedState
+    // 让闭包每次读到最新 page——否则在剪切板页(page=1)拖动仍用旧的 page=0 做 clamp，色块不动。
+    val pageState = rememberUpdatedState(page)
+    // 色块视觉位置：pager 位置 + 拖动偏移，clamp 到 [0,1]
+    val visualPos = (page + dragOffset).coerceIn(0f, 1f)
+
+    // 松手后把色块偏移从当前值平滑归零（与页面切换动画并行）
+    fun settle() {
+        settleJob?.cancel()
+        settleJob = scope.launch {
+            settleAnim.snapTo(dragOffset)
+            settleAnim.animateTo(0f, spring(dampingRatio = 0.9f, stiffness = 420f)) {
+                dragOffset = value
+            }
+        }
+    }
 
     androidx.compose.foundation.layout.BoxWithConstraints(modifier) {
         val containerW = 248.dp
@@ -132,14 +168,42 @@ internal fun GroupTabBar(
             ),
             modifier = Modifier.width(containerW),
         ) {
-            Box(Modifier.padding(4.dp).height(44.dp)) {
-                // 激活块（可拖动元素）
+            Box(
+                Modifier
+                    .padding(4.dp)
+                    .height(44.dp)
+                    // 在 tab 栏上横滑：只累加本地 dragOffset 让色块跟手，绝不驱动 pager。
+                    .pointerInput(Unit) {
+                        detectHorizontalDragGestures(
+                            onDragStart = {
+                                // 打断上一次未完成的归零动画，从当前偏移继续拖
+                                settleJob?.cancel()
+                            },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                val stepPx = (segW + gap).toPx()
+                                val curPage = pageState.value
+                                // dragAmount 是本次事件增量，累加；clamp 使色块停在栏内
+                                dragOffset = (dragOffset + dragAmount / stepPx)
+                                    .coerceIn(-curPage, 1f - curPage)
+                            },
+                            onDragEnd = {
+                                // 按色块最终位置吸附到最近 tab：只回调外部切页，自己不动 pager
+                                val raw = (pageState.value + dragOffset).coerceIn(0f, 1f)
+                                onSelect(raw.roundToInt().coerceIn(0, 1))
+                                settle()
+                            },
+                            onDragCancel = { settle() },
+                        )
+                    }
+            ) {
+                // 激活块（跟随 pager 位置 + tab 拖动偏移；拖动期间页面不动，只有色块跟手）
                 Box(
                     Modifier
                         .align(Alignment.CenterStart)
                         .fillMaxHeight()
                         .width(segW)
-                        .graphicsLayer { translationX = pos * (segW + gap).toPx() }
+                        .graphicsLayer { translationX = visualPos * (segW + gap).toPx() }
                         .clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
                         .background(androidx.compose.material3.MaterialTheme.colorScheme.primaryContainer),
                 )
@@ -149,7 +213,7 @@ internal fun GroupTabBar(
                     horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp),
                 ) {
                     items.forEachIndexed { i, (label, iconRes) ->
-                        val active = pos > i - 0.5f && pos < i + 0.5f
+                        val active = visualPos > i - 0.5f && visualPos < i + 0.5f
                         val fg = if (active) androidx.compose.material3.MaterialTheme.colorScheme.primary
                         else androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
                         Box(
