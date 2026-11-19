@@ -80,25 +80,54 @@ cd knot-android
 
 | 前缀 | 内容 |
 |---|---|
-| `discovery/scan` | 每个扫描周期（5s）结算：收到几个广播、当前表内容 |
-| `discovery/announce` | 本机作为群主的每次广播（建群突发 5 连发 + 每 1s 常规） |
-| `evt/*` | 协议事件：members / clipboard / kicked / owner-change / error / 本机复制 |
-| `act/*` | 本机动作：create / join（含预留承接端口）/ leave / kick / promoted / reconnect 全过程 |
-| `err/*` | 失败原因：建群 / 入群 / 承接群主 / 重连 |
+| `discovery/scan` | 每个扫描周期（3s）结算：本轮 RESP 数、当前表内容（v2 拉取式 REQ/RESP） |
+| `discovery/respond` | 本机作为群主应答发现的 RESP（建群起监听，解散/转让后停） |
+| `evt/*` | 协议事件：members / clipboard / kicked / dissolve / transfer / error / 本机复制 |
+| `act/*` | 本机动作：create / join / leave / kick / transfer / conn-lost（重新加入）全过程 |
+| `err/*` | 失败原因：建群 / 入群 / 转让 / 重新加入超时 |
 
-## 6. knot-debug CLI（协议调试工具，独立于正式端）
+## 6. 日志埋点规范（双端）
+
+### 桌面端（Rust）
+
+- **`dlog(tag, text)`** 是埋点唯一入口（`lib.rs` 定义，`debug_server.rs` 实现）：
+  同步、非阻塞，任何上下文可直接调用；单条截断 400 字符，进环形缓冲（1000 条）供日志页回放。
+- **release 构建零成本**：`dlog` 在 `#[cfg(not(debug_assertions))]` 下是空操作，
+  参数被编译器消除；`debug_server` 整模块 `#[cfg(debug_assertions)]` 门控——正式版
+  不编译日志服务、不监听 45692、首页版号入口由前端 `invoke('debug_tools_enabled')`
+  探测后隐藏。新增调试能力一律照此门控。
+- 埋点位置约定：动作起止打 `act/*`，收到协议事件打 `evt/*`，失败路径打 `err/*`，
+  发现层打 `discovery/*`（见上表）。
+- `tracing::` 宏是另一条通道（终端 stdout，dev 运行时直接可见），仅用于错误/启动诊断，
+  不进日志页；业务排查一律用 `dlog`。
+
+### Android 端（Kotlin）
+
+- **`android.util.Log`，统一 tag `KnotYup`**，`adb logcat -s KnotYup` 过滤。
+  现有埋点集中在：`AppState`（会话/剪贴板/事件收发）、`GroupClient`（心跳/join 失败）、
+  `KnotGroupServer`（成员连接/转让）、`ClipboardCapability`（Shizuku 降级警告）。
+- 级别约定：`Log.d` 常规流程（心跳 ping、本机复制广播），`Log.i` 阶段启动，
+  `Log.w` 降级/异常可恢复，`Log.e` 保留给致命错误。
+- **release 构建未做日志剔除**：`isMinifyEnabled = true` + `proguard-android-optimize.txt`
+  不会自动移除 `Log.d/v` 调用（tag 字符串会留在产物里）。若要正式版零日志，需在
+  `proguard-rules.pro` 追加：
+
+  ```proguard
+  -assumenosideeffects class android.util.Log {
+      public static int v(...);
+      public static int d(...);
+  }
+  ```
+
+  （`Log.w/e` 建议保留，线上问题可 `adb logcat` 取证。）
+
+## 7. 多设备安装
 
 ```bash
-cd knot-debug && cargo build
-
-# 虚拟成员入群：打印全部协议事件；stdin 输入一行 = 发送剪贴板
-./target/debug/knot-debug join <ip:port> --pin <PIN> [--name 名字]
-
-# 虚拟群主（同时发 UDP 广播，真机发现列表可见）
-./target/debug/knot-debug serve --pin <PIN> [--port N] [--name 名字]
-
-# 监听局域网发现广播（验证发现 / 突发）
-./target/debug/knot-debug watch
+cd knot-android && ./gradlew installDebug   # 所有已连接设备全部安装
+adb devices                                  # 查看设备
+adb -s <serial> shell monkey -p com.knotyup.android -c android.intent.category.LAUNCHER 1  # 指定设备启动
 ```
 
-典型三人场景（踢人 / 转让 / 选主）：真机 A 建群 → 两个终端各跑一个 `join` 扮演 B/C，配合桌面日志页双视角观察。
+多台真机联调场景（建群/扫码/复制/踢人/转让/解散/断连弹窗）：桌面建群 + 各真机入群，
+配合桌面日志页（§5）观察事件流。

@@ -3,6 +3,7 @@
 > 状态：**v2 已实现**（双端代码落地，knot-core 集成测试 6/6 通过）。v2 断旧不兼容 v1，双端需同版发布。
 > 消息面代码：`knot-core/src/{protocol.rs, net/server.rs, net/client.rs, discovery.rs}`；
 > `knot-android/.../net/{Protocol.kt, KnotGroupServer.kt, GroupClient.kt, Discovery.kt}`。
+> 本文件是协议唯一事实来源（原 v1 版 PROTOCOL.md 已删除）。
 
 ## 1. 总览
 
@@ -78,9 +79,10 @@
 
 ## 4. 心跳与失联
 
-- **成员侧**：每 **30s** 发 ping；发出后 **3s** 内未收到对应 seq 的 pong → **判群主失联（单次即判）** → 走承接（见 §6）。
+- **成员侧**：每 **30s** 发 ping；发出后 **3s** 内未收到对应 seq 的 pong → **判群主失联（单次即判）** → 断连弹窗（见 §6.4）。
 - **群主侧看门狗**：每连接 **35s**（30s + 3s 超时 + 余量）无任何入站消息 → 断开连接并广播 members（假死剔除）。
 - 读循环退出（被踢/服务端关闭/出错）时心跳任务静默结束，不误报失联（v1 机制保留）。
+- Android 从后台切回前台且在群页面时，立即补发一次 ping（`GroupClient.pingNow()`，序号与心跳共用）。
 
 ## 5. 剪贴板同步
 
@@ -94,6 +96,10 @@
 群内点击历史条目复制
   → 只写本机剪贴板，不发任何 ws（指纹闸门防本机 watcher 回环）
 ```
+
+Android 侧闸门为三层：`clipGuard`（内容哈希）→ `lastSyncText`（文本级回声，读写两侧都记录）
+→ `clipFpBase`（轮询指纹基线，写入侧完成后 `refreshClipBaseline()` 立即刷新，
+轮询从此只见「真正的外部复制」）。
 
 ## 6. 生命周期事件
 
@@ -122,9 +128,19 @@
   - 若 **5s 后**才收到迟到的 `transfer_ready` → 群主向目标回 `transfer_error`；目标收到后**静默关闭**多余的 standby ws 服务并退出转让流程（不提示、不影响自身成员状态）。
   - 被转让者 5s 内起服务失败/主动放弃 → 同样走转让失败路径（群主侧超时或收到异常即提示失败）。
 
-### 6.4 群主失联承接（v1 顺位承接保留，简化版）
-- 判失联（§4）→ 断开 → 候选 = 最近一次成员表中 **role=="member" 的设备按序**（不含旧群主）；候选[0]是自己 → standby 端口承接为群主；否则重连候选地址（10 轮）。
-- **不做承接前回试旧群主**（按定稿：先实现最简单逻辑）。
+### 6.4 群主失联 → 断连弹窗（无自动重连/承接）
+
+**自动重连与群主顺位承接机制已整体移除**（候选承接、10 轮重连均废弃）。
+成员判失联（§4）或 ws 出错断开 → **双端统一弹「连接已断开」弹窗**：
+
+- 弹窗显示群主名称（取成员表 `role=="owner"`），按钮「重新加入」（主操作）/「退出群」（描边）。
+- **重新加入**：用会话内记录的 addr + PIN 重走完整入群流程，全程静默 Loading；
+  - 成功 / 已在群中（`ALREADY_IN_GROUP`）→ 按成功处理，关 Loading 刷新，无 toast；
+  - **5s** 内未拿到成员表 → 判失败，关 Loading 弹窗重现（不无限 Loading），无 toast。
+- **退出群** → 清 UI 回首页 → toast。
+- 双端行为一致：Android `AppState.connLost` StateFlow + ConnLostDialog；
+  桌面 bridge take 成员会话 → `knot://conn-lost {addr, pin, owner}` → 前端 for(;;) 弹窗循环。
+- 升主（承接者转正为群主，`promoted`）与转让迁移（`new_service`）场景**不走**断连弹窗。
 
 ## 7. 双端实现差异（实现时保持一致）
 
@@ -133,7 +149,7 @@
 | 发现扫描 | 双端同一状态机（3s 周期）；Android 前台判定用 setInForeground，桌面用会话状态轮询 |
 | 心跳定时器精度 | Android 协程 delay / Rust tokio sleep；后台冻结由 FGS + WakeLock 兜底（Android） |
 | transfer 三方握手 | 双端消息语义逐字段一致；超时常量 3s 双端统一 |
-| UI 错误码 | WRONG_PIN / ALREADY_IN_GROUP / OWNER_ONLY / NO_LAN / GROUP_LOST / PROMOTED / RECONNECTING / RECONNECTED / KICKED / DISSOLVED / TRANSFER_FAILED（新增）—— 双端 i18n 映射 |
+| UI 错误码 | WRONG_PIN / ALREADY_IN_GROUP / OWNER_ONLY / NO_LAN / GROUP_LOST / PROMOTED / KICKED / DISSOLVED / TRANSFERRED / TRANSFER_FAILED / MIGRATED（桌面迁移完成）—— 双端 i18n 映射；RECONNECTING/RECONNECTED 已随自动重连机制删除 |
 
 ## 8. 遗留问题（不在本次范围）
 
