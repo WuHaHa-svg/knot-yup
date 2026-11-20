@@ -491,7 +491,20 @@ object AppState {
     suspend fun shareFile(uri: android.net.Uri): SharedFile = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         val ctx = appContext ?: error("appContext 未注入")
         val cr = ctx.contentResolver
-        val name = uri.lastPathSegment?.substringAfter('/') ?: "file"
+        // 文件名必须查 DISPLAY_NAME：content:// 的 lastPathSegment 是 provider 内部文档 ID
+        // （如 "43"），既不是名字也没有扩展名，会导致文件 tab 显示错名 + 类型图标映射失效
+        val name = runCatching {
+            cr.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull()
+            ?: uri.lastPathSegment?.substringAfterLast('/')
+            ?: "file"
+        // 持久化读授权：SAF 临时授权重启即失效，不持久化会导致重启后供种读不到（文件不可达）
+        runCatching {
+            ctx.contentResolver.takePersistableUriPermission(
+                uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
         val size = try {
             cr.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
         } catch (_: Exception) { 0L }

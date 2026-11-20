@@ -180,6 +180,26 @@ function fmtSize(bytes) {
   return (bytes / 1073741824).toFixed(2) + ' GB';
 }
 
+/** 按扩展名映射文件类型 symbol id + 主题色（图标集与配色同安卓 FileTab 一一对应）。 */
+function fileIcon(name) {
+  const ext = (name.split('.').pop() || '').toLowerCase();
+  const map = {
+    img: { color: '#EC4899', exts: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'heic', 'ico'] },
+    doc: { color: '#3B82F6', exts: ['doc', 'docx', 'txt', 'md', 'pdf', 'rtf', 'pages'] },
+    sheet: { color: '#16A34A', exts: ['xls', 'xlsx', 'csv', 'numbers'] },
+    video: { color: '#8B5CF6', exts: ['mp4', 'mov', 'avi', 'mkv', 'webm', 'flv'] },
+    audio: { color: '#EA580C', exts: ['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a'] },
+    archive: { color: '#B45309', exts: ['zip', 'rar', '7z', 'tar', 'gz', 'bz2'] },
+    apk: { color: '#34A853', exts: ['apk', 'aab'] },
+    exe: { color: '#0078D4', exts: ['exe', 'msi'] },
+    dmg: { color: '#64748B', exts: ['dmg', 'pkg', 'app'] },
+  };
+  for (const [id, v] of Object.entries(map)) {
+    if (v.exts.includes(ext)) return { icon: `i-${id}`, color: v.color };
+  }
+  return { icon: 'i-file', color: null };
+}
+
 function setPanel(tab) {
   activePanel = tab;
   document.querySelectorAll('.panel-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
@@ -201,20 +221,20 @@ function renderFiles() {
   if (!fileViewDevice) {
     // 一级：设备文件夹——以成员表为准，群里有几个设备就有几个文件夹（空的也显示）
     const members = (state.session && state.session.members) || [];
-    const entries = members.map((m) => [m.id, (groupFiles || {})[m.id] || []]);
-    if (entries.length === 0) {
+    if (members.length === 0) {
       box.innerHTML = `<div class="empty">${t('empty_file')}</div>`;
       return;
     }
-    entries.forEach(([devId, files]) => {
+    members.forEach((m) => {
+      const files = (groupFiles || {})[m.id] || [];
       const row = document.createElement('button');
       row.className = 'file-folder';
       row.innerHTML = `
-        <svg class="icon"><use href="#i-folder"/></svg>
-        <span class="folder-name">${escapeHtml(nameOf(devId))}</span>
+        <div class="folder-ic"><svg class="icon"><use href="#i-folder"/></svg></div>
+        <span class="folder-name">${escapeHtml(nameOf(m.id))}</span>
         <span class="folder-count">${files.length}</span>
       `;
-      row.onclick = () => { fileViewDevice = devId; renderFiles(); };
+      row.onclick = () => { fileViewDevice = m.id; renderFiles(); };
       box.appendChild(row);
     });
     return;
@@ -227,10 +247,14 @@ function renderFiles() {
   }
   const isMine = state.device && fileViewDevice === state.device.id;
   files.forEach((f) => {
+    const { icon, color } = fileIcon(f.name);
     const row = document.createElement('div');
     row.className = 'file-item';
+    const chip = color
+      ? `style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)"`
+      : '';
     row.innerHTML = `
-      <svg class="icon sm"><use href="#i-file"/></svg>
+      <div class="file-ic" ${chip}><svg class="icon sm"><use href="#${icon}"/></svg></div>
       <div class="file-meta">
         <div class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</div>
         <div class="file-sub">${fmtSize(f.size)} · ${fmtTime(f.added_at)}</div>
@@ -242,14 +266,14 @@ function renderFiles() {
       const dl = document.createElement('button');
       dl.className = 'btn-mini';
       dl.title = t('download');
-      dl.innerHTML = `<svg class="icon sm"><use href="#i-upload"/></svg>`;
+      dl.innerHTML = `<svg class="icon sm"><use href="#i-download"/></svg>`;
       dl.onclick = (e) => { e.stopPropagation(); downloadFile(fileViewDevice, f); };
       actions.appendChild(dl);
     } else if (localFileIds.has(f.file_id)) {
       const del = document.createElement('button');
       del.className = 'btn-mini danger';
       del.title = t('delete_file');
-      del.innerHTML = `<svg class="icon sm"><use href="#i-logout"/></svg>`;
+      del.innerHTML = `<svg class="icon sm"><use href="#i-trash"/></svg>`;
       del.onclick = async (e) => {
         e.stopPropagation();
         const ok = await showConfirm(t('delete_file'), t('confirm_delete_file', { name: f.name }), t('confirm_ok'), t('confirm_cancel'));
