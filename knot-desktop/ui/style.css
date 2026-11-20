@@ -582,6 +582,8 @@ body {
 }
 .file-item:hover { border-color: #cfd3da; transform: translateY(-1px); background: #fff; }
 .file-item:active { transform: scale(.995); }
+/* 已播过挂载动画的条目：数据刷新重建 DOM 时不再重播（与安卓 seenFileItems 对齐） */
+.file-folder.no-anim, .file-item.no-anim { animation: none; }
 .file-meta { flex: 1; min-width: 0; }
 .file-name { font-size: 13px; color: var(--text-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-sub { font-size: 11px; color: var(--text-3); margin-top: 3px; }

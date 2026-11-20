@@ -173,10 +173,9 @@ internal fun DevicesTab(
  * 布局分两段：历史列表在 [weight] 滚动区；输入框 + 发送按钮固定在底部，
  * 键盘弹出时列表区收缩、输入区始终可见。外层 padding(bottom = 96.dp) 让出悬浮 Tab 栏。
  *
- * 挂载动画约束：HorizontalPager 切页会 dispose 页面 composition，页内 remember 不保活。
- * 因此「已挂载条目」状态 [seenClipItems] 提升到 pager 之外的 GroupBody（切页不销毁）——
- * 真新条目初值 false 播动画并登记；切回来时集合已含该条目，shown 初值直接 true，
- * 不重播。只有真正新进入 history 的条目才播放。勿移除该参数或改回页内 remember。
+ * 挂载动画约束：三 tab 已重构为 Box 叠放、页面永不卸载，页内 remember 保活。
+ * [seenClipItems] 作为双保险保留（已见条目不重播动画）；即便页面不 dispose，
+ * 真新条目仍会首次播一次、切回时 shown 保持 true 不重播。勿移除该参数。
  */
 @Composable
 internal fun ClipboardTab(

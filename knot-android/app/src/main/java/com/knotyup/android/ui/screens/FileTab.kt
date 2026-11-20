@@ -57,9 +57,13 @@ import com.knotyup.android.ui.Motion
 import com.knotyup.android.ui.components.KnotConfirm
 import kotlinx.coroutines.launch
 
-/** 文件 tab：一级=设备名文件夹，二级=该设备文件。数据来自 AppState.groupFiles。 */
+/**
+ * 文件 tab：一级=设备名文件夹，二级=该设备文件。数据来自 AppState.groupFiles。
+ * [seenFileItems] 由 pager 之外的 GroupBody 持有：切页 dispose 后重进不重播挂载动画，
+ * 与剪贴板 seenClipItems 同理——只有真正新条目才播。
+ */
 @Composable
-internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>) {
+internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileItems: MutableSet<String>) {
     val groupFiles by AppState.groupFiles.collectAsState()
     var viewDevice by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf<SharedFile?>(null) }
@@ -114,8 +118,9 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>) {
             ) {
                 items(members, key = { it.id }) { m ->
                     key(m.id) {
-                        var shown by remember { mutableStateOf(false) }
-                        LaunchedEffect(Unit) { shown = true }
+                        // 动画只播一次：已在 seenFileItems 中的条目切页回来直接 visible
+                        var shown by remember { mutableStateOf(m.id in seenFileItems) }
+                        LaunchedEffect(Unit) { seenFileItems.add(m.id); shown = true }
                         AnimatedVisibility(
                             visible = shown,
                             enter = fadeIn(tween(220)) +
@@ -152,8 +157,9 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>) {
                 }
                 items(files, key = { it.fileId }) { file ->
                     key(file.fileId) {
-                        var shown by remember { mutableStateOf(false) }
-                        LaunchedEffect(Unit) { shown = true }
+                        // 动画只播一次：已在 seenFileItems 中的条目切页回来直接 visible
+                        var shown by remember { mutableStateOf(file.fileId in seenFileItems) }
+                        LaunchedEffect(Unit) { seenFileItems.add(file.fileId); shown = true }
                         AnimatedVisibility(
                             visible = shown,
                             enter = fadeIn(tween(220)) +

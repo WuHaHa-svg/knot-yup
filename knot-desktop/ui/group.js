@@ -172,6 +172,8 @@ let groupFiles = {};   // { device_id: [SharedFile…] }
 let localFileIds = new Set();
 let fileViewDevice = null; // null=设备列表；否则某 device_id
 let activePanel = 'clipboard';
+let filesRendered = false; // 文件列表是否已渲染过：切 tab 只切显隐、不重建 DOM（避免重播挂载动画）
+const seenFileItems = new Set(); // 已播过挂载动画的条目 id（设备 id / file_id）：数据刷新重建 DOM 时不再重播
 
 function fmtSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -205,7 +207,9 @@ function setPanel(tab) {
   document.querySelectorAll('.panel-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
   $('paneClipboard').classList.toggle('hidden', tab !== 'clipboard');
   $('paneFiles').classList.toggle('hidden', tab !== 'files');
-  if (tab === 'files') renderFiles();
+  // 切 tab 不重建文件列表 DOM（重建会重播 clipIn 挂载动画）。
+  // 数据更新走 refresh()/file-changed 里对 renderFiles() 的调用；这里只保证首次进入渲染一次。
+  if (tab === 'files' && !filesRendered) { renderFiles(); filesRendered = true; }
 }
 
 function renderFiles() {
@@ -228,7 +232,10 @@ function renderFiles() {
     members.forEach((m) => {
       const files = (groupFiles || {})[m.id] || [];
       const row = document.createElement('button');
-      row.className = 'file-folder';
+      // 已见过的设备文件夹不重播挂载动画；首次见到播一次并登记
+      const seen = seenFileItems.has(m.id);
+      seenFileItems.add(m.id);
+      row.className = `file-folder${seen ? ' no-anim' : ''}`;
       row.innerHTML = `
         <div class="folder-ic"><svg class="icon"><use href="#i-folder"/></svg></div>
         <span class="folder-name">${escapeHtml(nameOf(m.id))}</span>
@@ -249,7 +256,10 @@ function renderFiles() {
   files.forEach((f) => {
     const { icon, color } = fileIcon(f.name);
     const row = document.createElement('div');
-    row.className = 'file-item';
+    // 已见过的文件不重播挂载动画；首次见到播一次并登记
+    const seen = seenFileItems.has(f.file_id);
+    seenFileItems.add(f.file_id);
+    row.className = `file-item${seen ? ' no-anim' : ''}`;
     const chip = color
       ? `style="color:${color};background:color-mix(in srgb, ${color} 14%, transparent)"`
       : '';
