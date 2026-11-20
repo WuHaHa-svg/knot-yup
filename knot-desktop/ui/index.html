@@ -269,25 +269,28 @@
       </aside>
 
       <section class="panel clip-panel">
-        <div class="panel-tabs">
+        <div class="panel-tabs" id="panelTabs" data-active="clipboard">
           <button class="panel-tab active" data-tab="clipboard" data-i18n="clipboard"></button>
           <button class="panel-tab" data-tab="files" data-i18n="files"></button>
+          <span class="tab-slider"></span>
         </div>
-        <div class="panel-pane" id="paneClipboard">
-          <div class="panel-head">
-            <svg class="icon sm muted"><use href="#i-clipboard"/></svg>
-            <span class="hint" data-i18n="click_hint"></span>
+        <div class="panel-body" id="panelBody" data-active="clipboard">
+          <div class="panel-pane" id="paneClipboard">
+            <div class="panel-head">
+              <svg class="icon sm muted"><use href="#i-clipboard"/></svg>
+              <span class="hint" data-i18n="click_hint"></span>
+            </div>
+            <ul id="clipList" class="clip-list">
+              <li class="empty" id="clipEmpty"></li>
+            </ul>
           </div>
-          <ul id="clipList" class="clip-list">
-            <li class="empty" id="clipEmpty"></li>
-          </ul>
-        </div>
-        <div class="panel-pane hidden" id="paneFiles">
-          <div class="panel-head file-head">
-            <button class="file-back hidden" id="btnFileBack"><svg class="icon sm"><use href="#i-back"/></svg><span data-i18n="back"></span></button>
-            <button class="btn-mini" id="btnShareFile"><svg class="icon sm"><use href="#i-plus"/></svg><span data-i18n="share_file"></span></button>
+          <div class="panel-pane" id="paneFiles">
+            <div class="panel-head file-head">
+              <button class="file-back hidden" id="btnFileBack"><svg class="icon sm"><use href="#i-back"/></svg><span data-i18n="back"></span></button>
+              <button class="btn-mini" id="btnShareFile"><svg class="icon sm"><use href="#i-plus"/></svg><span data-i18n="share_file"></span></button>
+            </div>
+            <div id="fileList" class="file-list"></div>
           </div>
-          <div id="fileList" class="file-list"></div>
         </div>
       </section>
     </main>

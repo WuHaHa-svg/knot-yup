@@ -7,6 +7,9 @@ const { listen } = window.__TAURI__.event;
 const $ = (id) => document.getElementById(id);
 const state = { device: null, session: null, discovered: [], discoveredScanning: false };
 
+// 全局禁用浏览器原生右键菜单（让应用更像原生桌面程序）
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+
 // ── 主题 ─────────────────────────────────
 
 const THEMES = [

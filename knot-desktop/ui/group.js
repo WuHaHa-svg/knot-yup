@@ -205,8 +205,12 @@ function fileIcon(name) {
 function setPanel(tab) {
   activePanel = tab;
   document.querySelectorAll('.panel-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
-  $('paneClipboard').classList.toggle('hidden', tab !== 'clipboard');
-  $('paneFiles').classList.toggle('hidden', tab !== 'files');
+  const tabs = $('panelTabs');
+  if (tabs) tabs.dataset.active = tab;
+  // pane 不再 display:none 切换，改由 .panel-body 的 data-active 驱动 transform/opacity 进出场，
+  // 两个 pane 始终在 DOM 中不卸载（滚动位置/状态保留，与安卓一致）。
+  const body = $('panelBody');
+  if (body) body.dataset.active = tab;
   // 切 tab 不重建文件列表 DOM（重建会重播 clipIn 挂载动画）。
   // 数据更新走 refresh()/file-changed 里对 renderFiles() 的调用；这里只保证首次进入渲染一次。
   if (tab === 'files' && !filesRendered) { renderFiles(); filesRendered = true; }
