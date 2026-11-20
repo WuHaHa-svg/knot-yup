@@ -6,8 +6,7 @@ use std::time::Duration;
 // ── v2 协议常量（双端必须一致，Android 侧见 Discovery.kt / GroupClient.kt）──
 
 /// 成员心跳间隔
-pub const HEARTBEAT_MS: u64 = 30_000;
-/// 单次心跳回执超时（超时即判群主失联）
+pub const HEARTBEAT_MS: u64 = 30_000;/// 单次心跳回执超时（超时即判群主失联）
 pub const PONG_TIMEOUT_MS: u64 = 3_000;
 /// 群主看门狗：连接无入站消息超过此时长即断开（心跳 + 超时 + 余量）
 pub const WATCHDOG_MS: u64 = 35_000;
@@ -15,6 +14,8 @@ pub const WATCHDOG_MS: u64 = 35_000;
 pub const TRANSFER_TIMEOUT_MS: u64 = 5_000;
 /// 解散：成员收到 dissolve 后延迟退出（给 UI 缓冲）
 pub const DISSOLVE_EXIT_MS: u64 = 800;
+/// 文件传输：分块大小（64 KiB），双端常量必须一致
+pub const FILE_CHUNK_SIZE: usize = 65_536;
 
 pub fn heartbeat_interval() -> Duration {
     Duration::from_millis(HEARTBEAT_MS)
@@ -41,6 +42,9 @@ pub struct DeviceInfo {
     /// 本机 standby 服务地址（ip:port）。成员入组时携带预留端口；群主/未预留为 None。
     #[serde(default)]
     pub addr: Option<String>,
+    /// 文件共享的 P2P 供种服务地址（ip:port）。与 ws 端口、standby 转让端口各自独立。
+    #[serde(default)]
+    pub file_addr: Option<String>,
     /// 成员身份：owner | member。服务端权威赋值；join 上报省略（默认 member）。
     #[serde(default)]
     pub role: Option<String>,
@@ -70,6 +74,22 @@ pub enum ClipboardKind {
     #[allow(dead_code)]
     File,
 }
+
+/// 文件共享条目（网络载荷，不含本地路径——path 只存本地清单，绝不上报）。
+/// file_id 每次上传/下载完成各自生成，两份副本互不沿用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharedFile {
+    pub file_id: String,
+    pub name: String,
+    pub size: u64,
+    /// sha256 hex，仅用于下载后完整性校验，不决定 file_id、不做去重
+    pub sha256: String,
+    pub mime: String,
+    pub added_at: u64,
+}
+
+/// 群文件列表条目：device_id → 该设备文件夹内的文件列表
+pub type FileMap = std::collections::BTreeMap<String, Vec<SharedFile>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -128,6 +148,25 @@ pub enum Message {
         addr: String,
         pin: String,
         owner: DeviceInfo,
+    },
+    /// 文件共享①：入群/重连时全量上报自己文件夹（加密；全量替换该设备条目）
+    FileAnnounce {
+        from: String,
+        files: Vec<SharedFile>,
+    },
+    /// 文件共享②：群主→新入群成员的全量列表快照（加密；不放明文 join_result 避免文件名泄露）
+    FileList {
+        files: FileMap,
+    },
+    /// 文件共享③：自己文件夹新增（上传或下载完成共用；下载完成用全新 file_id）
+    FileAdd {
+        from: String,
+        file: SharedFile,
+    },
+    /// 文件共享④：删除自己文件夹内的一条或多条（带设备 + id 数组；仅移清单）
+    FileRemove {
+        from: String,
+        file_ids: Vec<String>,
     },
     /// 加密信封：data = base64(nonce || AES-256-GCM(json(内部消息)))
     Encrypted { data: String },

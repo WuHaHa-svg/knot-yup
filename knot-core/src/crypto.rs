@@ -45,6 +45,30 @@ impl Cipher {
             .map_err(|_| "decrypt failed (PIN 不匹配?)".to_string())?;
         serde_json::from_slice(&plain).map_err(|e| format!("json: {e}"))
     }
+
+    /// 文件分块加密：随机 12B nonce，返回 nonce(12) || ciphertext。
+    /// 与消息信封共享密钥但独立 nonce 空间（不序列化 JSON）。
+    pub fn encrypt_chunk(&self, plain: &[u8]) -> Vec<u8> {
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ct = self.0.encrypt(nonce, plain).expect("encrypt chunk");
+        let mut buf = Vec::with_capacity(12 + ct.len());
+        buf.extend_from_slice(&nonce_bytes);
+        buf.extend_from_slice(&ct);
+        buf
+    }
+
+    /// 文件分块解密：入参 nonce(12) || ciphertext。
+    pub fn decrypt_chunk(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+        if data.len() < 12 {
+            return Err("chunk too short".into());
+        }
+        let (nonce_bytes, ct) = data.split_at(12);
+        self.0
+            .decrypt(Nonce::from_slice(nonce_bytes), ct)
+            .map_err(|_| "chunk decrypt failed".into())
+    }
 }
 
 #[cfg(test)]

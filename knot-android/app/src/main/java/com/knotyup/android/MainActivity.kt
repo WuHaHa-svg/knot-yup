@@ -94,6 +94,7 @@ class MainActivity : ComponentActivity() {
         com.knotyup.android.ui.FullScreen.applyFullScreen(window)
         // 群地址解析需要系统 ConnectivityManager 兜底（见 Discovery.localIpAddress(context)）
         AppState.appContext = applicationContext
+        AppState.initFiles(applicationContext)
         // 进程级运行时（事件处理/成员会话/剪贴板监听）：幂等，Activity 重建不影响消息链路
         AppState.startRuntime()
         val sharedText = intent?.takeIf { it.action == android.content.Intent.ACTION_SEND }

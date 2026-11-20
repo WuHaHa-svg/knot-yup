@@ -2,7 +2,7 @@
 
 use knot_core::discovery::GroupAd;
 use knot_core::net::{CoreEvent, GroupClient, GroupServer};
-use knot_core::protocol::DeviceInfo;
+use knot_core::protocol::{DeviceInfo, FileMap};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
@@ -58,6 +58,10 @@ pub(crate) struct AppState {
     /// 最近一次升主时间（unix 毫秒）：升主后老成员迁移涌入会连环触发 member_joined，
     /// 静默期内（+6s）不弹成员差量提示，成员表 UI 照常更新
     pub promoted_at: std::sync::atomic::AtomicU64,
+    /// 群文件列表（按 device_id 分组；bridge 收到 file_* 事件时更新）
+    pub file_map: Mutex<FileMap>,
+    /// 本地持久共享文件夹（清单 + 供种服务）
+    pub files: Arc<crate::files::FileManager>,
     /// 转让进行中：转出方会看到成员陆续离开（迁移潮），期间成员差量不提示；
     /// TransferFailed/TransferCompleted 时清除
     pub transferring: std::sync::atomic::AtomicBool,

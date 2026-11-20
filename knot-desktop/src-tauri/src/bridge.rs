@@ -46,9 +46,14 @@ pub(crate) async fn forward_core_events(
                 if had_session && !prev.is_empty() && !promoted_recently && !transferring {
                     use std::collections::HashSet;
                     let prev_ids: HashSet<String> = prev.iter().map(|d| d.id.clone()).collect();
-                    let new_ids: HashSet<String> = members.iter().map(|d| d.id.clone()).collect();
-                    for d in &members {
-                        if !prev_ids.contains(&d.id) && d.id != own_id {
+                let new_ids: HashSet<String> = members.iter().map(|d| d.id.clone()).collect();
+                // 文件列表随成员推演：离群设备的整个文件夹条目移除；新成员空文件夹由 file_announce 填充
+                {
+                    let mut fm = state.file_map.lock().await;
+                    fm.retain(|id, _| new_ids.contains(id));
+                }
+                for d in &members {
+                    if !prev_ids.contains(&d.id) && d.id != own_id {
                             let _ = app.emit(
                                 "knot://member-change",
                                 serde_json::json!({ "type": "joined", "name": d.name }),
@@ -83,9 +88,31 @@ pub(crate) async fn forward_core_events(
                     serde_json::json!({ "from": from, "text": payload.text, "hash": payload.hash }),
                 );
             }
+            Ok(CoreEvent::FileList { files }) => {
+                dlog("evt/file-list", format!("devices={}", files.len()));
+                *state.file_map.lock().await = files.clone();
+                let _ = app.emit("knot://file-changed", serde_json::json!({}));
+            }
+            Ok(CoreEvent::FileAdd { from, file }) => {
+                dlog("evt/file-add", format!("from={from} id={}", file.file_id));
+                let map = &mut *state.file_map.lock().await;
+                let list = map.entry(from.clone()).or_default();
+                if !list.iter().any(|f| f.file_id == file.file_id) {
+                    list.push(file);
+                }
+                let _ = app.emit("knot://file-changed", serde_json::json!({}));
+            }
+            Ok(CoreEvent::FileRemove { from, file_ids }) => {
+                dlog("evt/file-remove", format!("from={from} n={}", file_ids.len()));
+                if let Some(list) = state.file_map.lock().await.get_mut(&from) {
+                    list.retain(|f| !file_ids.contains(&f.file_id));
+                }
+                let _ = app.emit("knot://file-changed", serde_json::json!({}));
+            }
             Ok(CoreEvent::Kicked(reason)) => {
                 dlog("evt/kicked", &reason);
                 *state.session.lock().await = None;
+                state.file_map.lock().await.clear();
                 let _ = app.emit("knot://kicked", reason);
             }
             Ok(CoreEvent::Dissolve) => {

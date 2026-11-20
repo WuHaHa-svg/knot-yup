@@ -166,6 +166,135 @@ function nameOf(deviceId) {
   return m ? m.name : deviceId.slice(0, 6);
 }
 
+// ── 文件共享（两级目录：设备文件夹 → 文件）────────────
+
+let groupFiles = {};   // { device_id: [SharedFile…] }
+let localFileIds = new Set();
+let fileViewDevice = null; // null=设备列表；否则某 device_id
+let activePanel = 'clipboard';
+
+function fmtSize(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1073741824) return (bytes / 1048576).toFixed(1) + ' MB';
+  return (bytes / 1073741824).toFixed(2) + ' GB';
+}
+
+function setPanel(tab) {
+  activePanel = tab;
+  document.querySelectorAll('.panel-tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  $('paneClipboard').classList.toggle('hidden', tab !== 'clipboard');
+  $('paneFiles').classList.toggle('hidden', tab !== 'files');
+  if (tab === 'files') renderFiles();
+}
+
+function renderFiles() {
+  const box = $('fileList');
+  if (!box) return;
+  box.innerHTML = '';
+  // 头部：一级隐藏返回，二级显示返回；共享按钮两级都在
+  const backBtn = $('btnFileBack');
+  if (backBtn) {
+    backBtn.classList.toggle('hidden', !fileViewDevice);
+    backBtn.onclick = () => { fileViewDevice = null; renderFiles(); };
+  }
+  if (!fileViewDevice) {
+    // 一级：设备文件夹——以成员表为准，群里有几个设备就有几个文件夹（空的也显示）
+    const members = (state.session && state.session.members) || [];
+    const entries = members.map((m) => [m.id, (groupFiles || {})[m.id] || []]);
+    if (entries.length === 0) {
+      box.innerHTML = `<div class="empty">${t('empty_file')}</div>`;
+      return;
+    }
+    entries.forEach(([devId, files]) => {
+      const row = document.createElement('button');
+      row.className = 'file-folder';
+      row.innerHTML = `
+        <svg class="icon"><use href="#i-folder"/></svg>
+        <span class="folder-name">${escapeHtml(nameOf(devId))}</span>
+        <span class="folder-count">${files.length}</span>
+      `;
+      row.onclick = () => { fileViewDevice = devId; renderFiles(); };
+      box.appendChild(row);
+    });
+    return;
+  }
+  // 二级：某设备的文件（返回按钮已在头部）
+  const files = (groupFiles || {})[fileViewDevice] || [];
+  if (files.length === 0) {
+    box.innerHTML += `<div class="empty">${t('empty_file')}</div>`;
+    return;
+  }
+  const isMine = state.device && fileViewDevice === state.device.id;
+  files.forEach((f) => {
+    const row = document.createElement('div');
+    row.className = 'file-item';
+    row.innerHTML = `
+      <svg class="icon sm"><use href="#i-file"/></svg>
+      <div class="file-meta">
+        <div class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</div>
+        <div class="file-sub">${fmtSize(f.size)} · ${fmtTime(f.added_at)}</div>
+      </div>
+    `;
+    const actions = document.createElement('div');
+    actions.className = 'file-actions';
+    if (!isMine) {
+      const dl = document.createElement('button');
+      dl.className = 'btn-mini';
+      dl.title = t('download');
+      dl.innerHTML = `<svg class="icon sm"><use href="#i-upload"/></svg>`;
+      dl.onclick = (e) => { e.stopPropagation(); downloadFile(fileViewDevice, f); };
+      actions.appendChild(dl);
+    } else if (localFileIds.has(f.file_id)) {
+      const del = document.createElement('button');
+      del.className = 'btn-mini danger';
+      del.title = t('delete_file');
+      del.innerHTML = `<svg class="icon sm"><use href="#i-logout"/></svg>`;
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        const ok = await showConfirm(t('delete_file'), t('confirm_delete_file', { name: f.name }), t('confirm_ok'), t('confirm_cancel'));
+        if (!ok) return;
+        try { await invoke('remove_files', { fileIds: [f.file_id] }); await refresh(); }
+        catch (err) { toast(String(err), 'error'); }
+      };
+      actions.appendChild(del);
+    }
+    row.appendChild(actions);
+    box.appendChild(row);
+  });
+}
+
+async function downloadFile(seedId, file) {
+  try {
+    const dest = await invoke('pick_save_path', { defaultName: file.name });
+    if (!dest) return;
+    toast(t('downloading') || 'Downloading…');
+    await invoke('download_file', { seedDeviceId: seedId, srcFileId: file.file_id, dest });
+    toast(t('download_done') || 'Downloaded', 'success');
+    await refresh();
+  } catch (err) {
+    toast(String(err), 'error');
+  }
+}
+
+// tab 头点击
+document.querySelectorAll('.panel-tab').forEach((b) => {
+  b.onclick = () => setPanel(b.dataset.tab);
+});
+// 共享文件按钮
+const shareBtn = $('btnShareFile');
+if (shareBtn) shareBtn.onclick = async () => {
+  try {
+    const path = await invoke('pick_share_file');
+    if (!path) return;
+    await invoke('share_file', { path });
+    await refresh();
+    toast(t('shared') || 'Shared', 'success');
+  } catch (err) {
+    toast(String(err), 'error');
+  }
+};
+
 // ── 动作：退出 / 转让 / 分享弹层 ──────────
 
 $('btnLeave').onclick = async () => {

@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::crypto::Cipher;
 use crate::net::{CoreEvent, Tx};
-use crate::protocol::{self, ClipboardPayload, DeviceInfo, Message};
+use crate::protocol::{self, ClipboardPayload, DeviceInfo, Message, SharedFile};
 
 /// 成员（客户端）句柄。drop 时中止读任务 → 断开连接，群主侧才能感知离开。
 pub struct GroupClient {
@@ -130,6 +130,18 @@ impl GroupClient {
                                     from, payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash);
                                 event_tx.send(CoreEvent::Clipboard { from, payload }).ok();
                             }
+                            Some(Message::FileList { files }) => {
+                                tracing::debug!(target: "ws/client", "<- file_list 快照 devices={}", files.len());
+                                event_tx.send(CoreEvent::FileList { files }).ok();
+                            }
+                            Some(Message::FileAdd { from, file }) => {
+                                tracing::debug!(target: "ws/client", "<- file_add from={from} id={}", file.file_id);
+                                event_tx.send(CoreEvent::FileAdd { from, file }).ok();
+                            }
+                            Some(Message::FileRemove { from, file_ids }) => {
+                                tracing::debug!(target: "ws/client", "<- file_remove from={from} n={}", file_ids.len());
+                                event_tx.send(CoreEvent::FileRemove { from, file_ids }).ok();
+                            }
                             Some(Message::Kick { reason }) => {
                                 tracing::debug!(target: "ws/client", "<- kick reason={:?}", reason.as_deref().unwrap_or(""));
                                 event_tx.send(CoreEvent::Kicked(reason.unwrap_or_default())).ok();
@@ -243,6 +255,36 @@ impl GroupClient {
             .send(WsMessage::Text(text))
             .await
             .map_err(|_| "连接已关闭".to_string())
+    }
+
+    /// 入群/重连时全量上报自己文件夹清单（加密）。
+    pub async fn send_file_announce(&self, files: Vec<SharedFile>) -> Result<(), String> {
+        tracing::debug!(target: "ws/client", "-> file_announce n={}", files.len());
+        let text = serde_json::to_string(
+            &Message::FileAnnounce { from: self.local_id.clone(), files }.seal(&self.cipher),
+        )
+        .unwrap();
+        self.tx.send(WsMessage::Text(text)).await.map_err(|_| "连接已关闭".to_string())
+    }
+
+    /// 自己文件夹新增（上传或下载完成共用，下载完成用全新 file_id）。
+    pub async fn send_file_add(&self, file: SharedFile) -> Result<(), String> {
+        tracing::debug!(target: "ws/client", "-> file_add id={}", file.file_id);
+        let text = serde_json::to_string(
+            &Message::FileAdd { from: self.local_id.clone(), file }.seal(&self.cipher),
+        )
+        .unwrap();
+        self.tx.send(WsMessage::Text(text)).await.map_err(|_| "连接已关闭".to_string())
+    }
+
+    /// 删除自己文件夹内的一条或多条。
+    pub async fn send_file_remove(&self, file_ids: Vec<String>) -> Result<(), String> {
+        tracing::debug!(target: "ws/client", "-> file_remove n={}", file_ids.len());
+        let text = serde_json::to_string(
+            &Message::FileRemove { from: self.local_id.clone(), file_ids }.seal(&self.cipher),
+        )
+        .unwrap();
+        self.tx.send(WsMessage::Text(text)).await.map_err(|_| "连接已关闭".to_string())
     }
 
     /// 转让第二步：standby 服务就绪后，通过原 ws 回告群主。

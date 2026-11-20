@@ -15,6 +15,7 @@ mod debug_server;
 mod bridge;
 mod clipboard;
 mod commands;
+mod files;
 mod state;
 
 /// 调试日志：仅 debug 构建生效（发布版为空操作，参数被编译器消除）。
@@ -59,6 +60,8 @@ pub fn run() {
                 member_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 promoted_at: std::sync::atomic::AtomicU64::new(0),
                 transferring: std::sync::atomic::AtomicBool::new(false),
+                file_map: tokio::sync::Mutex::new(knot_core::protocol::FileMap::new()),
+                files: std::sync::Arc::new(files::FileManager::load()),
             });
 
             // 本机设备身份
@@ -67,6 +70,7 @@ pub fn run() {
                 name: format!("{} 的 {}", whoami::devicename(), match std::env::consts::OS { "macos" => "Mac", "windows" => "PC", other => other }),
                 platform: std::env::consts::OS.to_string(),
                 addr: None,
+                file_addr: None,
                 role: None,
             };
 
@@ -204,7 +208,13 @@ pub fn run() {
             commands::leave_group,
             commands::kick_device,
             commands::copy_history_item,
-            commands::debug_tools_enabled
+            commands::debug_tools_enabled,
+            commands::get_files,
+            commands::pick_share_file,
+            commands::pick_save_path,
+            commands::share_file,
+            commands::remove_files,
+            commands::download_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

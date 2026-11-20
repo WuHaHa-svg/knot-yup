@@ -3,7 +3,8 @@
 pub mod clipboard;
 pub mod crypto;
 pub mod discovery;
+pub mod file;
 pub mod net;
 pub mod protocol;
 
-pub use protocol::{ClipboardPayload, DeviceInfo, Message};
+pub use protocol::{ClipboardPayload, DeviceInfo, FileMap, Message, SharedFile, FILE_CHUNK_SIZE};

@@ -67,7 +67,7 @@ internal fun GroupBody(
     onSend: () -> Unit,
     onLeave: () -> Unit,
 ) {
-    val pagerState = rememberPagerState { 2 }
+    val pagerState = rememberPagerState { 3 }
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     // 已播过挂载动画的条目时间戳：提升到 pager 之外，HorizontalPager 切页 dispose 页面时不丢失。
@@ -105,7 +105,8 @@ internal fun GroupBody(
             ) {
                 when (page) {
                     0 -> DevicesTab(t, members, role, groupAddr, groupPin, onKick, onLeave)
-                    else -> ClipboardTab(t, members, history, sendText, seenClipItems, onCopy, onSendText, onSend)
+                    1 -> ClipboardTab(t, members, history, sendText, seenClipItems, onCopy, onSendText, onSend)
+                    else -> FileTab(t, members)
                 }
             }
         }
@@ -144,6 +145,7 @@ internal fun GroupTabBar(
     val items = listOf(
         t("group_info") to com.knotyup.android.R.drawable.ic_devices,
         t("clipboard") to com.knotyup.android.R.drawable.ic_clip,
+        t("files") to com.knotyup.android.R.drawable.ic_file,
     )
     // tab 拖动产生的本地页偏移（单位=tab）；仅影响色块显示，不驱动 pager。
     var dragOffset by remember { mutableFloatStateOf(0f) }
@@ -152,8 +154,8 @@ internal fun GroupTabBar(
     // pointerInput 闭包只启动一次，会捕获创建时的 page（旧值）。用 rememberUpdatedState
     // 让闭包每次读到最新 page——否则在剪切板页(page=1)拖动仍用旧的 page=0 做 clamp，色块不动。
     val pageState = rememberUpdatedState(page)
-    // 色块视觉位置：pager 位置 + 拖动偏移，clamp 到 [0,1]
-    val visualPos = (page + dragOffset).coerceIn(0f, 1f)
+    // 色块视觉位置：pager 位置 + 拖动偏移，clamp 到 [0, 2]（3 段）
+    val visualPos = (page + dragOffset).coerceIn(0f, 2f)
 
     // 松手后把色块偏移从当前值平滑归零（与页面切换动画并行）
     fun settle() {
@@ -167,9 +169,9 @@ internal fun GroupTabBar(
     }
 
     androidx.compose.foundation.layout.BoxWithConstraints(modifier) {
-        val containerW = 248.dp
+        val containerW = 348.dp // 3 段：加宽容纳群信息/剪贴板/文件
         val gap = 8.dp // item 间隔 = 容器内边距
-        val segW = (containerW - 8.dp - gap) / 2
+        val segW = (containerW - 8.dp - gap * 2) / 3
 
         androidx.compose.material3.Surface(
             shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
@@ -194,7 +196,7 @@ internal fun GroupTabBar(
                                 // 以色块中心对齐落点；clamp 保证色块不出栏。页面不动，等松手再决定切换。
                                 val stepPx = (segW + gap).toPx()
                                 val desiredPos = ((startOffset.x - segW.toPx() / 2f) / stepPx)
-                                    .coerceIn(0f, 1f)
+                                    .coerceIn(0f, 2f)
                                 dragOffset = desiredPos - pageState.value
                             },
                             onHorizontalDrag = { change, dragAmount ->
@@ -203,12 +205,12 @@ internal fun GroupTabBar(
                                 val curPage = pageState.value
                                 // dragAmount 是本次事件增量，累加；clamp 使色块停在栏内
                                 dragOffset = (dragOffset + dragAmount / stepPx)
-                                    .coerceIn(-curPage, 1f - curPage)
+                                    .coerceIn(-curPage, 2f - curPage)
                             },
                             onDragEnd = {
                                 // 按色块最终位置吸附到最近 tab：只回调外部切页，自己不动 pager
-                                val raw = (pageState.value + dragOffset).coerceIn(0f, 1f)
-                                onSelect(raw.roundToInt().coerceIn(0, 1))
+                                val raw = (pageState.value + dragOffset).coerceIn(0f, 2f)
+                                onSelect(raw.roundToInt().coerceIn(0, 2))
                                 settle()
                             },
                             onDragCancel = { settle() },

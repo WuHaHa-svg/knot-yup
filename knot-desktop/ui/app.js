@@ -10,6 +10,13 @@ async function refresh() {
   renderSession();
   renderClipboard();
   renderDiscovered();
+  // 文件共享列表
+  try {
+    const f = await invoke('get_files', {});
+    groupFiles = f.group_files || {};
+    localFileIds = new Set((f.local_files || []).map((x) => x.file_id));
+    if (typeof renderFiles === 'function') renderFiles();
+  } catch { /* 后端未就绪 */ }
 }
 
 // ── 事件订阅 ──────────────────────────────
@@ -108,6 +115,14 @@ async function main() {
   await listen('knot://discovered', (e) => {
     state.discovered = e.payload;
     renderDiscovered();
+  });
+  await listen('knot://file-changed', async () => {
+    try {
+      const f = await invoke('get_files', {});
+      groupFiles = f.group_files || {};
+      localFileIds = new Set((f.local_files || []).map((x) => x.file_id));
+      if (typeof renderFiles === 'function') renderFiles();
+    } catch { /* ignore */ }
   });
 
   // 调试入口：双击首页右下角版号 → 系统浏览器打开实时日志页（软件继续运行）

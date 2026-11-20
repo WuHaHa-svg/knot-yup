@@ -4,8 +4,9 @@ use crate::dlog;
 use crate::state::{gen_pin, has_lan, local_ip, ClipCmd, Role, Session, SharedState};
 use knot_core::clipboard::text_hash;
 use knot_core::discovery::{self, GroupAd};
+use knot_core::file::fetch_file;
 use knot_core::net::{GroupClient, GroupServer};
-use knot_core::protocol::{ClipboardKind, ClipboardPayload};
+use knot_core::protocol::{ClipboardKind, ClipboardPayload, SharedFile};
 use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
@@ -41,8 +42,18 @@ pub(crate) async fn create_group(
     }
     let pin = pin.unwrap_or_else(gen_pin);
     let core_tx = state.core_tx.lock().await.clone().ok_or("core 未初始化")?;
-    let device = state.device.lock().await.clone().unwrap();
+    let mut device = state.device.lock().await.clone().unwrap();
     dlog("act/create", format!("创建群 port={} pin={}", port.unwrap_or(0), pin));
+    // 起 P2P 供种服务，填 file_addr 随成员表下发
+    if let Some(addr) = state.files.ensure_seeder(&pin, &device.id, &local_ip()).await {
+        device.file_addr = Some(addr);
+        *state.device.lock().await = Some(device.clone());
+    }
+    // 群主本地文件列表先登记自己的文件夹
+    {
+        let mine = state.files.shared_files().await;
+        state.file_map.lock().await.insert(device.id.clone(), mine);
+    }
     let (server, port) = GroupServer::start(port.unwrap_or(0), pin.clone(), device.clone(), core_tx)
         .await
         .map_err(|e| {
@@ -98,9 +109,16 @@ pub(crate) async fn join_group(
         device.addr = Some(format!("{}:{}", local_ip(), p.port()));
         dlog("act/join", format!("预留承接端口 {}", p.port()));
     }
+    // 起 P2P 供种服务，填 file_addr 随 join 上报
+    if let Some(addr) = state.files.ensure_seeder(&pin, &device.id, &local_ip()).await {
+        device.file_addr = Some(addr);
+    }
     let client = GroupClient::connect(&addr, &pin, device.clone(), core_tx).await.inspect_err(|e| {
         dlog("err/join", format!("{e}"));
     })?;
+    // 入群成功：全量上报自己文件夹
+    let mine = state.files.shared_files().await;
+    let _ = client.send_file_announce(mine).await;
 
     *state.session.lock().await = Some(Session {
         role: Role::Member,
@@ -147,6 +165,8 @@ pub(crate) async fn leave_group(
         if let Some(stop) = s.announce_stop {
             stop.send(()).await.ok();
         }
+        // 清群文件列表（本机共享文件夹与 seeder 常驻，不随离群停止）
+        state.file_map.lock().await.clear();
         // client 句柄 drop 后写任务退出，连接随之关闭
     }
     Ok(())
@@ -185,4 +205,148 @@ pub(crate) async fn copy_history_item(state: State<'_, SharedState>, index: usiz
 #[tauri::command]
 pub(crate) fn debug_tools_enabled() -> bool {
     cfg!(debug_assertions)
+}
+
+// ── 文件共享命令 ──
+
+/// 弹原生对话框选要共享的文件，返回绝对路径（取消返回 None）。
+#[tauri::command]
+pub(crate) async fn pick_share_file() -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .pick_file()
+            .map(|p| p.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 弹原生保存对话框，返回用户选择的保存路径（含文件名）。
+#[tauri::command]
+pub(crate) async fn pick_save_path(default_name: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        rfd::FileDialog::new()
+            .set_file_name(&default_name)
+            .save_file()
+            .map(|p| p.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 群文件列表（按设备分组）+ 本地共享清单。
+#[tauri::command]
+pub(crate) async fn get_files(state: State<'_, SharedState>) -> Result<serde_json::Value, String> {
+    Ok(serde_json::json!({
+        "group_files": *state.file_map.lock().await,
+        "local_files": state.files.shared_files().await,
+    }))
+}
+
+/// 共享本机任意路径的文件：登记清单 + 广播 file_add；新文件需重启 seeder 才能供种。
+#[tauri::command]
+pub(crate) async fn share_file(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let file = state.files.add_local(&path).await?;
+    let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+    // 更新自己本地条目并广播（seeder 的 resolver 动态查 path_map，无需重启、端口稳定）
+    state.file_map.lock().await.entry(my_id.clone()).or_default().push(file.clone());
+    match send_file_add(&state, &my_id, file.clone()).await {
+        Ok(_) => {}
+        Err(e) => return Err(e),
+    }
+    let _ = app.emit("knot://file-changed", serde_json::json!({}));
+    Ok(serde_json::to_value(&file).unwrap())
+}
+
+/// 删除本地共享文件条目（不动磁盘文件）+ 广播 file_remove。
+#[tauri::command]
+pub(crate) async fn remove_files(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    file_ids: Vec<String>,
+) -> Result<(), String> {
+    state.files.remove_local(&file_ids).await;
+    let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+    if let Some(list) = state.file_map.lock().await.get_mut(&my_id) {
+        list.retain(|f| !file_ids.contains(&f.file_id));
+    }
+    match send_file_remove(&state, &my_id, file_ids).await {
+        Ok(_) => {}
+        Err(e) => return Err(e),
+    }
+    let _ = app.emit("knot://file-changed", serde_json::json!({}));
+    Ok(())
+}
+
+/// 从某设备下载文件到 dest：P2P 拉取 + sha256 校验 + 登记本地 + 广播 file_add（成为新供种者）。
+#[tauri::command]
+pub(crate) async fn download_file(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    seed_device_id: String,
+    src_file_id: String,
+    dest: String,
+) -> Result<serde_json::Value, String> {
+    // 找供种者 file_addr
+    let (pin, my_id, seed_addr, src_meta) = {
+        let s = state.session.lock().await;
+        let session = s.as_ref().ok_or("NOT_IN_GROUP")?;
+        let pin = session.pin.clone();
+        let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+        let seed = session.members.iter().find(|m| m.id == seed_device_id);
+        let seed_addr = seed.and_then(|m| m.file_addr.clone()).ok_or("SEED_NO_ADDR")?;
+        let src_meta = {
+            let map = state.file_map.lock().await;
+            map.get(&seed_device_id)
+                .and_then(|list| list.iter().find(|f| f.file_id == src_file_id).cloned())
+                .ok_or("FILE_NOT_FOUND")?
+        };
+        (pin, my_id, seed_addr, src_meta)
+    };
+    let dest_path = std::path::Path::new(&dest);
+    let result = fetch_file(
+        &seed_addr, &pin, &src_file_id, &seed_device_id, &my_id,
+        &src_meta.name, &src_meta.mime, dest_path,
+    )
+    .await
+    .map_err(|e| format!("下载失败: {e}"))?;
+    // 登记到本地清单（全新 file_id）并广播
+    let new_file = state
+        .files
+        .add_downloaded(&result.name, dest_path, result.size, result.sha256, &result.mime)
+        .await;
+    state.file_map.lock().await.entry(my_id.clone()).or_default().push(new_file.clone());
+    let _ = send_file_add(&state, &my_id, new_file.clone()).await;
+    let _ = app.emit("knot://file-changed", serde_json::json!({}));
+    Ok(serde_json::to_value(&new_file).unwrap())
+}
+
+async fn send_file_add(state: &SharedState, my_id: &str, file: SharedFile) -> Result<(), String> {
+    let s = state.session.lock().await;
+    let session = s.as_ref().ok_or("NOT_IN_GROUP")?;
+    if let Some(server) = &session.server {
+        server.broadcast_file_add(my_id.to_string(), file).await;
+        Ok(())
+    } else if let Some(client) = &session.client {
+        client.send_file_add(file).await
+    } else {
+        Err("NO_SESSION".into())
+    }
+}
+
+async fn send_file_remove(state: &SharedState, my_id: &str, ids: Vec<String>) -> Result<(), String> {
+    let s = state.session.lock().await;
+    let session = s.as_ref().ok_or("NOT_IN_GROUP")?;
+    if let Some(server) = &session.server {
+        server.broadcast_file_remove(my_id.to_string(), ids).await;
+        Ok(())
+    } else if let Some(client) = &session.client {
+        client.send_file_remove(ids).await
+    } else {
+        Err("NO_SESSION".into())
+    }
 }

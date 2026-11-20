@@ -1,7 +1,10 @@
 package com.knotyup.android.data
 
 import android.content.Context
+import com.knotyup.android.file.FileIndex
+import com.knotyup.android.file.P2pFileService
 import com.knotyup.android.net.DeviceInfo
+import com.knotyup.android.net.SharedFile
 import com.knotyup.android.net.Discovery
 import com.knotyup.android.net.GroupAd
 import com.knotyup.android.net.GroupClient
@@ -45,6 +48,18 @@ object AppState {
     )
 
     val client = GroupClient()
+
+    /** 本地共享文件夹（设备级持久，跨群复用） */
+    private var _fileIndex: FileIndex? = null
+    val fileIndex: FileIndex
+        get() = _fileIndex ?: error("FileIndex 未初始化（appContext 未注入）")
+
+    /** P2P 供种/下载服务（设备级常驻） */
+    val p2pFile = P2pFileService(indexProvider = { fileIndex }, localIdProvider = { device.id })
+
+    /** 群文件列表（按 device_id 分组；UI 文件 tab 观察） */
+    private val _groupFiles = MutableStateFlow<Map<String, List<SharedFile>>>(emptyMap())
+    val groupFiles: StateFlow<Map<String, List<SharedFile>>> = _groupFiles
 
     /** 群主服务端（role == owner 时存在） */
     var server: KnotGroupServer? = null
@@ -160,11 +175,20 @@ object AppState {
         standby = s
     }
 
-    /** 带预留地址的设备信息（入群用）。 */
+    /** 初始化文件共享（appContext 注入后调用，幂等） */
+    fun initFiles(ctx: Context) {
+        if (_fileIndex == null) _fileIndex = FileIndex(ctx)
+    }
+
+    /** 带预留地址的设备信息（入群用），含 P2P 供种地址 */
     fun deviceWithStandbyAddr(): DeviceInfo {
         val port = standby?.localPort
         val ip = Discovery.localIpAddress(appContext)
-        return if (port != null && ip != null) device.copy(addr = "$ip:$port") else device
+        val fileAddr = p2pFile.startServer().let { p -> ip?.let { "$it:$p" } }
+        return device.copy(
+            addr = if (port != null && ip != null) "$ip:$port" else null,
+            fileAddr = fileAddr,
+        )
     }
 
     fun applyEvent(event: GroupEvent) {
@@ -251,6 +275,8 @@ object AppState {
                     prev.filter { it.id !in newIds && it.id != device.id }
                         .forEach { toastKey("member_left", subs = mapOf("name" to it.name)) }
                 }
+                // 文件列表随成员推演：离群设备的整个文件夹条目移除
+                _groupFiles.value = _groupFiles.value.filterKeys { it in event.members.map { m -> m.id } }
                 applyEvent(event)
                 _joining.value = false
             }
@@ -276,6 +302,24 @@ object AppState {
                         com.knotyup.android.service.ClipboardNotification.show(it, text, fromName)
                     }
                 }
+            }
+            is GroupEvent.FileList -> {
+                android.util.Log.i("KnotFile", "收到文件全量快照 devices=${event.files.size}")
+                _groupFiles.value = event.files
+            }
+            is GroupEvent.FileAdd -> {
+                val cur = _groupFiles.value.toMutableMap()
+                val list = cur.getOrDefault(event.from, emptyList()).toMutableList()
+                if (list.none { it.fileId == event.file.fileId }) list.add(event.file)
+                cur[event.from] = list
+                _groupFiles.value = cur
+            }
+            is GroupEvent.FileRemove -> {
+                val cur = _groupFiles.value.toMutableMap()
+                cur[event.from]?.let { list ->
+                    cur[event.from] = list.filterNot { it.fileId in event.fileIds }
+                }
+                _groupFiles.value = cur
             }
             is GroupEvent.Kicked -> {
                 reset()
@@ -344,6 +388,7 @@ object AppState {
         memberJob?.cancel()
         client.leave() // 防双实例：确保旧连接取消
         _joining.value = true
+        p2pFile.updatePin(pin) // 供种服务切换到新群的 PIN，端口不变
         memberJob = scope.launch {
             onJoining(addr, pin)
             setStandby(ServerSocket(0))
@@ -353,7 +398,11 @@ object AppState {
             val collector = launch {
                 client.join(addr, pin, deviceWithStandbyAddr()).collect { result ->
                     result.fold({ event ->
-                        if (event is GroupEvent.Members) gotMembers = true
+                        if (event is GroupEvent.Members && !gotMembers) {
+                            gotMembers = true
+                            // 入群成功：全量上报自己文件夹
+                            client.sendFileAnnounce(fileIndex.sharedFiles())
+                        }
                         emit(event)
                     }, { e ->
                         android.util.Log.w("KnotYup", "join failed: ${e.message}")
@@ -436,6 +485,82 @@ object AppState {
         if (sent) addLocalHistory(text)
     }
 
+    // ── 文件共享 ───────────────────
+
+    /** 共享本机文件（SAF URI）：算 sha256 → 登记本地清单 → 广播 file_add。返回新条目。 */
+    suspend fun shareFile(uri: android.net.Uri): SharedFile = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val ctx = appContext ?: error("appContext 未注入")
+        val cr = ctx.contentResolver
+        val name = uri.lastPathSegment?.substringAfter('/') ?: "file"
+        val size = try {
+            cr.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
+        } catch (_: Exception) { 0L }
+        val mime = cr.getType(uri) ?: "application/octet-stream"
+        val sha = cr.openInputStream(uri)?.use { p2pFile.sha256Stream(it) } ?: error("无法读取文件")
+        val file = SharedFile(
+            fileId = java.util.UUID.randomUUID().toString(),
+            name = name, size = size, sha256 = sha, mime = mime,
+            addedAt = System.currentTimeMillis(),
+        )
+        fileIndex.add(com.knotyup.android.file.LocalFile(file, uri.toString()))
+        broadcastFileAdd(file)
+        file
+    }
+
+    /** 删除本地共享条目（磁盘文件不动）+ 广播 + 更新群列表。 */
+    fun removeSharedFiles(ids: List<String>) {
+        fileIndex.remove(ids)
+        if (isOwner()) server?.broadcastFileRemove(ids) else client.sendFileRemove(ids)
+        _groupFiles.value = _groupFiles.value.mapValues { (_, list) -> list.filterNot { it.fileId in ids } }
+    }
+
+    /** 从供种者下载文件 → 写公共 Downloads/knotShare → 登记新条目 → 广播成为供种者。 */
+    suspend fun downloadSharedFile(seedId: String, file: SharedFile): String = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val ctx = appContext ?: error("appContext 未注入")
+        val seedAddr = session.value.members.firstOrNull { it.id == seedId }?.fileAddr
+            ?: error("供种者不在线")
+        val resolver = ctx.contentResolver
+        val collection = android.provider.MediaStore.Downloads.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val values = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, file.mime)
+            put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, "${android.os.Environment.DIRECTORY_DOWNLOADS}/knotShare")
+            put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(collection, values) ?: error("创建下载文件失败")
+        try {
+            val out = resolver.openOutputStream(uri) ?: error("打开输出流失败")
+            try {
+                p2pFile.download(seedAddr, seedId, file.fileId, out)
+            } finally {
+                out.close()
+            }
+            values.clear()
+            values.put(android.provider.MediaStore.MediaColumns.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            throw e
+        }
+        // 下载完成：登记新 file_id 的条目，成为供种者
+        val newFile = file.copy(
+            fileId = java.util.UUID.randomUUID().toString(),
+            addedAt = System.currentTimeMillis(),
+        )
+        fileIndex.add(com.knotyup.android.file.LocalFile(newFile, uri.toString()))
+        broadcastFileAdd(newFile)
+        uri.toString()
+    }
+
+    private fun broadcastFileAdd(file: SharedFile) {
+        if (isOwner()) server?.broadcastFileAdd(file) else client.sendFileAdd(file)
+        _groupFiles.value = _groupFiles.value.toMutableMap().also { m ->
+            val list = m.getOrDefault(device.id, emptyList()).toMutableList()
+            if (list.none { it.fileId == file.fileId }) list.add(file)
+            m[device.id] = list
+        }
+    }
+
     // ── 群主（创建 / 承接） ───────────────────
 
     /** 预留一个可用 TCP 端口（先绑定再关闭，稍后由 WS 服务端使用）。 */
@@ -453,7 +578,13 @@ object AppState {
         standby?.let { runCatching { it.close() } }
         standby = null
         stopServer()
-        val owner = device.copy(addr = null)
+        p2pFile.updatePin(pin)
+        val filePort = p2pFile.startServer()
+        val ipAddr = Discovery.localIpAddress(appContext)
+        val fileAddr = ipAddr?.let { "$it:$filePort" }
+        // 群主本地文件列表先登记自己的文件夹
+        _groupFiles.value = mapOf(device.id to fileIndex.sharedFiles())
+        val owner = device.copy(addr = null, fileAddr = fileAddr)
         val s = KnotGroupServer(port, pin, owner, ::emit)
         s.start()
         server = s

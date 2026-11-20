@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::crypto::Cipher;
 use crate::net::{CoreEvent, MemberMap, Tx};
-use crate::protocol::{self, ClipboardPayload, DeviceInfo, Message};
+use crate::protocol::{self, ClipboardPayload, DeviceInfo, FileMap, Message, SharedFile};
 
 /// 转让回执等待表：device_id → 一次性通道（transfer() 注册，读循环收到 TransferReady 唤醒）
 type TransferWaiters = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>;
@@ -27,6 +27,8 @@ pub struct GroupServer {
     event_tx: tokio::sync::broadcast::Sender<CoreEvent>,
     shutdown: Tx,
     waiters: TransferWaiters,
+    /// 群文件列表内存汇总：device_id → 该设备文件夹（CRDT 式，各端缓存同份）
+    files: Arc<RwLock<FileMap>>,
 }
 
 impl GroupServer {
@@ -53,6 +55,7 @@ impl GroupServer {
             event_tx,
             shutdown,
             waiters: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            files: Arc::new(RwLock::new(BTreeMap::new())),
         });
 
         let accept_server = server.clone();
@@ -127,6 +130,10 @@ impl GroupServer {
                 members: self.member_infos().await,
             })?))
             .await;
+        // 入群成功后下发群文件列表全量快照（加密，不放明文 join_result 避免文件名泄露）
+        let snapshot = self.files.read().await.clone();
+        let file_list = serde_json::to_string(&Message::FileList { files: snapshot }.seal(&cipher))?;
+        let _ = sink.send(WsMessage::Text(file_list)).await;
         self.broadcast_members().await;
 
         // 3. 读循环：转发成员消息；写任务：消费出站通道
@@ -135,6 +142,7 @@ impl GroupServer {
         let event_tx = self.event_tx.clone();
         let device_id = device.id.clone();
         let waiters = self.waiters.clone();
+        let files = self.files.clone();
 
         // 空闲看门狗：成员每 30s 心跳，超过 35s 无任何入站消息即判定假死
         let last_activity = std::sync::Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
@@ -187,6 +195,53 @@ impl GroupServer {
                                 payload: payload.clone(),
                             })
                             .ok();
+                            let map = members.read().await;
+                            for (id, (_, tx)) in map.iter() {
+                                if id != &device_id {
+                                    tx.try_send(WsMessage::Text(t.clone())).ok();
+                                }
+                            }
+                        }
+                        Some(Message::FileAnnounce { from, files: new_files }) => {
+                            // 全量替换该设备的文件夹条目
+                            tracing::debug!(target: "ws/server", "<- file_announce [{peer}] from={from} n={}", new_files.len());
+                            files.write().await.insert(from.clone(), new_files);
+                            // 客户端读循环不解析 file_announce（它只认 file_list/add/remove），
+                            // 所以群主改成广播一条 file_list 全量快照——空文件夹也因此出现在所有端。
+                            let snapshot = files.read().await.clone();
+                            let fl = serde_json::to_string(
+                                &Message::FileList { files: snapshot.clone() }.seal(&cipher),
+                            )
+                            .unwrap();
+                            event_tx.send(CoreEvent::FileList { files: snapshot }).ok();
+                            let map = members.read().await;
+                            for (_, (_, tx)) in map.iter() {
+                                tx.try_send(WsMessage::Text(fl.clone())).ok();
+                            }
+                        }
+                        Some(Message::FileAdd { from, file }) => {
+                            tracing::debug!(target: "ws/server", "<- file_add [{peer}] from={from} id={}", file.file_id);
+                            {
+                                let mut f = files.write().await;
+                                let list = f.entry(from.clone()).or_default();
+                                if !list.iter().any(|x| x.file_id == file.file_id) {
+                                    list.push(file.clone());
+                                }
+                            }
+                            event_tx.send(CoreEvent::FileAdd { from: from.clone(), file }).ok();
+                            let map = members.read().await;
+                            for (id, (_, tx)) in map.iter() {
+                                if id != &device_id {
+                                    tx.try_send(WsMessage::Text(t.clone())).ok();
+                                }
+                            }
+                        }
+                        Some(Message::FileRemove { from, file_ids }) => {
+                            tracing::debug!(target: "ws/server", "<- file_remove [{peer}] from={from} n={}", file_ids.len());
+                            if let Some(list) = files.write().await.get_mut(&from) {
+                                list.retain(|f| !file_ids.contains(&f.file_id));
+                            }
+                            event_tx.send(CoreEvent::FileRemove { from: from.clone(), file_ids }).ok();
                             let map = members.read().await;
                             for (id, (_, tx)) in map.iter() {
                                 if id != &device_id {
@@ -251,6 +306,8 @@ impl GroupServer {
             if is_mine {
                 tracing::debug!(target: "ws/server", "连接关闭 [{peer}] 移除成员 {device_id}");
                 map.remove(&device_id);
+                // 离群：从群文件汇总移除该设备整个文件夹（各端也靠 members 自行推演删除）
+                files.write().await.remove(&device_id);
             } else {
                 tracing::debug!(target: "ws/server", "连接关闭 [{peer}]（已被新连接取代，保留新成员表条目）");
             }
@@ -292,6 +349,42 @@ impl GroupServer {
             self.members.read().await.len(), payload.text.as_deref().map(str::len).unwrap_or(0));
         let text = serde_json::to_string(
             &Message::Clipboard { from, payload }.seal(&self.cipher),
+        )
+        .unwrap();
+        let map = self.members.read().await;
+        for (_, (_, tx)) in map.iter() {
+            tx.try_send(WsMessage::Text(text.clone())).ok();
+        }
+    }
+
+    /// 群主本机新增文件：更新汇总 + 广播全员。
+    pub async fn broadcast_file_add(&self, from: String, file: SharedFile) {
+        tracing::debug!(target: "ws/server", "-> file_add 广播 from={from} id={}", file.file_id);
+        {
+            let mut f = self.files.write().await;
+            let list = f.entry(from.clone()).or_default();
+            if !list.iter().any(|x| x.file_id == file.file_id) {
+                list.push(file.clone());
+            }
+        }
+        let text = serde_json::to_string(
+            &Message::FileAdd { from, file }.seal(&self.cipher),
+        )
+        .unwrap();
+        let map = self.members.read().await;
+        for (_, (_, tx)) in map.iter() {
+            tx.try_send(WsMessage::Text(text.clone())).ok();
+        }
+    }
+
+    /// 群主本机删除文件：更新汇总 + 广播全员。
+    pub async fn broadcast_file_remove(&self, from: String, file_ids: Vec<String>) {
+        tracing::debug!(target: "ws/server", "-> file_remove 广播 from={from} n={}", file_ids.len());
+        if let Some(list) = self.files.write().await.get_mut(&from) {
+            list.retain(|f| !file_ids.contains(&f.file_id));
+        }
+        let text = serde_json::to_string(
+            &Message::FileRemove { from: from.clone(), file_ids: file_ids.clone() }.seal(&self.cipher),
         )
         .unwrap();
         let map = self.members.read().await;
