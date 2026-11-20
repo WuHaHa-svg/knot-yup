@@ -95,12 +95,17 @@ pub(crate) async fn forward_core_events(
             }
             Ok(CoreEvent::FileAdd { from, file }) => {
                 dlog("evt/file-add", format!("from={from} id={}", file.file_id));
+                let name = file.name.clone();
                 let map = &mut *state.file_map.lock().await;
                 let list = map.entry(from.clone()).or_default();
                 if !list.iter().any(|f| f.file_id == file.file_id) {
                     list.push(file);
                 }
-                let _ = app.emit("knot://file-changed", serde_json::json!({}));
+                // 带 from/name 供前端弹「XXX共享了文件 + 文件名副标题」；前端会过滤自己的 from
+                let _ = app.emit(
+                    "knot://file-changed",
+                    serde_json::json!({ "from": from, "name": name }),
+                );
             }
             Ok(CoreEvent::FileRemove { from, file_ids }) => {
                 dlog("evt/file-remove", format!("from={from} n={}", file_ids.len()));

@@ -64,12 +64,33 @@ struct FileRequest {
     resume_from: u32,
 }
 
-/// 供种端响应控制帧（长度前缀 JSON）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum SeedControl {
-    Ok { size: u64, sha256: String },
-    Error(String),
-    Done,
+/// 供种端响应控制帧（长度前缀 JSON）。
+/// 用扁平字段（ok/size/sha256/error/done）而非 serde enum——必须与 Android 端
+/// P2pFileService.kt 手写的 JSONObject 逐字段兼容，否则双向下载都失败。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SeedControl {
+    #[serde(default)]
+    ok: bool,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    sha256: String,
+    #[serde(default)]
+    error: String,
+    #[serde(default)]
+    done: bool,
+}
+
+impl SeedControl {
+    fn ok(size: u64, sha256: String) -> Self {
+        Self { ok: true, size, sha256, ..Default::default() }
+    }
+    fn err(msg: impl Into<String>) -> Self {
+        Self { ok: false, error: msg.into(), ..Default::default() }
+    }
+    fn done() -> Self {
+        Self { done: true, ..Default::default() }
+    }
 }
 
 async fn write_frame<T: Serialize>(stream: &mut TcpStream, frame: &T) -> io::Result<()> {
@@ -186,7 +207,7 @@ async fn serve_one(
     // 校验 token
     let expect = auth_token(pin, &req.src_file_id, &req.from, &req.to);
     if req.to != local_id || req.token != expect {
-        write_frame(&mut stream, &SeedControl::Error("AUTH_FAILED".into()))
+        write_frame(&mut stream, &SeedControl::err("AUTH_FAILED"))
             .await
             .map_err(|e| format!("回执: {e}"))?;
         return Err("token 认证失败".into());
@@ -197,7 +218,7 @@ async fn serve_one(
     let size = meta.len();
     // 计算整文件 sha256（流式）
     let sha256 = hash_file(&path).await.map_err(|e| format!("计算 sha256: {e}"))?;
-    write_frame(&mut stream, &SeedControl::Ok { size, sha256 }).await.map_err(|e| format!("发 ok: {e}"))?;
+    write_frame(&mut stream, &SeedControl::ok(size, sha256)).await.map_err(|e| format!("发 ok: {e}"))?;
 
     let cipher = Cipher::from_pin(pin);
     let mut file = tokio::fs::File::open(&path).await.map_err(|e| format!("打开文件: {e}"))?;
@@ -228,12 +249,12 @@ async fn serve_one(
     }
     // 等下载端 done/error 控制帧
     match read_frame::<SeedControl>(&mut stream).await {
-        Ok(SeedControl::Done) => {
+        Ok(ctl) if ctl.done => {
             tracing::debug!(target: "file", "传输完成 idx={idx} size={size}");
             Ok(())
         }
-        Ok(SeedControl::Error(e)) => Err(format!("下载端报错: {e}")),
-        _ => Err("未收到 done".into()),
+        Ok(ctl) => Err(format!("下载端报错: {}", ctl.error)),
+        Err(e) => Err(format!("未收到 done: {e}")),
     }
 }
 
@@ -272,9 +293,9 @@ pub async fn fetch_file(
     };
     write_frame(&mut stream, &req).await.map_err(|e| format!("发请求头: {e}"))?;
     let (size, expect_sha) = match read_frame::<SeedControl>(&mut stream).await {
-        Ok(SeedControl::Ok { size, sha256 }) => (size, sha256),
-        Ok(SeedControl::Error(e)) => return Err(format!("供种者拒绝: {e}")),
-        _ => return Err("供种者响应异常".into()),
+        Ok(ctl) if ctl.ok => (ctl.size, ctl.sha256),
+        Ok(ctl) => return Err(format!("供种者拒绝: {}", ctl.error)),
+        Err(e) => return Err(format!("供种者响应异常: {e}")),
     };
 
     let cipher = Cipher::from_pin(pin);
@@ -318,14 +339,14 @@ pub async fn fetch_file(
     let got_sha = hasher.finalize().encode_hex();
     if got_sha != expect_sha {
         let _ = tokio::fs::remove_file(&partial).await;
-        write_frame(&mut stream, &SeedControl::Error("HASH_MISMATCH".into())).await.ok();
+        write_frame(&mut stream, &SeedControl::err("HASH_MISMATCH")).await.ok();
         return Err(format!("sha256 不符: 期望 {expect_sha} 实得 {got_sha}"));
     }
     // 原子改名 partial → dest
     tokio::fs::rename(&partial, dest)
         .await
         .map_err(|e| format!("改名落盘: {e}"))?;
-    write_frame(&mut stream, &SeedControl::Done).await.ok();
+    write_frame(&mut stream, &SeedControl::done()).await.ok();
 
     Ok(DownloadResult {
         name: name.into(),
@@ -435,6 +456,34 @@ mod tests {
 
         seeder.stop().await;
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 跨端格式契约：控制帧必须是扁平字段，不能退回 serde enum 的
+    /// {"Ok":{...}} / "Done" —— 否则 Android 端（手写 JSONObject）解析不了，双向下载失败。
+    #[test]
+    fn control_frame_flat_json_compatible_with_android() {
+        let ok = serde_json::to_value(SeedControl::ok(1024, "abc".into())).unwrap();
+        assert_eq!(ok["ok"], true, "成功帧须有扁平 ok 字段");
+        assert_eq!(ok["size"], 1024u64);
+        assert_eq!(ok["sha256"], "abc");
+        assert!(ok.get("Ok").is_none(), "不得出现 serde enum 变体键");
+
+        let err = serde_json::to_value(SeedControl::err("AUTH_FAILED")).unwrap();
+        assert_eq!(err["ok"], false);
+        assert_eq!(err["error"], "AUTH_FAILED");
+
+        let done = serde_json::to_value(SeedControl::done()).unwrap();
+        assert_eq!(done["done"], true);
+
+        // Android 成功帧格式能被 Rust 解析
+        let android_ok: SeedControl =
+            serde_json::from_str(r#"{"ok":true,"size":2048,"sha256":"def"}"#).unwrap();
+        assert!(android_ok.ok && android_ok.size == 2048 && android_ok.sha256 == "def");
+        // Android 错误帧 / done 帧
+        let android_err: SeedControl = serde_json::from_str(r#"{"error":"NOT_FOUND"}"#).unwrap();
+        assert!(!android_err.ok && android_err.error == "NOT_FOUND");
+        let android_done: SeedControl = serde_json::from_str(r#"{"done":true}"#).unwrap();
+        assert!(android_done.done);
     }
 
     fn protocol_now() -> u64 {

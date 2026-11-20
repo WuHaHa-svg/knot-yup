@@ -119,36 +119,6 @@ impl FileManager {
         Ok(file)
     }
 
-    /// 下载完成后登记（生成全新 file_id）：返回新 SharedFile 供广播 file_add。
-    pub async fn add_downloaded(
-        &self,
-        name: &str,
-        dest: &Path,
-        size: u64,
-        sha256: String,
-        mime: &str,
-    ) -> SharedFile {
-        let file = SharedFile {
-            file_id: knot_core::protocol::device_id(),
-            name: name.to_string(),
-            size,
-            sha256,
-            mime: mime.to_string(),
-            added_at: now_ms(),
-        };
-        let path = dest.to_string_lossy().to_string();
-        self.files
-            .lock()
-            .await
-            .push(LocalFile { file: file.clone(), path: path.clone() });
-        self.path_map
-            .write()
-            .ok()
-            .and_then(|mut m| m.insert(file.file_id.clone(), PathBuf::from(&path)));
-        self.persist().await;
-        file
-    }
-
     /// 删除本地清单条目（不动磁盘文件）。
     pub async fn remove_local(&self, file_ids: &[String]) {
         self.files

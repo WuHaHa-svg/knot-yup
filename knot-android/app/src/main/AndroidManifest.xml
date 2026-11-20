@@ -58,5 +58,14 @@
                 <action android:name="com.knotyup.android.COPY_CLIPBOARD" />
             </intent-filter>
         </receiver>
+
+        <!-- 悬浮通知「下载」按钮：从供种者 P2P 拉取共享文件 -->
+        <receiver
+            android:name=".service.FileDownloadReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.knotyup.android.DOWNLOAD_FILE" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

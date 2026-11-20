@@ -137,6 +137,7 @@ object AppState {
         val kind: Int = 0, // 0=普通 1=成功 2=错误
         val key: String? = null,
         val subs: Map<String, String> = emptyMap(),
+        val subtitle: String? = null, // 可选副标题（如共享者副标题显示文件名）
     )
 
     private val _toast = MutableStateFlow<ToastReq?>(null)
@@ -150,13 +151,13 @@ object AppState {
         _events.tryEmit(event)
     }
 
-    fun toast(msg: String, kind: Int = 0) {
-        _toast.value = ToastReq(msg, kind)
+    fun toast(msg: String, kind: Int = 0, subtitle: String? = null) {
+        _toast.value = ToastReq(msg, kind, subtitle = subtitle)
     }
 
     /** i18n 键 toast（进程层消息处理用，UI 层按当前语言解析）。 */
-    fun toastKey(key: String, kind: Int = 0, subs: Map<String, String> = emptyMap()) {
-        _toast.value = ToastReq(key = key, kind = kind, subs = subs)
+    fun toastKey(key: String, kind: Int = 0, subs: Map<String, String> = emptyMap(), subtitle: String? = null) {
+        _toast.value = ToastReq(key = key, kind = kind, subs = subs, subtitle = subtitle)
     }
 
     fun clearToast() {
@@ -313,6 +314,21 @@ object AppState {
                 if (list.none { it.fileId == event.file.fileId }) list.add(event.file)
                 cur[event.from] = list
                 _groupFiles.value = cur
+                // 他人共享：前台 toast「XXX共享了文件」+ 文件名副标题；后台发悬浮通知（含下载按钮）
+                if (event.from != device.id) {
+                    val fromName = _session.value.members.firstOrNull { it.id == event.from }?.name ?: ""
+                    if (inForeground) {
+                        toastKey("file_shared", 1, mapOf("name" to fromName), event.file.name)
+                    } else {
+                        appContext?.let { ctx ->
+                            val f = event.file
+                            com.knotyup.android.service.FileNotification.show(
+                                ctx, event.from, fromName, f.name, f.fileId,
+                                f.sha256, f.size, f.mime, f.addedAt,
+                            )
+                        }
+                    }
+                }
             }
             is GroupEvent.FileRemove -> {
                 val cur = _groupFiles.value.toMutableMap()
@@ -527,7 +543,34 @@ object AppState {
         _groupFiles.value = _groupFiles.value.mapValues { (_, list) -> list.filterNot { it.fileId in ids } }
     }
 
-    /** 从供种者下载文件 → 写公共 Downloads/knotShare → 登记新条目 → 广播成为供种者。 */
+    /** 下载成功提示：前台 toast（标题「XX下载成功」+ 副标题路径），后台发悬浮通知。 */
+    fun notifyDownloaded(fileName: String) {
+        if (inForeground) {
+            val ctx = appContext
+            val lang = ctx?.let { loadLang(it) } ?: "zh-Hans"
+            val pathSub = com.knotyup.android.ui.Strings.t(lang, "download_path")
+            toastKey("download_ok", 1, mapOf("name" to fileName), subtitle = pathSub)
+        } else {
+            appContext?.let { com.knotyup.android.service.FileNotification.showDownloaded(it, fileName) }
+        }
+    }
+
+    /** 悬浮通知「下载」按钮：从 extra 重建 SharedFile → P2P 下载 → toast 结果。IO 线程调用。 */
+    fun downloadFromNotification(context: Context, seedId: String, fileId: String, name: String,
+                                 sha256: String, size: Long, mime: String, addedAt: Long) {
+        if (appContext == null) appContext = context.applicationContext
+        val file = com.knotyup.android.net.SharedFile(fileId, name, size, sha256, mime, addedAt)
+        kotlinx.coroutines.runBlocking {
+            try {
+                downloadSharedFile(seedId, file)
+                notifyDownloaded(name)
+            } catch (e: Exception) {
+                toastKey("transfer_failed", 2)
+            }
+        }
+    }
+
+    /** 从供种者下载文件 → 写公共 Downloads/knotShare。纯本地行为：不登记共享清单、不广播、不成为供种者。 */
     suspend fun downloadSharedFile(seedId: String, file: SharedFile): String = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         val ctx = appContext ?: error("appContext 未注入")
         val seedAddr = session.value.members.firstOrNull { it.id == seedId }?.fileAddr
@@ -541,10 +584,14 @@ object AppState {
             put(android.provider.MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val uri = resolver.insert(collection, values) ?: error("创建下载文件失败")
+        // 下载进度常驻通知：无论成功/失败，结束都 cancel
+        com.knotyup.android.service.DownloadProgressNotification.show(ctx, file.name)
         try {
             val out = resolver.openOutputStream(uri) ?: error("打开输出流失败")
             try {
-                p2pFile.download(seedAddr, seedId, file.fileId, out)
+                p2pFile.download(seedAddr, seedId, file.fileId, out) { received, total ->
+                    com.knotyup.android.service.DownloadProgressNotification.update(ctx, file.name, received, total)
+                }
             } finally {
                 out.close()
             }
@@ -554,14 +601,10 @@ object AppState {
         } catch (e: Exception) {
             resolver.delete(uri, null, null)
             throw e
+        } finally {
+            com.knotyup.android.service.DownloadProgressNotification.cancel(ctx)
         }
-        // 下载完成：登记新 file_id 的条目，成为供种者
-        val newFile = file.copy(
-            fileId = java.util.UUID.randomUUID().toString(),
-            addedAt = System.currentTimeMillis(),
-        )
-        fileIndex.add(com.knotyup.android.file.LocalFile(newFile, uri.toString()))
-        broadcastFileAdd(newFile)
+        // 下载即终点：不再登记/广播，文件仅落盘到 Downloads/knotShare
         uri.toString()
     }
 

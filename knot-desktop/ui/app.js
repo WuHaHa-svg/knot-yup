@@ -116,7 +116,12 @@ async function main() {
     state.discovered = e.payload;
     renderDiscovered();
   });
-  await listen('knot://file-changed', async () => {
+  await listen('knot://file-changed', async (e) => {
+    // FileAdd 事件带 from/name：他人共享时弹 toast「XXX共享了文件」+ 文件名副标题；自己共享不弹
+    const p = e.payload;
+    if (p && p.from && p.name && state.device && p.from !== state.device.id) {
+      toast(t('file_shared', { name: nameOf(p.from) }), 'info', p.name);
+    }
     try {
       const f = await invoke('get_files', {});
       groupFiles = f.group_files || {};

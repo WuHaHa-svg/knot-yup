@@ -76,7 +76,7 @@
 | `encrypted` | 双向 | — | `{"type":"encrypted","data":"<base64(nonce‖AES-256-GCM 密文)>"}` |
 | `file_announce` | 成员→群主→全员 | 加密 | `{"type":"file_announce","from":"<id>","files":[{…SharedFile…}]}`——**入群/重连全量上报**自己文件夹（全量替换该设备条目） |
 | `file_list` | 群主→新入群成员 | 加密 | `{"type":"file_list","files":[[device_id, [SharedFile…]],…]}`——入群成功后群主下发的**全量列表快照**，新成员并入自己的数据（不放明文 `join_result`，避免文件名泄露） |
-| `file_add` | 任意→群主→全员 | 加密 | `{"type":"file_add","from":"<id>","file":{…SharedFile…}}`——自己文件夹新增；上传与下载完成共用，下载所得用**全新 file_id**（不沿用来源） |
+| `file_add` | 任意→群主→全员 | 加密 | `{"type":"file_add","from":"<id>","file":{…SharedFile…}}`——自己文件夹新增（**仅主动上传**；下载完成不再触发、不产生新 file_id） |
 | `file_remove` | 任意→群主→全员 | 加密 | `{"type":"file_remove","from":"<id>","file_ids":["<uuid>",…]}`——删除自己文件夹内的一条或多条（带设备 + id 数组；仅移清单，不动磁盘） |
 
 > 文件共享的完整设计（设备文件夹=供种者、群内同步 `Map<device_id, SharedFile[]>`、两级目录 UI、P2P 分块直传、跨群可见）见 [file-sharing.md](file-sharing.md)。上表三条仅覆盖经群主转发的**控制面信令**；文件本体走成员直连，群主零字节中转。已删 `file_seed` / `file_req`（文件夹归属即供种者，点谁的文件直接连谁）与 `SharedFile` 的 `owner` / `seeders` 字段。

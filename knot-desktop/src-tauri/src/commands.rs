@@ -282,10 +282,11 @@ pub(crate) async fn remove_files(
     Ok(())
 }
 
-/// 从某设备下载文件到 dest：P2P 拉取 + sha256 校验 + 登记本地 + 广播 file_add（成为新供种者）。
+/// 从某设备下载文件到 dest：P2P 拉取 + sha256 校验。
+/// 下载是纯本地行为——不登记到本地共享清单、不广播 file_add、不成为供种者（闭环已取消）。
 #[tauri::command]
 pub(crate) async fn download_file(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, SharedState>,
     seed_device_id: String,
     src_file_id: String,
@@ -308,21 +309,14 @@ pub(crate) async fn download_file(
         (pin, my_id, seed_addr, src_meta)
     };
     let dest_path = std::path::Path::new(&dest);
-    let result = fetch_file(
+    fetch_file(
         &seed_addr, &pin, &src_file_id, &seed_device_id, &my_id,
         &src_meta.name, &src_meta.mime, dest_path,
     )
     .await
     .map_err(|e| format!("下载失败: {e}"))?;
-    // 登记到本地清单（全新 file_id）并广播
-    let new_file = state
-        .files
-        .add_downloaded(&result.name, dest_path, result.size, result.sha256, &result.mime)
-        .await;
-    state.file_map.lock().await.entry(my_id.clone()).or_default().push(new_file.clone());
-    let _ = send_file_add(&state, &my_id, new_file.clone()).await;
-    let _ = app.emit("knot://file-changed", serde_json::json!({}));
-    Ok(serde_json::to_value(&new_file).unwrap())
+    // 下载即终点：不再登记/广播，前端也不消费返回值
+    Ok(serde_json::Value::Null)
 }
 
 async fn send_file_add(state: &SharedState, my_id: &str, file: SharedFile) -> Result<(), String> {

@@ -210,8 +210,10 @@ private fun App(
         toastMsg?.let { req ->
             val raw = req.key?.let { t(it) } ?: req.msg ?: return@let
             val text = req.subs.entries.fold(raw) { acc, (k, v) -> acc.replace("{$k}", v) }
+            // sonner 0.3.2 无独立 description 参数：副标题以换行附在 message 里
+            val full = if (req.subtitle.isNullOrBlank()) text else "$text\n${req.subtitle}"
             toaster.show(
-                message = text,
+                message = full,
                 type = when (req.kind) {
                     1 -> com.dokar.sonner.ToastType.Success
                     2 -> com.dokar.sonner.ToastType.Error

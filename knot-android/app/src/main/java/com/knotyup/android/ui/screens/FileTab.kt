@@ -178,7 +178,7 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileI
                                         scope.launch {
                                             AppState.toast(t("downloading"))
                                             runCatching { AppState.downloadSharedFile(viewDevice!!, file) }
-                                                .onSuccess { AppState.toast(t("download_done"), 1) }
+                                                .onSuccess { AppState.notifyDownloaded(file.name) }
                                                 .onFailure { AppState.toast(it.message ?: "error", 2) }
                                         }
                                     }

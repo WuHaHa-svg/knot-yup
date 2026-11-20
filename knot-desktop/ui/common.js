@@ -129,7 +129,7 @@ function hideLoading() {
   $('loadingModal').classList.add('hidden');
 }
 
-function toast(msg, type = 'info') {
+function toast(msg, type = 'info', subtitle = '') {
   // 后端错误码 → 本地化文案；未知内容原样展示
   const codeMap = {
     ALREADY_IN_GROUP: t('already_in_group'),
@@ -152,7 +152,10 @@ function toast(msg, type = 'info') {
     error: 'linear-gradient(135deg, #d94559, #c23346)',
   };
   Toastify({
-    text: msg,
+    // 有副标题时渲染两行（标题 + 副标题），否则保持原样单行
+    text: subtitle
+      ? `<div class="toast-line">${escapeHtml(msg)}</div><div class="toast-sub">${escapeHtml(subtitle)}</div>`
+      : msg,
     duration: 2200,
     gravity: 'top',
     position: 'center',
