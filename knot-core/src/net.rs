@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::protocol::{FileMap, SharedFile, ClipboardPayload, DeviceInfo};
+use crate::protocol::{SharedFile, ClipboardPayload, DeviceInfo};
 
 /// 核心层向上（UI 层）抛出的事件（v2，见 docs/ws-design.md §3）。
 #[derive(Debug, Clone)]
@@ -21,8 +21,6 @@ pub enum CoreEvent {
     Members(Vec<DeviceInfo>),
     /// 收到远端剪贴板（from 为来源设备；自己发的已在连接层过滤）
     Clipboard { from: String, payload: ClipboardPayload },
-    /// 群文件列表全量快照（入群 file_list 或全量同步时）
-    FileList { files: FileMap },
     /// 某设备文件夹新增文件（含自己广播的回声，UI 按 from 自行判断）
     FileAdd { from: String, file: SharedFile },
     /// 某设备删除文件（file_ids 数组）
@@ -57,7 +55,7 @@ mod tests {
     use std::time::Duration;
 
     fn dev(name: &str, addr: Option<String>) -> DeviceInfo {
-        DeviceInfo { id: device_id(), name: name.into(), platform: "test".into(), addr, file_addr: None, role: None }
+        DeviceInfo { id: device_id(), name: name.into(), platform: "test".into(), addr, file_addr: None, role: None, file_list: vec![] }
     }
 
     /// 收集事件直到条件满足（100ms 轮询，上限 3s）

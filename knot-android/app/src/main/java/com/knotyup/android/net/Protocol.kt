@@ -32,6 +32,8 @@ data class DeviceInfo(
     val fileAddr: String? = null,
     /** 成员身份：owner | member。服务端权威赋值；join 上报省略 */
     val role: String? = null,
+    /** 该成员共享的文件列表（文件夹随成员走）。join 时携带，随成员表同步 */
+    val fileList: List<SharedFile> = emptyList(),
 ) {
     val isOwner: Boolean get() = role == "owner"
 
@@ -40,6 +42,7 @@ data class DeviceInfo(
         addr?.let { put("addr", it) }
         fileAddr?.let { put("file_addr", it) }
         role?.let { put("role", it) }
+        put("file_list", org.json.JSONArray(fileList.map { it.toJson() }))
     }
 
     companion object {
@@ -48,6 +51,7 @@ data class DeviceInfo(
             if (o.has("addr")) o.getString("addr") else null,
             if (o.has("file_addr")) o.getString("file_addr") else null,
             if (o.has("role")) o.getString("role") else null,
+            if (o.has("file_list")) SharedFile.listFromJson(o.getJSONArray("file_list")) else emptyList(),
         )
     }
 }
@@ -103,13 +107,9 @@ sealed class Msg {
     object TransferError : Msg()
     /** 转让第三步：群主 → 全员迁移 */
     data class NewService(val addr: String, val pin: String, val owner: DeviceInfo) : Msg()
-    /** 文件共享①：入群全量上报自己文件夹 */
-    data class FileAnnounce(val from: String, val files: List<SharedFile>) : Msg()
-    /** 文件共享②：群主下发全量列表快照（按 device_id 分组） */
-    data class FileList(val files: Map<String, List<SharedFile>>) : Msg()
-    /** 文件共享③：文件夹新增（上传或下载完成共用） */
+    /** 文件共享①：文件夹新增 */
     data class FileAdd(val from: String, val file: SharedFile) : Msg()
-    /** 文件共享④：删除自己文件夹内条目 */
+    /** 文件共享②：删除自己文件夹内条目 */
     data class FileRemove(val from: String, val fileIds: List<String>) : Msg()
     data class Encrypted(val data: String) : Msg()
 
@@ -133,12 +133,6 @@ sealed class Msg {
             is TransferError -> JSONObject().put("type", "transfer_error")
             is NewService -> JSONObject().put("type", "new_service").put("addr", addr).put("pin", pin)
                 .put("owner", owner.toJson())
-            is FileAnnounce -> JSONObject().put("type", "file_announce").put("from", from)
-                .put("files", org.json.JSONArray(files.map { it.toJson() }))
-            is FileList -> JSONObject().put("type", "file_list").put("files",
-                org.json.JSONObject().also { obj ->
-                    files.forEach { (dev, list) -> obj.put(dev, org.json.JSONArray(list.map { it.toJson() })) }
-                })
             is FileAdd -> JSONObject().put("type", "file_add").put("from", from).put("file", file.toJson())
             is FileRemove -> JSONObject().put("type", "file_remove").put("from", from)
                 .put("file_ids", org.json.JSONArray(fileIds))
@@ -182,14 +176,6 @@ sealed class Msg {
                         o.getString("addr"), o.getString("pin"),
                         DeviceInfo.fromJson(o.getJSONObject("owner")),
                     )
-                    "file_announce" -> FileAnnounce(
-                        o.getString("from"), SharedFile.listFromJson(o.getJSONArray("files")),
-                    )
-                    "file_list" -> o.getJSONObject("files").let { obj ->
-                        FileList(obj.keys().asSequence().associate { dev ->
-                            dev to SharedFile.listFromJson(obj.getJSONArray(dev))
-                        })
-                    }
                     "file_add" -> FileAdd(o.getString("from"), SharedFile.fromJson(o.getJSONObject("file")))
                     "file_remove" -> FileRemove(
                         o.getString("from"),

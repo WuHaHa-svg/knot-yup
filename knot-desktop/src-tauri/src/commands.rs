@@ -49,9 +49,11 @@ pub(crate) async fn create_group(
         device.file_addr = Some(addr);
         *state.device.lock().await = Some(device.clone());
     }
-    // 群主本地文件列表先登记自己的文件夹
+    // 群主本地文件列表写入本机 device.file_list（成员表即文件列表真相源）
     {
         let mine = state.files.shared_files().await;
+        device.file_list = mine.clone();
+        *state.device.lock().await = Some(device.clone());
         state.file_map.lock().await.insert(device.id.clone(), mine);
     }
     let (server, port) = GroupServer::start(port.unwrap_or(0), pin.clone(), device.clone(), core_tx)
@@ -113,12 +115,16 @@ pub(crate) async fn join_group(
     if let Some(addr) = state.files.ensure_seeder(&pin, &device.id, &local_ip()).await {
         device.file_addr = Some(addr);
     }
+    // 入群携带自己的 fileList（成员表即文件列表真相源）
+    {
+        let mine = state.files.shared_files().await;
+        device.file_list = mine.clone();
+        *state.device.lock().await = Some(device.clone());
+        state.file_map.lock().await.insert(device.id.clone(), mine);
+    }
     let client = GroupClient::connect(&addr, &pin, device.clone(), core_tx).await.inspect_err(|e| {
         dlog("err/join", format!("{e}"));
     })?;
-    // 入群成功：全量上报自己文件夹
-    let mine = state.files.shared_files().await;
-    let _ = client.send_file_announce(mine).await;
 
     *state.session.lock().await = Some(Session {
         role: Role::Member,
@@ -252,8 +258,13 @@ pub(crate) async fn share_file(
 ) -> Result<serde_json::Value, String> {
     let file = state.files.add_local(&path).await?;
     let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
-    // 更新自己本地条目并广播（seeder 的 resolver 动态查 path_map，无需重启、端口稳定）
+    // 更新自己本地条目 + device.file_list（Members 广播携带真相源）+ 广播 file_add
     state.file_map.lock().await.entry(my_id.clone()).or_default().push(file.clone());
+    if let Some(d) = state.device.lock().await.as_mut() {
+        if !d.file_list.iter().any(|f| f.file_id == file.file_id) {
+            d.file_list.push(file.clone());
+        }
+    }
     match send_file_add(&state, &my_id, file.clone()).await {
         Ok(_) => {}
         Err(e) => return Err(e),
@@ -273,6 +284,9 @@ pub(crate) async fn remove_files(
     let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
     if let Some(list) = state.file_map.lock().await.get_mut(&my_id) {
         list.retain(|f| !file_ids.contains(&f.file_id));
+    }
+    if let Some(d) = state.device.lock().await.as_mut() {
+        d.file_list.retain(|f| !file_ids.contains(&f.file_id));
     }
     match send_file_remove(&state, &my_id, file_ids).await {
         Ok(_) => {}
@@ -344,3 +358,4 @@ async fn send_file_remove(state: &SharedState, my_id: &str, ids: Vec<String>) ->
         Err("NO_SESSION".into())
     }
 }
+

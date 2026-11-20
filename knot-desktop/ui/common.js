@@ -152,10 +152,10 @@ function toast(msg, type = 'info', subtitle = '') {
     error: 'linear-gradient(135deg, #d94559, #c23346)',
   };
   Toastify({
-    // 有副标题时渲染两行（标题 + 副标题），否则保持原样单行
+    // Toastify 把 text 当 HTML 渲染：无论有无副标题都要 escape，避免文案里的 < > & 被当成标签
     text: subtitle
       ? `<div class="toast-line">${escapeHtml(msg)}</div><div class="toast-sub">${escapeHtml(subtitle)}</div>`
-      : msg,
+      : escapeHtml(msg),
     duration: 2200,
     gravity: 'top',
     position: 'center',

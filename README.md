@@ -66,7 +66,7 @@ Android 10+ 禁止后台应用读取剪贴板，KnotYup 因此按前后台分层
 - [x] **M2.2a Android**：群组前台服务 + 后台新剪贴板悬浮通知（一键复制）
 - [ ] **M2.2b Android**：悬浮窗/快捷磁贴、内置 IME（14+ 后台读正解）、评估迁移 UniFFI 复用 knot-core
 - [ ] **M3 触控板**：触摸采集 → 鼠标注入、手势、延迟调优
-- [ ] **M4 文件共享**：设备级持久共享文件夹 + 入群全量上报 + P2P 分块直传 + 下载转种子，桌面/安卓群页面新增文件 tab，设计见 [docs/file-sharing.md](docs/file-sharing.md)
+- [x] **M4 文件共享**：设备级持久共享文件夹（fileList 内嵌成员表）+ P2P 分块直传 + 下载进度通知，桌面/安卓群页面文件 tab，设计见 [docs/file-sharing.md](docs/file-sharing.md)
 - [ ] **M5 打磨**：图片预览、防休眠、打包分发
 
 ## 仓库结构

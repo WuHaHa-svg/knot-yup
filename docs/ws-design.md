@@ -11,7 +11,7 @@
 - **端口**：发现 UDP 45691（拉取式 REQ/RESP）；ws 端口群主动态分配。
 - **发现模型（v2 拉取式）**：扫描端周期发 REQ，群主被动应答 RESP。群主不再周期广播。
 - **心跳**：30s 一次，pong 携带成员表 + 身份；单次 3s 超时即判失联。
-- **编码**：JSON 文本帧 `{"type":"snake_case", ...}`；握手与 ping/pong 明文，业务消息全部装 `encrypted` 信封（AES-256-GCM，密钥 = SHA256("knotyup-v1|PIN")）。
+- **编码**：JSON 文本帧 `{"type":"snake_case", ...}`。**只有剪贴板 `clipboard` 装 `encrypted` 信封**（AES-256-GCM，密钥 = SHA256("knotyup-v1|PIN")）；其余消息（含 join/ping/pong/members 与文件相关 file_add/file_remove）明文——文件列表随成员表明文传输，接受局域网嗅探风险。
 
 ## 2. 发现协议（UDP 45691，KNOTYUP2）
 
@@ -53,9 +53,12 @@
   "name": "Jackey 的 Mac",       // 展示名
   "platform": "macos",           // macos / windows / android
   "addr": "10.0.0.5:35217",     // 本机 standby 服务地址（成员上报；群主/未预留时为 null）
-  "role": "owner"               // owner | member（服务端权威赋值；join 时上报省略，默认 member）
+  "file_addr": "10.0.0.5:47113",// 文件共享 P2P 供种地址（与 ws/standby 端口独立）
+  "role": "owner",              // owner | member（服务端权威赋值；join 时上报省略，默认 member）
+  "file_list": [{…SharedFile…}] // 该成员共享的文件列表（文件夹随成员走）
 }
 ```
+**成员表即文件列表唯一真相源**：`file_list` 内嵌在 DeviceInfo，随 join/join_result/ping/pong/members 同步；服务端不再单独维护文件快照，客户端收到成员表即从各 `file_list` 拼出全群文件夹。
 
 ### 3.2 消息表（JSON 示例列均为完整载荷；encrypted 信封内的业务消息结构即示例中的 message 字段）
 
@@ -66,7 +69,7 @@
 | `ping` | 成员→群主 | 明文 | `{"type":"ping","device":{…DeviceInfo…},"seq":7,"ts_ms":1760000000000}` |
 | `pong` | 群主→成员 | 明文 | `{"type":"pong","members":[{…},{…}],"seq":7,"ts_ms":1760000000031}`——seq 回应对应 ping；成员表快照即状态同步（角色看各成员的 role） |
 | `clipboard` | 成员→群主→广播 | 加密 | `{"type":"clipboard","from":"<发送者 device.id>","payload":{"kind":"text","text":"hello","hash":"a1b2c3…(16 hex)"}}` |
-| `members` | 群主→全员 | 加密 | `{"type":"members","members":[{…},{…}]}` |
+| `members` | 群主→全员 | 明文 | `{"type":"members","members":[{…},{…}]}`——成员表含各自 file_list，即文件列表全量真相源 |
 | `kick` | 群主→目标 | 加密 | `{"type":"kick","reason":"KICKED"}` |
 | `dissolve` | 群主→全员 | 加密 | `{"type":"dissolve"}` |
 | `transfer_offer` | 群主→被转让者 | 加密 | `{"type":"transfer_offer","pin":"510443"}` |
@@ -74,12 +77,10 @@
 | `transfer_error` | 群主→被转让者 | 加密 | `{"type":"transfer_error"}`——转让已失败（群主收到 ready 已超时），目标静默关闭多余的 standby 服务 |
 | `new_service` | 群主→全员 | 加密 | `{"type":"new_service","addr":"10.0.0.9:41235","pin":"510443","owner":{…DeviceInfo…}}` |
 | `encrypted` | 双向 | — | `{"type":"encrypted","data":"<base64(nonce‖AES-256-GCM 密文)>"}` |
-| `file_announce` | 成员→群主→全员 | 加密 | `{"type":"file_announce","from":"<id>","files":[{…SharedFile…}]}`——**入群/重连全量上报**自己文件夹（全量替换该设备条目） |
-| `file_list` | 群主→新入群成员 | 加密 | `{"type":"file_list","files":[[device_id, [SharedFile…]],…]}`——入群成功后群主下发的**全量列表快照**，新成员并入自己的数据（不放明文 `join_result`，避免文件名泄露） |
-| `file_add` | 任意→群主→全员 | 加密 | `{"type":"file_add","from":"<id>","file":{…SharedFile…}}`——自己文件夹新增（**仅主动上传**；下载完成不再触发、不产生新 file_id） |
-| `file_remove` | 任意→群主→全员 | 加密 | `{"type":"file_remove","from":"<id>","file_ids":["<uuid>",…]}`——删除自己文件夹内的一条或多条（带设备 + id 数组；仅移清单，不动磁盘） |
+| `file_add` | 任意→群主→全员 | 明文 | `{"type":"file_add","from":"<id>","file":{…SharedFile…}}`——自己文件夹新增（**仅主动上传**；下载完成不再触发、不产生新 file_id） |
+| `file_remove` | 任意→群主→全员 | 明文 | `{"type":"file_remove","from":"<id>","file_ids":["<uuid>",…]}`——删除自己文件夹内的一条或多条（带设备 + id 数组；仅移清单，不动磁盘） |
 
-> 文件共享的完整设计（设备文件夹=供种者、群内同步 `Map<device_id, SharedFile[]>`、两级目录 UI、P2P 分块直传、跨群可见）见 [file-sharing.md](file-sharing.md)。上表三条仅覆盖经群主转发的**控制面信令**；文件本体走成员直连，群主零字节中转。已删 `file_seed` / `file_req`（文件夹归属即供种者，点谁的文件直接连谁）与 `SharedFile` 的 `owner` / `seeders` 字段。
+> 文件共享的完整设计（设备文件夹=供种者、`file_list` 内嵌成员表=唯一真相源、两级目录 UI、P2P 分块直传、跨群可见）见 [file-sharing.md](file-sharing.md)。上表两条（`file_add`/`file_remove`）仅覆盖文件增删的**增量控制面信令**；全量列表走成员表；文件本体走成员直连，群主零字节中转。已删 `file_announce` / `file_list`（file_list 内嵌成员表）、`file_seed` / `file_req`（文件夹归属即供种者，点谁的文件直接连谁）与 `SharedFile` 的 `owner` / `seeders` 字段。
 
 > 群主身份判定：`members` 中 `role=="owner"` 的那条（不再依赖数组位置）。
 

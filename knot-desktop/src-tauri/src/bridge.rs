@@ -36,6 +36,15 @@ pub(crate) async fn forward_core_events(
                     }
                 };
                 let _ = app.emit("knot://members", &members);
+                // fileList 内嵌在成员表：成员表即文件列表唯一真相源，从它重建 file_map
+                {
+                    let mut fm = state.file_map.lock().await;
+                    fm.clear();
+                    for d in &members {
+                        fm.insert(d.id.clone(), d.file_list.clone());
+                    }
+                    let _ = app.emit("knot://file-changed", serde_json::json!({}));
+                }
                 // 升主后 6s 静默期 / 转让进行中：迁移潮造成的成员差量不提示（不是「有人入群/离群」）
                 let promoted_recently = {
                     let at = state.promoted_at.load(std::sync::atomic::Ordering::Relaxed);
@@ -46,13 +55,8 @@ pub(crate) async fn forward_core_events(
                 if had_session && !prev.is_empty() && !promoted_recently && !transferring {
                     use std::collections::HashSet;
                     let prev_ids: HashSet<String> = prev.iter().map(|d| d.id.clone()).collect();
-                let new_ids: HashSet<String> = members.iter().map(|d| d.id.clone()).collect();
-                // 文件列表随成员推演：离群设备的整个文件夹条目移除；新成员空文件夹由 file_announce 填充
-                {
-                    let mut fm = state.file_map.lock().await;
-                    fm.retain(|id, _| new_ids.contains(id));
-                }
-                for d in &members {
+                    let new_ids: HashSet<String> = members.iter().map(|d| d.id.clone()).collect();
+                    for d in &members {
                     if !prev_ids.contains(&d.id) && d.id != own_id {
                             let _ = app.emit(
                                 "knot://member-change",
@@ -87,11 +91,6 @@ pub(crate) async fn forward_core_events(
                     "knot://clipboard",
                     serde_json::json!({ "from": from, "text": payload.text, "hash": payload.hash }),
                 );
-            }
-            Ok(CoreEvent::FileList { files }) => {
-                dlog("evt/file-list", format!("devices={}", files.len()));
-                *state.file_map.lock().await = files.clone();
-                let _ = app.emit("knot://file-changed", serde_json::json!({}));
             }
             Ok(CoreEvent::FileAdd { from, file }) => {
                 dlog("evt/file-add", format!("from={from} id={}", file.file_id));

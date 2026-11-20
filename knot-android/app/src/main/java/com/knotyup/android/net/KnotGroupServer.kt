@@ -21,10 +21,8 @@ class KnotGroupServer(
 ) : WebSocketServer(InetSocketAddress(port)) {
 
     private val cipher = KnotCipher(pin)
-    private val owner = owner.copy(role = "owner") // 服务端权威赋值
+    private var owner = owner.copy(role = "owner") // 服务端权威赋值；file_list 随本机文件增删变化
     private val members = LinkedHashMap<String, Pair<DeviceInfo, WebSocket>>()
-    // 群文件列表（device_id → 文件）；与成员表一样由服务端汇总、入群下发快照
-    private val files = LinkedHashMap<String, MutableList<SharedFile>>()
     // 心跳看门狗：每连接最近活跃时间（任何入站消息都算活跃）
     private val lastActive = ConcurrentHashMap<WebSocket, Long>()
     // 转让回执等待表：device_id → future（transfer() 注册，onMessage 收到 TransferReady 完成）
@@ -45,8 +43,7 @@ class KnotGroupServer(
     override fun onClose(ws: WebSocket, code: Int, reason: String, remote: Boolean) {
         lastActive.remove(ws)
         val id = members.entries.firstOrNull { it.value.second == ws }?.key ?: return
-        members.remove(id)
-        files.remove(id)
+        members.remove(id) // fileList 内嵌在成员表里，移除成员即移除其文件夹
         transferWaiters.remove(id)?.cancel(true)
         broadcastMembers()
     }
@@ -70,8 +67,7 @@ class KnotGroupServer(
                 val dev = msg.device.copy(role = "member") // 服务端权威赋值
                 members[dev.id] = dev to ws
                 ws.send(Msg.JoinResult(true, null, memberList()).toJson())
-                // 入群成功下发文件列表全量快照（加密，不放明文 join_result）
-                ws.send(Msg.FileList(files.mapValues { it.value.toList() }).sealed(cipher).toJson())
+                // fileList 已内嵌在成员表里，JoinResult.members 自带全群文件列表
                 broadcastMembers()
             } else {
                 ws.send(Msg.JoinResult(false, "WRONG_PIN", emptyList()).toJson())
@@ -97,25 +93,20 @@ class KnotGroupServer(
                     if (d.id != senderId) runCatching { w.send(message) }
                 }
             }
-            is Msg.FileAnnounce -> {
-                // 全量替换该设备条目。客户端读循环不解析 file_announce（只认 file_list/add/remove），
-                // 故群主广播 file_list 全量快照——空文件夹也能出现在所有端。
-                files[inner.from] = inner.files.toMutableList()
-                val snapshot = files.mapValues { it.value.toList() }
-                onEvent(GroupEvent.FileList(snapshot))
-                val fl = Msg.FileList(snapshot).sealed(cipher).toJson()
-                members.values.forEach { (_, w) -> runCatching { w.send(fl) } }
-            }
             is Msg.FileAdd -> {
-                val list = files.getOrPut(inner.from) { mutableListOf() }
-                if (list.none { it.fileId == inner.file.fileId }) list.add(inner.file)
+                // 成员表是文件列表唯一真相源：更新发送者 DeviceInfo.file_list
+                updateMemberFiles(inner.from) { list ->
+                    if (list.none { it.fileId == inner.file.fileId }) list.add(inner.file)
+                }
                 onEvent(GroupEvent.FileAdd(inner.from, inner.file))
                 members.values.forEach { (d, w) ->
                     if (d.id != senderId) runCatching { w.send(message) }
                 }
             }
             is Msg.FileRemove -> {
-                files[inner.from]?.let { it.removeAll { f -> f.fileId in inner.fileIds } }
+                updateMemberFiles(inner.from) { list ->
+                    list.removeAll { f -> f.fileId in inner.fileIds }
+                }
                 onEvent(GroupEvent.FileRemove(inner.from, inner.fileIds))
                 members.values.forEach { (d, w) ->
                     if (d.id != senderId) runCatching { w.send(message) }
@@ -157,20 +148,30 @@ class KnotGroupServer(
         members.values.forEach { (_, w) -> runCatching { w.send(sealed) } }
     }
 
-    /** 群主本机新增文件 → 更新汇总 + 加密广播。 */
+    /** 群主本机新增文件 → 更新 owner.file_list + 加密广播。 */
     fun broadcastFileAdd(file: SharedFile) {
-        files.getOrPut(owner.id) { mutableListOf() }.add(file)
+        if (owner.fileList.none { it.fileId == file.fileId }) {
+            owner = owner.copy(fileList = owner.fileList + file)
+        }
         val sealed = Msg.FileAdd(owner.id, file).sealed(cipher).toJson()
         members.values.forEach { (_, w) -> runCatching { w.send(sealed) } }
         onEvent(GroupEvent.FileAdd(owner.id, file))
     }
 
-    /** 群主本机删除文件 → 更新汇总 + 加密广播。 */
+    /** 群主本机删除文件 → 更新 owner.file_list + 加密广播。 */
     fun broadcastFileRemove(fileIds: List<String>) {
-        files[owner.id]?.let { it.removeAll { f -> f.fileId in fileIds } }
+        owner = owner.copy(fileList = owner.fileList.filterNot { it.fileId in fileIds })
         val sealed = Msg.FileRemove(owner.id, fileIds).sealed(cipher).toJson()
         members.values.forEach { (_, w) -> runCatching { w.send(sealed) } }
         onEvent(GroupEvent.FileRemove(owner.id, fileIds))
+    }
+
+    /** 更新成员表里某设备 DeviceInfo.file_list（Pair 不可变，remove + put）。 */
+    private fun updateMemberFiles(deviceId: String, mutate: (MutableList<SharedFile>) -> Unit) {
+        val entry = members[deviceId] ?: return
+        val list = entry.first.fileList.toMutableList()
+        mutate(list)
+        members[deviceId] = entry.first.copy(fileList = list) to entry.second
     }
 
     /** 移出成员。 */

@@ -48,6 +48,9 @@ pub struct DeviceInfo {
     /// 成员身份：owner | member。服务端权威赋值；join 上报省略（默认 member）。
     #[serde(default)]
     pub role: Option<String>,
+    /// 该成员共享的文件列表（文件夹随成员走）。join 时携带，随成员表同步。
+    #[serde(default)]
+    pub file_list: Vec<SharedFile>,
 }
 
 impl DeviceInfo {
@@ -149,21 +152,12 @@ pub enum Message {
         pin: String,
         owner: DeviceInfo,
     },
-    /// 文件共享①：入群/重连时全量上报自己文件夹（加密；全量替换该设备条目）
-    FileAnnounce {
-        from: String,
-        files: Vec<SharedFile>,
-    },
-    /// 文件共享②：群主→新入群成员的全量列表快照（加密；不放明文 join_result 避免文件名泄露）
-    FileList {
-        files: FileMap,
-    },
-    /// 文件共享③：自己文件夹新增（上传或下载完成共用；下载完成用全新 file_id）
+    /// 文件共享①：文件夹新增（群主汇总 + 广播全员）
     FileAdd {
         from: String,
         file: SharedFile,
     },
-    /// 文件共享④：删除自己文件夹内的一条或多条（带设备 + id 数组；仅移清单）
+    /// 文件共享②：删除自己文件夹内的一条或多条（带设备 + id 数组；仅移清单）
     FileRemove {
         from: String,
         file_ids: Vec<String>,

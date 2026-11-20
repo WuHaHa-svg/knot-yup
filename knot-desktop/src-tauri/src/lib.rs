@@ -72,6 +72,7 @@ pub fn run() {
                 addr: None,
                 file_addr: None,
                 role: None,
+                file_list: vec![],
             };
 
             // 剪贴板监视线程 + 本机变化通道

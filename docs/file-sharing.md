@@ -1,11 +1,11 @@
 # 文件共享设计（M4）
 
 > 状态：**设计定稿，待实现**。本文是文件共享功能的唯一设计来源，实现前先读本文与 [ws-design.md](ws-design.md)。
-> 依赖：v2 群组协议（发现 / 入群 / 心跳 / 加密信封）。
+> 依赖：v2 群组协议（发现 / 入群 / 心跳；仅剪贴板内容走加密信封）。
 
 ## 1. 核心概念：设备文件夹 = 供种者
 
-整个设计建立在一个等式上：**文件在谁的文件夹里，谁就是它的供种者**。群里看到的文件列表，就是各设备文件夹的并集，按设备名分组——不需要单独的 `owner` / `seeders` 字段。
+整个设计建立在一个等式上：**文件在谁的文件夹里，谁就是它的供种者**。群里看到的文件列表，就是各设备文件夹的并集，按设备名分组——不需要单独的 `owner` / `seeders` 字段。**每个设备的文件夹就是它的 `DeviceInfo.file_list` 字段**——文件夹从始至终跟着成员走，成员表即文件列表的唯一真相源。
 
 ```
 群文件列表（群内同步的唯一信息）
@@ -24,16 +24,16 @@
 
 ### 两层结构
 
-| | **本地共享清单**（设备级、持久） | **群文件列表**（群级、会话态） |
+| | **本地共享清单**（设备级、持久） | **群文件列表**（= 成员表里的 file_list） |
 |---|---|---|
-| 存什么 | 本设备文件夹内的文件（元数据 + 路径） | 各设备上报的清单，按 `device_id` 分组 |
-| 在哪 | 设备磁盘 + 一份持久化清单 | 每个成员各缓存一份，群主汇总广播 |
-| 生命周期 | **永久**，与群无关 | 随成员进出群增减 |
-| 离群后 | 文件与清单一动不动 | 该设备整个文件夹条目移除 |
-| 再加群 | 内容还在 | **入群全量上报**，自动恢复 |
+| 存什么 | 本设备文件夹内的文件（元数据 + 路径） | 各设备 `DeviceInfo.file_list`，按 `device_id` 分组 |
+| 在哪 | 设备磁盘 + 一份持久化清单 | 内嵌在成员表 DeviceInfo；每个成员各缓存一份，群主汇总广播 |
+| 生命周期 | **永久**，与群无关 | 随成员进出群增减（成员条目在文件夹在，成员走文件夹走） |
+| 离群后 | 文件与清单一动不动 | 该成员条目移除 → 其文件夹自动消失（无需手工推演） |
+| 再加群 | 内容还在 | **join 时携带 file_list**，自动恢复 |
 
 **用户确认的语义（不可推翻）**：
-1. 文件夹跟设备走、不跟群走——**跨群可见**：加入任何群都会上报自己文件夹的全部内容。
+1. 文件夹跟设备走、不跟群走——**跨群可见**：join 时 DeviceInfo 携带自己的 file_list。
 2. UI 一级目录是**设备名文件夹**，点进去才是文件；重复文件按各自所在文件夹分别显示。
 3. 下载完成 = 文件落盘到本地、**不**往自己文件夹加记录、**不**成为供种者（供种仅来自主动共享）；供种服务设备级常驻，不随离群停止。
 4. 只记路径、不复制；**删除只移清单条目，绝不删磁盘真实文件**；只能删自己文件夹内的。
@@ -48,16 +48,17 @@
 ## 3. 总体架构
 
 ```
-控制面（小信令，走群主 ws 加密广播）     数据面（文件本体，成员 P2P）
-  file_announce  入群全量上报文件夹       供种者起 TCP 文件服务
-  file_list      群主下发全量快照(新成员)  下载者连该文件夹所属设备的 file_addr
-  file_add       文件夹新增文件           分块 + AES-GCM + sha256 校验
-  file_remove    文件夹删除文件(批量 id)
+控制面（小信令，走群主 ws）                数据面（文件本体，成员 P2P）
+  成员表 DeviceInfo.file_list              供种者起 TCP 文件服务
+    └ join/join_result/ping/pong/members     下载者连该文件夹所属设备的 file_addr
+       （文件列表随成员表明文同步）            分块 + AES-GCM + sha256 校验
+  file_add       文件夹新增文件（明文）
+  file_remove    文件夹删除文件（明文）
 ```
 
-- **群主**：只做信令路由 + 汇总广播，**零文件字节中转**、不持久化列表。
-- **每个设备**：文件夹里有文件就可供种，同时也能下载。
-- **群主转让**：无需搬文件——文件都在各自设备；各成员靠 `file_announce` 重建列表。
+- **群主**：只做信令路由 + 汇总广播成员表，**零文件字节中转**、不持久化文件列表（file_list 在成员表里，随成员表走）。
+- **每个设备**：文件夹（= 自己 DeviceInfo.file_list）里有文件就可供种，同时也能下载。
+- **群主转让**：无需搬文件——文件都在各自设备；新群主的服务端从各成员的 DeviceInfo.file_list 拿到完整列表。
 
 ## 4. 数据模型
 
@@ -65,7 +66,7 @@
 
 ```
 SharedFile {
-  file_id:  uuid,          // 全局唯一；上传和下载完成都各自生成新 id，不沿用来源文件
+  file_id:  uuid,          // 全局唯一；每次主动上传各自生成，不沿用来源文件
   name:     "a.zip",
   size:     1048576,
   sha256:   "…",           // 仅用于下载后完整性校验（不用于跨设备合并、不决定 id）
@@ -83,40 +84,35 @@ SharedFile {
 - **删除** = 只从自己清单移除条目，**磁盘文件一律不动**；不能删别人文件夹的。
 - 路径失效（原文件被移走）：UI 标注"文件不可达"，该条不供种；不自动删条目。
 
-### 4.2 群侧文件列表（`Map<device_id, SharedFile[]>`）
+### 4.2 群文件列表（= 成员表里各 DeviceInfo.file_list 的并集）
 
-```
-{
-  "<A.id>": [SharedFile(a.zip), SharedFile(doc.pdf)],
-  "<B.id>": [SharedFile(a.zip), SharedFile(photo.png)],
-  "<C.id>": [SharedFile(song.mp3)],
-}
-```
+群文件列表**不再单独存储**，它就是成员表：`members[].file_list`。每个设备收到成员表（join_result / members / pong）后，从各成员的 `file_list` 拼出全群视图。
 
-- **没有 `owner`、没有 `seeders`**：条目的 key 就是拥有者/供种者。只有**主动共享**同一文件的设备才会各自出现在不同 key 下；单纯下载不会让自己文件夹多出条目。
+- **没有 `owner`、没有 `seeders`**：条目的 key 就是成员 id（= 供种者）。只有**主动共享**同一文件的设备才会各自出现在不同成员下；单纯下载不会让自己文件夹多出条目。
 - 每个设备文件夹内按 `added_at` 排序。
 - 同一 sha256 在不同设备文件夹下是**两条独立记录、各自独立 file_id**，不做合并。
+- **离群自动清理**：成员条目从成员表消失 → 其 folder 随之消失，无需手工推演。
 
-## 5. 控制面信令（走 ws，加密信封）
+## 5. 控制面信令（走 ws，明文）
 
-在 [ws-design.md](ws-design.md) §3 消息表登记，共 4 条：
+在 [ws-design.md](ws-design.md) §3 消息表登记。文件列表**全量走成员表**（内嵌 `DeviceInfo.file_list`），只有文件增删走两条增量信令：
 
 | 消息 | 方向 | 载荷 | 用途 |
 |---|---|---|---|
-| `file_announce` | 成员→群主→全员 | `{from, files:[SharedFile…]}` | **入群/重连时全量上报**自己文件夹（全量替换该设备的条目） |
 | `file_add` | 任意→群主→全员 | `{from, file:SharedFile}` | 自己文件夹新增（**仅主动上传**；下载完成不再触发） |
 | `file_remove` | 任意→群主→全员 | `{from, file_ids:[uuid…]}` | 删除自己文件夹内的一条或多条（仅移清单，不动磁盘） |
 
-**新成员如何拿到已有文件列表**（场景 1 的空白，已定）：群主维护完整 `Map<device_id, SharedFile[]>`。B 入群成功后，群主**立即下发一条加密的全量列表快照**给 B（B 并入自己的数据即得全群视图），后续增量靠广播。新成员不需要等老成员逐个重报。
+**新成员如何拿到已有文件列表**：群主维护成员表，每个成员的 `DeviceInfo.file_list` 就是它的文件夹。B 入群时 join 携带自己的 file_list；群主回 `join_result.members`（含全部成员及其 file_list），B 从成员表直接拼出全群视图。**无需单独的 file_list 快照消息**——成员表本身就是快照。
 
-> 为什么不放进 `join_result`：`join_result` 是**明文握手消息**（此时尚未建立加密上下文），而文件列表是业务数据。塞进明文会让文件名暴露给局域网嗅探者，违反 ws-design.md §1「业务消息全部装 `encrypted` 信封」的约定。落地为"紧随 `join_result` 的加密全量快照"——对 B 而言同样是入群即拿到完整 Map，用户视角无差别。实现可用一条 `file_announce` 的响应变体或专用 `file_list`，加入 `encrypted` 信封即可。
+> **文件名改为明文**：早期设计把文件列表塞进加密 `file_list` 消息，怕 join_result 明文泄露文件名。新设计推翻了这条——文件相关消息（含成员表）一律明文，接受局域网嗅探风险；**只有剪贴板内容加密**（见 ws-design.md §1）。
 
-- 群主收到任一 file_* 消息 → 更新 Map 对应 key → 广播给全员；各端按 `from` 更新/替换对应设备的文件夹条目。
-- 群主不持久化到磁盘（会话内缓存）；新群主靠各成员 `file_announce` 重建。
-- **离群无需任何文件信令**：各端收到 `members` 广播后发现某设备已不在成员表，**自行推演**删除 `Map` 中该设备的整个文件夹条目；本地磁盘与清单不动。
-- **删除走独立 `file_remove`**：全量 `file_announce` 只用于汇报"我现在有什么"，删除明确发 `{from, file_ids[]}`（带设备 + 待删 id 数组），避免用"全量汇报里少了某条"来隐式推断删除。
-- **已删（设计简化）**：`file_seed`（下载完成复用 `file_add`）、`file_req`（点谁的文件直接连谁，无需请求）、`owner`/`seeders` 字段（文件夹归属已表达）。
+- 群主收到 `file_add`/`file_remove` → 更新成员表里对应 `DeviceInfo.file_list` → 广播给全员（明文）；各端据此增量更新自己缓存的文件夹。
+- 群主不持久化文件列表到磁盘（会话内随成员表缓存）；新群主靠成员表里各 DeviceInfo.file_list 即可。
+- **离群无需任何文件信令**：成员条目从 `members` 广播消失 → 各端从成员表重建视图，其整个文件夹随之消失；本地磁盘与清单不动。
+- **删除走独立 `file_remove`**：明确发 `{from, file_ids[]}`，避免用"成员表 file_list 里少了某条"来隐式推断删除。
+- **已删（设计简化）**：`file_announce` / `file_list`（file_list 内嵌成员表）、`file_seed`、`file_req`（点谁的文件直接连谁，无需请求）、`owner`/`seeders` 字段（文件夹归属已表达）。
 - **已取消（下载闭环）**：下载完成后不再登记自己清单、不再广播 `file_add`、不生成新 file_id、不成为供种者。下载即终点，避免"下载≈共享"的隐式闭环；要让文件对群可见须主动再次共享。
+- **传输状态（暂缓）**：`normal`/`sending`/`downloading`/`queuing` 等状态不在本阶段协议内，后续由独立的「传输任务中心」维护。
 
 ## 6. 数据面协议（P2P 直连）
 
@@ -175,18 +171,18 @@ SharedFile {
 ### knot-core（Rust）
 | 文件 | 改动 |
 |---|---|
-| `protocol.rs` | `Message` 加 `FileAnnounce/FileAdd/FileRemove`；`SharedFile` 结构；`DeviceInfo` 加 `file_addr` |
+| `protocol.rs` | `DeviceInfo` 加 `file_addr` + `file_list`（内嵌文件列表）；`SharedFile`；`file_add`/`file_remove` 消息（已删 `file_announce`/`file_list`） |
 | `file.rs`（新增） | 数据面：`FileSeeder::serve()` / `FileDownloader::fetch()`、分块编解码、sha256、partial 落盘 |
 | `crypto.rs` | 加按块加解密辅助（独立 nonce，不序列化 JSON） |
 | `net.rs` | `CoreEvent` 加文件事件 |
-| `net/server.rs` | 转发 file_* 信令（同 clipboard 转发路径） |
+| `net/server.rs` | 成员表（含各 DeviceInfo.file_list）即文件列表真相源；转发 file_add/file_remove 并更新成员表对应 file_list |
 
 ### 桌面（Tauri）
 | 文件 | 改动 |
 |---|---|
 | `commands.rs` | `share_file(path)` / `remove_files(file_ids)` / `download_file(src_device_id, src_file_id, dest)` / `local_files()` |
-| `bridge.rs` | CoreEvent → `knot://file-*`；入群时调 `file_announce` |
-| `state.rs` | 群文件列表 `Map<device_id, SharedFile[]>` + 本地清单 + 传输任务 |
+| `bridge.rs` | CoreEvent → `knot://file-*`；收到 Members 从成员表 file_list 重建群文件列表 |
+| `state.rs` | 群文件列表 `Map<device_id, SharedFile[]>`（由成员表派生）+ 本地清单 |
 | `ui/*` | 见 §7.1 |
 
 ### Android（Kotlin）
@@ -194,7 +190,7 @@ SharedFile {
 |---|---|
 | `net/Protocol.kt` | 镜像 Rust 消息与 SharedFile（**逐字段一致**） |
 | `file/`（新增） | `FileIndex`（本地清单持久化）/ `FileService`（seeder / downloader） |
-| `data/AppState.kt` | 文件事件处理、入群 announce、传输状态流 |
+| `data/AppState.kt` | 文件事件处理；入群 join 携带 file_list、收到成员表重建群文件列表（传输状态后续由传输任务中心维护） |
 | `ui/screens/FileTab.kt` | 两级文件 tab UI；SAF 选文件 / 存公共 `Download/knotShare/` |
 | `ui/screens/GroupScreen.kt` | pager 2→3、tab 栏 3 段（见 §7.2） |
 
@@ -227,12 +223,12 @@ SharedFile {
 | 阶段 | 范围 |
 |---|---|
 | **M4.1 单文件直传** | 共享任意本地文件 → 群列表（两级目录）→ P2P 下载落盘（纯本地、不成为供种者）；桌面↔桌面 + 桌面↔Android；停等式 ACK + sha256 |
-| **M4.2 持久化与续传** | 本地清单持久化 + 入群全量 announce；断点续传；文件不可达标注 |
+| **M4.2 持久化与续传** | 本地清单持久化；断点续传；文件不可达标注 |
 | **M4.3 体验** | 下载进度通知、文件历史、多文件 |
 
 ## 12. 测试要点
 
-- 集成测试（knot-core）：announce→add 全链路；设备离群其文件夹条目移除；重入群 announce 恢复；删除权限（只能删自己文件夹的）；HASH_MISMATCH；token 认证失败断开；同一文件在两台设备文件夹各一条。
+- 集成测试（knot-core）：join 携带 file_list → 成员表即全群列表；file_add/file_remove 更新成员表对应 file_list；设备离群其文件夹条目随之消失；重入群 join 携带 file_list 恢复；删除权限（只能删自己文件夹的）；HASH_MISMATCH；token 认证失败断开；同一文件在两台设备文件夹各一条。
 - 双端一致性：消息字段与块格式双端逐字一致。
 - 真机场景：两台真机 + 桌面建群，跨 Android 13/15 与 macOS 互传；A→B 下载后文件落盘 B 本地，但 B 文件夹**不会**多出条目、C 不能从 B 下载（除非 B 主动重新共享）；上传者离群/重入群；跨群加入后文件可见；UI 两级目录（设备文件夹 → 文件）。
 
@@ -245,7 +241,8 @@ SharedFile {
 5. **Android 后台供种**：复用现有前台服务（`KnotForegroundService`，入群期间常驻），不新增常驻服务。
 6. **去掉 `owner` / `seeders` / `file_seed` / `file_req`**：文件夹归属即供种者；只有主动共享才写入自己文件夹并发 `file_add`。
 7. **群内同步的始终是文件列表**（按设备分组）；UI 一级为设备名文件夹、二级为文件；重复文件按各自文件夹分别显示（接受重复）。
-8. **新成员拿列表**：群主维护完整 Map，B 入群成功后立即收到一条**加密的全量列表快照**并并入自己的数据（不放明文 `join_result`，避免文件名泄露；见 §5）。
+8. **fileList 内嵌成员表 = 唯一真相源**：每个 DeviceInfo 带 `file_list`；join 携带自己的 file_list，群主成员表回执即全群文件列表，无需单独快照消息。文件相关消息**明文传输**（含成员表；只剪贴板加密），见 §5。
 9. **下载不产生新文件身份（已取消旧决策）**：旧版"下载所得用全新 file_id 写入自己清单并广播"的闭环已取消。下载只落盘 + 校验，不生成 file_id、不登记、不广播、不成为供种者。要让文件对群可见须用户主动重新共享（走上传流程，届时生成新的 file_id）。
-10. **离群靠各端推演**：收到 `members` 后删除该设备整个文件夹条目，无专用文件信令。
-11. **`file_announce` 全量 + `file_remove` 独立删除**：announce 只汇报"我现在有什么"（全量替换）；删除明确发 `{from, file_ids[]}`，不靠全量差异隐式推断。
+10. **离群无需推演**：文件列表随成员表走，成员条目从 members 消失其文件夹自动消失；各端从成员表重建视图即可。
+11. **`file_add`/`file_remove` 增量 + 成员表全量**：全量列表走成员表 file_list；增删明确发 `file_add`/`file_remove`（带 from + file / file_ids），更新成员表对应 file_list 并广播；不靠全量差异隐式推断删除。
+12. **传输状态暂缓**：`normal`/`sending`/`downloading`/`queuing` 等文件传输状态不在本阶段协议内，后续由独立的「传输任务中心」维护。

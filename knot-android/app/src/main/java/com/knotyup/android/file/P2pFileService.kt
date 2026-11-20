@@ -1,5 +1,6 @@
 package com.knotyup.android.file
 
+import android.content.Context
 import android.util.Log
 import com.knotyup.android.net.KnotCipher
 import com.knotyup.android.net.Proto
@@ -41,6 +42,7 @@ data class P2pDownloadResult(val size: Long, val sha256: String)
 class P2pFileService(
     private val indexProvider: () -> FileIndex,
     private val localIdProvider: () -> String,
+    private val contextProvider: () -> Context,
 ) {
     private val index: FileIndex get() = indexProvider()
     @Volatile
@@ -115,23 +117,29 @@ class P2pFileService(
             output.writeInt(err.size); output.write(err); output.flush()
             return
         }
-        val file = File(path)
-        if (!file.exists()) {
+        // 清单里 path 可能是 content://（SAF）或普通文件路径，统一走 InputStream
+        val size = sourceSize(path)
+        if (size == null) {
             val err = JSONObject().put("error", "NOT_FOUND").toString().toByteArray()
             output.writeInt(err.size); output.write(err); output.flush()
             return
         }
-        val sha = sha256File(file)
-        val ok = JSONObject().put("ok", true).put("size", file.length()).put("sha256", sha)
+        val sha = openSource(path)?.use { sha256Stream(it) } ?: run {
+            val err = JSONObject().put("error", "NOT_FOUND").toString().toByteArray()
+            output.writeInt(err.size); output.write(err); output.flush()
+            return
+        }
+        val ok = JSONObject().put("ok", true).put("size", size).put("sha256", sha)
             .toString().toByteArray()
         output.writeInt(ok.size); output.write(ok); output.flush()
 
         val cipher = KnotCipher(pin)
-        FileInputStream(file).use { fis ->
+        val fis = openSource(path) ?: return
+        fis.use { inputStream ->
             var idx = 0
             val buf = ByteArray(Proto.FILE_CHUNK_SIZE)
             while (true) {
-                val n = fis.read(buf)
+                val n = inputStream.read(buf)
                 if (n <= 0) break
                 val enc = cipher.encryptChunk(buf.copyOfRange(0, n))
                 output.writeInt(idx)
@@ -217,18 +225,29 @@ class P2pFileService(
         }
     }
 
-    private fun sha256File(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        FileInputStream(file).use { fis ->
-            val buf = ByteArray(64 * 1024)
-            while (true) {
-                val n = fis.read(buf)
-                if (n <= 0) break
-                digest.update(buf, 0, n)
-            }
+    /**
+     * 打开供种源文件：清单 path 可能是 content://（SAF）或普通文件路径。
+     * 安卓共享走 SAF，存的是 content URI，必须用 ContentResolver 读，不能用 java.io.File。
+     */
+    private fun openSource(path: String): InputStream? = runCatching {
+        if (path.startsWith("content://")) {
+            contextProvider().contentResolver.openInputStream(android.net.Uri.parse(path))
+        } else {
+            val f = File(path)
+            if (f.exists()) FileInputStream(f) else null
         }
-        return digest.digest().joinToString("") { "%02x".format(it) }
-    }
+    }.getOrNull()
+
+    /** 供种源文件大小：content URI 用 AssetFileDescriptor.length，文件路径用 File.length。 */
+    private fun sourceSize(path: String): Long? = runCatching {
+        if (path.startsWith("content://")) {
+            contextProvider().contentResolver
+                .openAssetFileDescriptor(android.net.Uri.parse(path), "r")?.use { it.length }
+        } else {
+            val f = File(path)
+            if (f.exists()) f.length() else null
+        }
+    }.getOrNull()
 
     /** 计算文件 sha256（供上传登记用，InputStream 来自 SAF URI）。 */
     fun sha256Stream(input: InputStream): String {

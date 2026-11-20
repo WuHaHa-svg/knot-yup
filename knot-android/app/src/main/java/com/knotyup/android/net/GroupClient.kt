@@ -29,8 +29,6 @@ sealed class GroupEvent {
     /** 转让成功（群主侧本地事件）：服务已停 → 会话层清会话回首页 */
     object TransferCompleted : GroupEvent()
     data class Error(val message: String) : GroupEvent()
-    /** 群文件列表全量快照（入群/全量同步） */
-    data class FileList(val files: Map<String, List<SharedFile>>) : GroupEvent()
     /** 某设备文件夹新增文件 */
     data class FileAdd(val from: String, val file: SharedFile) : GroupEvent()
     /** 某设备删除文件条目 */
@@ -114,7 +112,6 @@ class GroupClient(
                         trySend(Result.success(GroupEvent.NewService(msg.addr, msg.pin, msg.owner)))
                         close()
                     }
-                    is Msg.FileList -> trySend(Result.success(GroupEvent.FileList(msg.files)))
                     is Msg.FileAdd -> trySend(Result.success(GroupEvent.FileAdd(msg.from, msg.file)))
                     is Msg.FileRemove -> trySend(Result.success(GroupEvent.FileRemove(msg.from, msg.fileIds)))
                     else -> {}
@@ -190,15 +187,7 @@ class GroupClient(
         return socket.send(Msg.TransferReady(addr).sealed(c).toJson())
     }
 
-    /** 入群全量上报自己文件夹（加密信封）。 */
-    fun sendFileAnnounce(files: List<SharedFile>): Boolean {
-        val dev = localDevice ?: return false
-        val c = cipher ?: return false
-        val socket = ws ?: return false
-        return socket.send(Msg.FileAnnounce(dev.id, files).sealed(c).toJson())
-    }
-
-    /** 自己文件夹新增（上传或下载完成共用）。 */
+    /** 自己文件夹新增。 */
     fun sendFileAdd(file: SharedFile): Boolean {
         val dev = localDevice ?: return false
         val c = cipher ?: return false

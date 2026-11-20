@@ -42,10 +42,13 @@ object AppState {
     @Volatile
     var appContext: Context? = null
 
-    val device = DeviceInfo(
+    /** 本机设备信息（fileList 随本机共享文件增删而变；成员表即文件列表真相源） */
+    @Volatile
+    var device = DeviceInfo(
         id = UUID.randomUUID().toString(),
         name = "${android.os.Build.MODEL} · Android",
     )
+        private set
 
     val client = GroupClient()
 
@@ -55,7 +58,11 @@ object AppState {
         get() = _fileIndex ?: error("FileIndex 未初始化（appContext 未注入）")
 
     /** P2P 供种/下载服务（设备级常驻） */
-    val p2pFile = P2pFileService(indexProvider = { fileIndex }, localIdProvider = { device.id })
+    val p2pFile = P2pFileService(
+        indexProvider = { fileIndex },
+        localIdProvider = { device.id },
+        contextProvider = { appContext ?: error("appContext 未注入") },
+    )
 
     /** 群文件列表（按 device_id 分组；UI 文件 tab 观察） */
     private val _groupFiles = MutableStateFlow<Map<String, List<SharedFile>>>(emptyMap())
@@ -181,11 +188,13 @@ object AppState {
         if (_fileIndex == null) _fileIndex = FileIndex(ctx)
     }
 
-    /** 带预留地址的设备信息（入群用），含 P2P 供种地址 */
+    /** 带预留地址的设备信息（入群用），含 P2P 供种地址与本机 fileList */
     fun deviceWithStandbyAddr(): DeviceInfo {
         val port = standby?.localPort
         val ip = Discovery.localIpAddress(appContext)
         val fileAddr = p2pFile.startServer().let { p -> ip?.let { "$it:$p" } }
+        // 入群携带本机文件列表（成员表即文件列表真相源）
+        device = device.copy(fileList = fileIndex.sharedFiles())
         return device.copy(
             addr = if (port != null && ip != null) "$ip:$port" else null,
             fileAddr = fileAddr,
@@ -276,8 +285,8 @@ object AppState {
                     prev.filter { it.id !in newIds && it.id != device.id }
                         .forEach { toastKey("member_left", subs = mapOf("name" to it.name)) }
                 }
-                // 文件列表随成员推演：离群设备的整个文件夹条目移除
-                _groupFiles.value = _groupFiles.value.filterKeys { it in event.members.map { m -> m.id } }
+                // fileList 内嵌在成员表：成员表即文件列表唯一真相源，从它全量重建
+                _groupFiles.value = event.members.associate { it.id to it.fileList }
                 applyEvent(event)
                 _joining.value = false
             }
@@ -303,10 +312,6 @@ object AppState {
                         com.knotyup.android.service.ClipboardNotification.show(it, text, fromName)
                     }
                 }
-            }
-            is GroupEvent.FileList -> {
-                android.util.Log.i("KnotFile", "收到文件全量快照 devices=${event.files.size}")
-                _groupFiles.value = event.files
             }
             is GroupEvent.FileAdd -> {
                 val cur = _groupFiles.value.toMutableMap()
@@ -416,8 +421,7 @@ object AppState {
                     result.fold({ event ->
                         if (event is GroupEvent.Members && !gotMembers) {
                             gotMembers = true
-                            // 入群成功：全量上报自己文件夹
-                            client.sendFileAnnounce(fileIndex.sharedFiles())
+                            // fileList 已随 join 携带，无需单独 announce
                         }
                         emit(event)
                     }, { e ->
@@ -540,6 +544,7 @@ object AppState {
     fun removeSharedFiles(ids: List<String>) {
         fileIndex.remove(ids)
         if (isOwner()) server?.broadcastFileRemove(ids) else client.sendFileRemove(ids)
+        device = device.copy(fileList = device.fileList.filterNot { it.fileId in ids })
         _groupFiles.value = _groupFiles.value.mapValues { (_, list) -> list.filterNot { it.fileId in ids } }
     }
 
@@ -610,6 +615,7 @@ object AppState {
 
     private fun broadcastFileAdd(file: SharedFile) {
         if (isOwner()) server?.broadcastFileAdd(file) else client.sendFileAdd(file)
+        device = device.copy(fileList = if (device.fileList.none { it.fileId == file.fileId }) device.fileList + file else device.fileList)
         _groupFiles.value = _groupFiles.value.toMutableMap().also { m ->
             val list = m.getOrDefault(device.id, emptyList()).toMutableList()
             if (list.none { it.fileId == file.fileId }) list.add(file)
@@ -638,8 +644,9 @@ object AppState {
         val filePort = p2pFile.startServer()
         val ipAddr = Discovery.localIpAddress(appContext)
         val fileAddr = ipAddr?.let { "$it:$filePort" }
-        // 群主本地文件列表先登记自己的文件夹
-        _groupFiles.value = mapOf(device.id to fileIndex.sharedFiles())
+        // 群主本地文件列表写入 device.fileList（成员表即文件列表真相源）
+        device = device.copy(fileList = fileIndex.sharedFiles())
+        _groupFiles.value = mapOf(device.id to device.fileList)
         val owner = device.copy(addr = null, fileAddr = fileAddr)
         val s = KnotGroupServer(port, pin, owner, ::emit)
         s.start()
@@ -718,6 +725,7 @@ object AppState {
             p
         } ?: reservePort()
         standby = null
+        device = device.copy(fileList = fileIndex.sharedFiles())
         val dev = device.copy(role = "owner")
         val s = KnotGroupServer(port, pin, dev, ::emit)
         s.start()
