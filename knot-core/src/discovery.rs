@@ -13,7 +13,6 @@ pub const DISCOVERY_PORT: u16 = 45691;
 /// v2 协议前缀（与旧版不兼容）
 const PREFIX_REQ: &str = "KNOTYUP2|REQ|";
 const PREFIX_RESP: &str = "KNOTYUP2|RESP|";
-const PROTOCOL_VER: u32 = 2;
 /// 收集回应窗口
 const COLLECT_WINDOW: Duration = Duration::from_secs(2);
 /// 窗口结束后的静默段（与收集窗口合计 3s 周期）
@@ -42,7 +41,6 @@ struct RespPayload<'a> {
     name: &'a str,
     addr: &'a str,
     members: u32,
-    ver: u32,
     ts_ms: u64,
 }
 
@@ -53,8 +51,6 @@ struct RespParse {
     addr: String,
     #[serde(default)]
     members: u32,
-    #[serde(default)]
-    ver: u32,
 }
 
 /// 收集广播目标：全局广播 + 本机各 IPv4 所在 /24 子网广播（应对 VPN/多网卡下全局广播走错接口）。
@@ -132,9 +128,6 @@ fn parse_resp(bytes: &[u8]) -> Option<GroupAd> {
     let text = std::str::from_utf8(bytes).ok()?;
     let json = text.strip_prefix(PREFIX_RESP)?;
     let p: RespParse = serde_json::from_str(json).ok()?;
-    if p.ver != PROTOCOL_VER {
-        return None; // 版本不匹配忽略（向前演进保护）
-    }
     Some(GroupAd { id: p.id, name: p.name, addr: p.addr, members: p.members })
 }
 
@@ -169,7 +162,6 @@ pub async fn respond(
                                 name: &ad.name,
                                 addr: &ad.addr,
                                 members: members_now(),
-                                ver: PROTOCOL_VER,
                                 ts_ms: crate::protocol::now_ms(),
                             })
                             .unwrap()
@@ -186,4 +178,44 @@ pub async fn respond(
         }
     });
     Ok(stop_tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 发收对称：RESP 载荷（含 ts_ms）能被扫描端解析，无 ver 字段也正常。
+    #[test]
+    fn resp_roundtrip_without_ver_field() {
+        let payload = RespPayload {
+            id: "dev-1",
+            name: "Alice",
+            addr: "10.0.0.5:9012",
+            members: 3,
+            ts_ms: 1760000000000,
+        };
+        let wire = format!("{PREFIX_RESP}{}", serde_json::to_string(&payload).unwrap());
+        let ad = parse_resp(wire.as_bytes()).expect("RESP 应能被解析");
+        assert_eq!(ad.id, "dev-1");
+        assert_eq!(ad.name, "Alice");
+        assert_eq!(ad.addr, "10.0.0.5:9012");
+        assert_eq!(ad.members, 3);
+    }
+
+    /// 带旧 ver 字段的 RESP 也能被解析（serde 忽略未知字段）→ 向前兼容。
+    #[test]
+    fn resp_with_legacy_ver_field_still_parsed() {
+        let wire = format!(
+            "{PREFIX_RESP}{{\"id\":\"d\",\"name\":\"n\",\"addr\":\"a:1\",\"members\":1,\"ver\":2}}"
+        );
+        let ad = parse_resp(wire.as_bytes()).expect("带 ver 的 RESP 也应被解析");
+        assert_eq!(ad.id, "d");
+        assert_eq!(ad.members, 1);
+    }
+
+    /// 非 RESP 前缀的报文被忽略。
+    #[test]
+    fn non_resp_prefix_ignored() {
+        assert!(parse_resp(b"KNOTYUP2|REQ|{}").is_none());
+    }
 }

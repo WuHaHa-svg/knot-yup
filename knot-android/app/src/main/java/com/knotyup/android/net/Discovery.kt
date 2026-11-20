@@ -30,7 +30,6 @@ object Discovery {
     const val PORT = 45691
     private const val PREFIX_REQ = "KNOTYUP2|REQ|"
     private const val PREFIX_RESP = "KNOTYUP2|RESP|"
-    private const val PROTOCOL_VER = 2
     private const val COLLECT_WINDOW_MS = 2_000L
     private const val QUIET_GAP_MS = 1_000L
 
@@ -154,12 +153,10 @@ object Discovery {
                         val json = text.removePrefix(PREFIX_RESP).takeIf { text.startsWith(PREFIX_RESP) } ?: continue
                         runCatching {
                             val o = JSONObject(json)
-                            if (o.optInt("ver") == PROTOCOL_VER) {
-                                got[o.getString("id")] = GroupAd(
-                                    o.getString("id"), o.getString("name"),
-                                    o.getString("addr"), o.optInt("members"),
-                                )
-                            }
+                            got[o.getString("id")] = GroupAd(
+                                o.getString("id"), o.getString("name"),
+                                o.getString("addr"), o.optInt("members"),
+                            )
                         }
                     } catch (_: java.net.SocketTimeoutException) {
                         break // 窗口结束
@@ -213,7 +210,6 @@ object Discovery {
         val sock = socket
         val respTemplate = JSONObject()
             .put("id", ad.id).put("name", ad.name).put("addr", ad.addr)
-            .put("ver", PROTOCOL_VER)
         return CoroutineScope(Dispatchers.IO + SupervisorJob()).launch {
             val buf = ByteArray(512)
             try {

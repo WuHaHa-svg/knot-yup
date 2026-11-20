@@ -4,6 +4,13 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+// 应用版本号唯一真相源：升级只改这一行（x.y.z）
+// versionCode 自动按 major*10000 + minor*100 + patch 计算（0.6.2 → 602），保证单调递增
+val appVersion = "0.6.2"
+val appVersionCode = appVersion.split(".").map { it.toIntOrNull() ?: 0 }.let { p ->
+    (p.getOrElse(0) { 0 } * 10000) + (p.getOrElse(1) { 0 } * 100) + p.getOrElse(2) { 0 }
+}
+
 android {
     namespace = "com.knotyup.android"
     compileSdk = 36
@@ -12,8 +19,8 @@ android {
         applicationId = "com.knotyup.android"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersion
     }
 
     signingConfigs {

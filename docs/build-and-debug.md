@@ -43,7 +43,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk  # 只重装不重建
 cd knot-desktop
 cargo tauri build
 # 产物：knot-desktop/src-tauri/target/release/bundle/
-#   macOS:   bundle/dmg/KnotYup_0.1.0_aarch64.dmg (+ .app)
+#   macOS:   bundle/dmg/KnotYup_<version>_aarch64.dmg (+ .app)
 #   Windows: bundle/nsis/*.exe / bundle/msi/*.msi（需在 Windows 上打包）
 ```
 
@@ -71,7 +71,7 @@ cd knot-android
 
 | 项 | 说明 |
 |---|---|
-| 入口 | 软件首页右下角版号 `v0.1.0` **双击** → 系统浏览器打开 |
+| 入口 | 软件首页右下角版号 **双击** → 系统浏览器打开（debug 版才显示，版号运行时动态读取） |
 | 地址 | `http://127.0.0.1:45692`（只绑本机回环，局域网不可访问） |
 | 页面功能 | 实时日志流（SSE）、分类过滤（evt / scan / act / err / app）、暂停、清空、断线自动重连 |
 | 缓冲 | 后端环形缓冲 1000 条，新连接先回放历史 |
@@ -131,3 +131,15 @@ adb -s <serial> shell monkey -p com.knotyup.android -c android.intent.category.L
 
 多台真机联调场景（建群/扫码/复制/踢人/转让/解散/断连弹窗）：桌面建群 + 各真机入群，
 配合桌面日志页（§5）观察事件流。
+
+## 8. 版本号管理
+
+版本号只需改一处，其余自动派生：
+
+| 端 | 改哪里（唯一真相源） | 自动派生的部分 |
+|---|---|---|
+| 桌面 | `knot-desktop/src-tauri/Cargo.toml` 的 `package.version` | `tauri.conf.json` 已设 `version: null` 自动继承；UI 版号角标运行时用 `window.__TAURI__.app.getVersion()` 动态读取 |
+| Android | `knot-android/app/build.gradle.kts` 顶部的 `appVersion = "x.y.z"` | `versionName` 直接取它；`versionCode` 按 `major*10000 + minor*100 + patch` 自动算（0.6.2 → 602） |
+
+`knot-core` 是内部库（path 依赖，不带版本号），不参与应用版本发布，无需随应用升级。
+发现协议靠报文前缀 `KNOTYUP2` 区分版本，无独立版本字段，也与应用版本无关。

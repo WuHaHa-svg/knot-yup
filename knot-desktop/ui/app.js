@@ -132,6 +132,11 @@ async function main() {
 
   // 调试入口：双击首页右下角版号 → 系统浏览器打开实时日志页（软件继续运行）
   $('versionBadge').ondblclick = () => window.open('http://127.0.0.1:45692', '_blank');
+  // 版号动态读取（真相源 = Cargo.toml package.version，tauri.conf.json 已设 null 继承）
+  try {
+    const v = await window.__TAURI__.app.getVersion();
+    if (v) $('versionBadge').textContent = `v${v}`;
+  } catch { /* 全局 API 不可用时保留占位 v… */ }
   // 发布版（release 构建）后端不编译调试服务，此处隐藏入口
   try {
     const dbg = await invoke('debug_tools_enabled');

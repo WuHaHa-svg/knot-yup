@@ -20,11 +20,11 @@
 | 方向 | 报文 | 载荷 |
 |---|---|---|
 | 扫描端 → 广播 | `KNOTYUP2\|REQ\|{json}` | `{scan_id, ts_ms}` |
-| 群主 → 单播（回源） | `KNOTYUP2\|RESP\|{json}` | `{id, name, addr, members, ver:2, ts_ms}` |
+| 群主 → 单播（回源） | `KNOTYUP2\|RESP\|{json}` | `{id, name, addr, members, ts_ms}` |
 
 - RESP 单播回 REQ 的源地址:源端口（recvfrom 直取）。
 - `members`：群内设备数（含群主），供扫描端展示。
-- `ver`：协议版本，收到非 2 的 RESP 忽略（向前演进用）。
+- 版本区分只靠报文前缀 `KNOTYUP2`（旧版前缀不同即被忽略），载荷内无独立版本字段。
 
 ### 2.2 扫描端状态机（仅首页且前台运行）
 
