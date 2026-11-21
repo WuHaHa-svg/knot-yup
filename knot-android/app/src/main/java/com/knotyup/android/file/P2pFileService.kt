@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.knotyup.android.net.KnotCipher
 import com.knotyup.android.net.Proto
+import com.knotyup.android.net.TaskEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,6 +44,7 @@ class P2pFileService(
     private val indexProvider: () -> FileIndex,
     private val localIdProvider: () -> String,
     private val contextProvider: () -> Context,
+    private val onEvent: ((TaskEvent) -> Unit)? = null,
 ) {
     private val index: FileIndex get() = indexProvider()
     @Volatile
@@ -83,14 +85,11 @@ class P2pFileService(
     }
 
     private suspend fun handleClient(socket: Socket) {
-        // 单并发闸门：已有下载在进行则排队等待前一个结束
-        gate.acquire()
         try {
             serveOne(socket)
         } catch (e: Exception) {
             Log.d(TAG, "供种会话结束: ${e.message}")
         } finally {
-            gate.release()
             try { socket.close() } catch (_: Exception) {}
         }
     }
@@ -106,58 +105,68 @@ class P2pFileService(
         val from = req.getString("from")
         val to = req.getString("to")
         val token = req.getString("token")
-        val expect = authToken(pin, "$srcFileId|$from|$to")
-        if (to != localIdProvider() || token != expect) {
-            val err = JSONObject().put("error", "AUTH_FAILED").toString().toByteArray()
+        val taskId = req.getString("task_id") // 下载方生成，供种方据此上报任务状态
+        var gateHeld = false
+        // 供种侧拒绝：发错误帧给下载方 + 抛异常让下方 catch 统一上报 Failed
+        fun reject(code: String): Nothing {
+            val err = JSONObject().put("error", code).toString().toByteArray()
             output.writeInt(err.size); output.write(err); output.flush()
-            return
+            throw IllegalStateException(code)
         }
-        val path = index.pathOf(srcFileId) ?: run {
-            val err = JSONObject().put("error", "NOT_FOUND").toString().toByteArray()
-            output.writeInt(err.size); output.write(err); output.flush()
-            return
-        }
-        // 清单里 path 可能是 content://（SAF）或普通文件路径，统一走 InputStream
-        val size = sourceSize(path)
-        if (size == null) {
-            val err = JSONObject().put("error", "NOT_FOUND").toString().toByteArray()
-            output.writeInt(err.size); output.write(err); output.flush()
-            return
-        }
-        val sha = openSource(path)?.use { sha256Stream(it) } ?: run {
-            val err = JSONObject().put("error", "NOT_FOUND").toString().toByteArray()
-            output.writeInt(err.size); output.write(err); output.flush()
-            return
-        }
-        val ok = JSONObject().put("ok", true).put("size", size).put("sha256", sha)
-            .toString().toByteArray()
-        output.writeInt(ok.size); output.write(ok); output.flush()
-
-        val cipher = KnotCipher(pin)
-        val fis = openSource(path) ?: return
-        fis.use { inputStream ->
-            var idx = 0
-            val buf = ByteArray(Proto.FILE_CHUNK_SIZE)
-            while (true) {
-                val n = inputStream.read(buf)
-                if (n <= 0) break
-                val enc = cipher.encryptChunk(buf.copyOfRange(0, n))
-                output.writeInt(idx)
-                output.writeInt(enc.size)
-                output.write(enc)
-                output.flush()
-                val ack = input.readInt()
-                if (ack != idx) break
-                idx++
-            }
-        }
-        // 等下载端 done/error 控制帧
         try {
-            val doneLen = input.readInt()
-            if (doneLen in 1..1024) {
-                ByteArray(doneLen).also { input.readFully(it) }
+            // 排队阶段：闸门被占时在这里等待（已知 task_id，先报 Queued）
+            if (taskId.isNotEmpty()) onEvent?.invoke(TaskEvent.Queued(taskId))
+            gate.acquire()
+            gateHeld = true
+            if (taskId.isNotEmpty()) onEvent?.invoke(TaskEvent.Started(taskId))
+
+            val expect = authToken(pin, "$srcFileId|$from|$to")
+            if (to != localIdProvider() || token != expect) reject("AUTH_FAILED")
+            val path = index.pathOf(srcFileId) ?: reject("NOT_FOUND")
+            // 清单里 path 可能是 content://（SAF）或普通文件路径，统一走 InputStream
+            val size = sourceSize(path) ?: reject("NOT_FOUND")
+            val sha = openSource(path)?.use { sha256Stream(it) } ?: reject("NOT_FOUND")
+            val ok = JSONObject().put("ok", true).put("size", size).put("sha256", sha)
+                .toString().toByteArray()
+            output.writeInt(ok.size); output.write(ok); output.flush()
+
+            val cipher = KnotCipher(pin)
+            val fis = openSource(path) ?: reject("NOT_FOUND")
+            fis.use { inputStream ->
+                var idx = 0
+                val buf = ByteArray(Proto.FILE_CHUNK_SIZE)
+                while (true) {
+                    val n = inputStream.read(buf)
+                    if (n <= 0) break
+                    val enc = cipher.encryptChunk(buf.copyOfRange(0, n))
+                    output.writeInt(idx)
+                    output.writeInt(enc.size)
+                    output.write(enc)
+                    output.flush()
+                    val ack = input.readInt()
+                    if (ack != idx) break
+                    idx++
+                    if (taskId.isNotEmpty()) {
+                        val sent = idx.toLong() * Proto.FILE_CHUNK_SIZE
+                        onEvent?.invoke(TaskEvent.Progress(taskId, sent.coerceAtMost(size), size))
+                    }
+                }
             }
-        } catch (_: Exception) {}
+            // 等下载端 done/error 控制帧
+            try {
+                val doneLen = input.readInt()
+                if (doneLen in 1..1024) {
+                    ByteArray(doneLen).also { input.readFully(it) }
+                }
+            } catch (_: Exception) {}
+            if (taskId.isNotEmpty()) onEvent?.invoke(TaskEvent.Done(taskId))
+        } catch (e: Exception) {
+            // 供种侧失败上报（与下载侧形成双保险）
+            if (taskId.isNotEmpty()) onEvent?.invoke(TaskEvent.Failed(taskId, e.message ?: "供种失败"))
+            throw e
+        } finally {
+            if (gateHeld) gate.release()
+        }
     }
 
     /**
@@ -170,6 +179,7 @@ class P2pFileService(
         srcFileId: String,
         sink: OutputStream,
         onProgress: ((Long, Long) -> Unit)? = null,
+        taskId: String = "",
     ): P2pDownloadResult = kotlinx.coroutines.withContext(Dispatchers.IO) {
         val host = addr.substringBefore(":")
         val port = addr.substringAfter(":").toInt()
@@ -184,6 +194,7 @@ class P2pFileService(
                 put("to", seedId)
                 put("token", authToken(pin, "$srcFileId|$myId|$seedId"))
                 put("resume_from", 0)
+                put("task_id", taskId)
             }.toString().toByteArray()
             output.writeInt(req.size); output.write(req); output.flush()
 

@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::crypto::Cipher;
-use crate::protocol::FILE_CHUNK_SIZE;
+use crate::protocol::{FILE_CHUNK_SIZE, TaskEvent};
 
 /// HMAC-SHA256（用 sha2 手写，避免引入 hmac 依赖）。key = PIN 字节。
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
@@ -62,6 +62,8 @@ struct FileRequest {
     token: String,
     /// 断点续传：从该块序号开始；首版 0
     resume_from: u32,
+    /// 传输任务 id（下载方生成，供种方据此上报任务状态）
+    task_id: String,
 }
 
 /// 供种端响应控制帧（长度前缀 JSON）。
@@ -115,6 +117,8 @@ async fn read_frame<T: for<'de> Deserialize<'de>>(stream: &mut TcpStream) -> io:
 /// 本地文件解析器：src_file_id（供种者自己清单里的 id）→ 本地磁盘路径。
 pub type FileResolver = Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
 
+pub type TaskEventSink = Arc<dyn Fn(TaskEvent) + Send + Sync>;
+
 /// 供种服务句柄。设备级常驻：与群生命周期无关，仅 App 退出才停止。
 /// PIN 可动态更新（入新群时换 PIN，端口保持不变）。
 pub struct FileSeeder {
@@ -122,6 +126,7 @@ pub struct FileSeeder {
     pin: Arc<RwLock<String>>,
     shutdown: mpsc::Sender<()>,
     handle: Option<JoinHandle<()>>,
+    _on_event: TaskEventSink,
 }
 
 impl Drop for FileSeeder {
@@ -139,12 +144,14 @@ impl FileSeeder {
         pin: String,
         local_id: String,
         resolver: FileResolver,
+        on_event: TaskEventSink,
     ) -> io::Result<Self> {
         let listener = TcpListener::bind(("0.0.0.0", port)).await?;
         let actual_port = listener.local_addr()?.port();
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         let pin = Arc::new(RwLock::new(pin));
         let pin_for_handle = pin.clone();
+        let on_event_for_handle = on_event.clone();
         // 并发闸门：容量 1 → 同一时刻只服务 1 个下载者，后续连接排队
         let gate = Arc::new(Semaphore::new(1));
         let handle = tokio::spawn(async move {
@@ -160,13 +167,9 @@ impl FileSeeder {
                         let local_id = local_id.clone();
                         let resolver = resolver.clone();
                         let gate = gate.clone();
+                        let on_event = on_event.clone();
                         tokio::spawn(async move {
-                            // 取闸门许可：排队直到前一个下载结束
-                            let _permit = match gate.acquire_owned().await {
-                                Ok(p) => p,
-                                Err(_) => return,
-                            };
-                            if let Err(e) = serve_one(stream, &pin, &local_id, &resolver).await {
+                            if let Err(e) = serve_one(stream, &pin, &local_id, &resolver, &gate, &on_event).await {
                                 tracing::debug!(target: "file", "会话结束 [{peer}]: {e}");
                             }
                         });
@@ -174,7 +177,7 @@ impl FileSeeder {
                 }
             }
         });
-        Ok(Self { port: actual_port, pin: pin_for_handle, shutdown: shutdown_tx, handle: Some(handle) })
+        Ok(Self { port: actual_port, pin: pin_for_handle, shutdown: shutdown_tx, handle: Some(handle), _on_event: on_event_for_handle })
     }
 
     pub fn port(&self) -> u16 {
@@ -202,14 +205,43 @@ async fn serve_one(
     pin: &str,
     local_id: &str,
     resolver: &FileResolver,
+    gate: &Arc<Semaphore>,
+    on_event: &TaskEventSink,
 ) -> Result<(), String> {
     let req: FileRequest = read_frame(&mut stream).await.map_err(|e| format!("读请求头: {e}"))?;
+    let task_id = req.task_id.clone();
+    // 排队阶段：闸门被占时在这里等待（此时已知 task_id，可上报 Queued）
+    if !task_id.is_empty() {
+        on_event(TaskEvent::Queued { task_id: task_id.clone() });
+    }
+    let _permit = gate.acquire().await.map_err(|e| format!("闸门关闭: {e}"))?;
+    // 拿到闸门，开始服务
+    if !task_id.is_empty() {
+        on_event(TaskEvent::Started { task_id: task_id.clone() });
+    }
+    let result = serve_one_inner(&mut stream, req, pin, local_id, resolver, &task_id, on_event).await;
+    if let Err(e) = &result {
+        if !task_id.is_empty() {
+            on_event(TaskEvent::Failed { task_id: task_id.clone(), error: e.clone() });
+        }
+    }
+    result
+}
+
+/// serve_one 的实际传输体（认证 → 发 ok → 分块 → 等 done）。
+async fn serve_one_inner(
+    stream: &mut TcpStream,
+    req: FileRequest,
+    pin: &str,
+    local_id: &str,
+    resolver: &FileResolver,
+    task_id: &str,
+    on_event: &TaskEventSink,
+) -> Result<(), String> {
     // 校验 token
     let expect = auth_token(pin, &req.src_file_id, &req.from, &req.to);
     if req.to != local_id || req.token != expect {
-        write_frame(&mut stream, &SeedControl::err("AUTH_FAILED"))
-            .await
-            .map_err(|e| format!("回执: {e}"))?;
+        write_frame(stream, &SeedControl::err("AUTH_FAILED")).await.map_err(|e| format!("回执: {e}"))?;
         return Err("token 认证失败".into());
     }
     // 解析本地文件
@@ -218,7 +250,7 @@ async fn serve_one(
     let size = meta.len();
     // 计算整文件 sha256（流式）
     let sha256 = hash_file(&path).await.map_err(|e| format!("计算 sha256: {e}"))?;
-    write_frame(&mut stream, &SeedControl::ok(size, sha256)).await.map_err(|e| format!("发 ok: {e}"))?;
+    write_frame(stream, &SeedControl::ok(size, sha256)).await.map_err(|e| format!("发 ok: {e}"))?;
 
     let cipher = Cipher::from_pin(pin);
     let mut file = tokio::fs::File::open(&path).await.map_err(|e| format!("打开文件: {e}"))?;
@@ -246,11 +278,18 @@ async fn serve_one(
             return Err(format!("ACK 序号不符: 期望 {idx} 收到 {ack}"));
         }
         idx += 1;
+        let sent = idx as u64 * FILE_CHUNK_SIZE as u64;
+        if !task_id.is_empty() {
+            on_event(TaskEvent::Progress { task_id: task_id.into(), transferred: sent.min(size), total: size });
+        }
     }
     // 等下载端 done/error 控制帧
-    match read_frame::<SeedControl>(&mut stream).await {
+    match read_frame::<SeedControl>(stream).await {
         Ok(ctl) if ctl.done => {
             tracing::debug!(target: "file", "传输完成 idx={idx} size={size}");
+            if !task_id.is_empty() {
+                on_event(TaskEvent::Done { task_id: task_id.into() });
+            }
             Ok(())
         }
         Ok(ctl) => Err(format!("下载端报错: {}", ctl.error)),
@@ -278,6 +317,7 @@ pub async fn fetch_file(
     name: &str,
     mime: &str,
     dest: &Path,
+    task_id: &str,
 ) -> Result<DownloadResult, String> {
     let mut stream = TcpStream::connect(file_addr)
         .await
@@ -290,6 +330,7 @@ pub async fn fetch_file(
         to: seed_id.into(),
         token,
         resume_from: 0,
+        task_id: task_id.into(),
     };
     write_frame(&mut stream, &req).await.map_err(|e| format!("发请求头: {e}"))?;
     let (size, expect_sha) = match read_frame::<SeedControl>(&mut stream).await {
@@ -416,9 +457,14 @@ mod tests {
                 None
             }
         });
-        let seeder = FileSeeder::start(0, "123456".into(), "seed-device".into(), resolver)
-            .await
-            .unwrap();
+        let events: Arc<std::sync::Mutex<Vec<TaskEvent>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ev_for_seed = events.clone();
+        let seeder = FileSeeder::start(
+            0, "123456".into(), "seed-device".into(), resolver,
+            std::sync::Arc::new(move |e| { ev_for_seed.lock().unwrap().push(e); }),
+        )
+        .await
+        .unwrap();
         let addr = format!("127.0.0.1:{}", seeder.port());
 
         let dest = dir.join("dst.bin");
@@ -431,6 +477,7 @@ mod tests {
             "src.bin",
             "application/octet-stream",
             &dest,
+            "task-test-1",
         )
         .await
         .expect("下载应成功");
@@ -450,9 +497,20 @@ mod tests {
             "src.bin",
             "application/octet-stream",
             &dest2,
+            "task-test-bad",
         )
         .await;
         assert!(bad.is_err(), "错误 PIN 的下载应失败");
+
+        // 供种端应上报任务事件：Queued/Started/Progress/Done；
+        // 错误 PIN 的会话也会报 Queued/Started/Failed（认证在闸门之后）
+        let ev = events.lock().unwrap();
+        assert!(ev.iter().any(|e| matches!(e, TaskEvent::Queued { task_id } if task_id == "task-test-1")));
+        assert!(ev.iter().any(|e| matches!(e, TaskEvent::Started { task_id } if task_id == "task-test-1")));
+        assert!(ev.iter().any(|e| matches!(e, TaskEvent::Progress { task_id, .. } if task_id == "task-test-1")));
+        assert!(ev.iter().any(|e| matches!(e, TaskEvent::Done { task_id } if task_id == "task-test-1")));
+        assert!(ev.iter().any(|e| matches!(e, TaskEvent::Failed { task_id, .. } if task_id == "task-test-bad")));
+        drop(ev);
 
         seeder.stop().await;
         let _ = tokio::fs::remove_dir_all(&dir).await;

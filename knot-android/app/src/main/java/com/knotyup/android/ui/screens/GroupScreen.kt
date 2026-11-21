@@ -66,7 +66,7 @@ internal fun GroupBody(
     role: String,
     groupAddr: String,
     groupPin: String,
-    onKick: (String) -> Unit,
+    onKick: (String, String) -> Unit,
     onCopy: (String) -> Unit,
     onSendText: (String) -> Unit,
     onSend: () -> Unit,

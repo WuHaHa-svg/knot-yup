@@ -68,7 +68,7 @@ internal fun DevicesTab(
     role: String,
     groupAddr: String,
     groupPin: String,
-    onKick: (String) -> Unit,
+    onKick: (String, String) -> Unit,
     onLeave: () -> Unit,
 ) {
     Column(
@@ -150,7 +150,7 @@ internal fun DevicesTab(
                         Text(m.platform, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (role == "owner" && !self) {
-                        TextButton(onClick = { onKick(m.id) }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
+                        TextButton(onClick = { onKick(m.id, m.name) }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp)) {
                             Text(t("kick"), fontSize = 11.sp, color = MaterialTheme.colorScheme.error)
                         }
                     }
@@ -230,10 +230,8 @@ internal fun ClipboardTab(
                                     .background(MaterialTheme.colorScheme.surface)
                                     .padding(horizontal = 12.dp, vertical = 10.dp),
                             ) {
-                                val name = members.firstOrNull { it.id == item.from }?.name
-                                    ?: if (item.from == AppState.device.id) AppState.device.name else item.from.take(6)
                                 Text(
-                                    name, fontSize = 11.sp,
+                                    item.name, fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold,
                                 )
                                 Spacer(Modifier.height(4.dp))

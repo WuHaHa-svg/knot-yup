@@ -548,7 +548,7 @@ body {
 /* 滑动指示条：跟随激活 tab 平滑移动（替代原来每项的静态底边框） */
 .tab-slider {
   position: absolute; left: 8px; bottom: -1px;
-  width: calc((100% - 20px) / 2);
+  width: calc((100% - 24px) / 3);
   height: 2px; border-radius: 2px;
   background: var(--accent);
   transform: translateX(0);
@@ -558,7 +558,10 @@ body {
 .panel-tabs[data-active="files"] .tab-slider {
   transform: translateX(calc(100% + 4px));
 }
-/* 两个 pane 叠放不卸载，切 tab 用 transform+opacity 做进出场（对齐安卓滑动视差） */
+.panel-tabs[data-active="tasks"] .tab-slider {
+  transform: translateX(calc(200% + 8px));
+}
+/* 三个 pane 叠放不卸载，切 tab 用 transform+opacity 做进出场（对齐安卓滑动视差） */
 .panel-body { position: relative; flex: 1; min-height: 0; overflow: hidden; }
 .panel-pane {
   position: absolute; inset: 0;
@@ -566,12 +569,34 @@ body {
   transition: transform .26s var(--ease), opacity .22s var(--ease);
   will-change: transform, opacity;
 }
-/* 离场：各自往相反方向滑出并淡出 */
+/* 离场：未激活 pane 淡出并轻微侧滑（方向按序） */
+.panel-body[data-active="clipboard"] #paneFiles,
+.panel-body[data-active="clipboard"] #paneTasks { transform: translateX(14%); opacity: 0; pointer-events: none; }
 .panel-body[data-active="files"] #paneClipboard { transform: translateX(-14%); opacity: 0; pointer-events: none; }
-.panel-body[data-active="clipboard"] #paneFiles { transform: translateX(14%); opacity: 0; pointer-events: none; }
+.panel-body[data-active="files"] #paneTasks { transform: translateX(14%); opacity: 0; pointer-events: none; }
+.panel-body[data-active="tasks"] #paneClipboard,
+.panel-body[data-active="tasks"] #paneFiles { transform: translateX(-14%); opacity: 0; pointer-events: none; }
 
 /* 文件共享：两级目录 */
 .file-list { list-style: none; padding: 2px 10px 8px; flex: 1; overflow-y: auto; }
+
+/* 传输中心：全群任务列表（只读） */
+.transfer-list { list-style: none; padding: 2px 10px 8px; flex: 1; overflow-y: auto; }
+.transfer-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; margin: 4px 0; border: 1px solid var(--border);
+  border-radius: 12px; background: var(--surface-2); font-size: 12.5px;
+}
+.transfer-row.done, .transfer-row.failed { opacity: .62; }
+.transfer-row .t-dir { flex: 0 0 auto; color: var(--accent); display: inline-flex; }
+.transfer-row .t-main { flex: 1; min-width: 0; }
+.transfer-row .t-name { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.transfer-row .t-peer { color: var(--text-3); font-size: 11px; margin-top: 2px; }
+.transfer-row .t-meta { flex: 0 0 auto; text-align: right; font-size: 11px; color: var(--text-2); }
+.transfer-row .t-bar { height: 3px; border-radius: 2px; background: var(--border); margin-top: 4px; overflow: hidden; }
+.transfer-row .t-bar > i { display: block; height: 100%; background: var(--accent); }
+.transfer-row.failed .t-meta { color: var(--danger); }
+.transfer-list .empty { padding: 30px 12px; text-align: center; color: var(--text-3); font-size: 12.5px; }
 .folder-ic, .file-ic {
   width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;
   display: grid; place-items: center;

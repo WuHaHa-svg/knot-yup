@@ -139,7 +139,7 @@ function renderClipboard() {
   clipItems.forEach((item, i) => {
     const li = document.createElement('li');
     li.className = 'clip-item';
-    const fromName = nameOf(item.from);
+    const fromName = item.name;
     li.innerHTML = `
       <div class="clip-meta">
         <span class="clip-from">${escapeHtml(fromName)}</span>
@@ -157,13 +157,6 @@ function renderClipboard() {
     };
     list.appendChild(li);
   });
-}
-
-function nameOf(deviceId) {
-  if (state.device && deviceId === state.device.id) return state.device.name;
-  const s = state.session;
-  const m = s && s.members.find((m) => m.id === deviceId);
-  return m ? m.name : deviceId.slice(0, 6);
 }
 
 // ── 文件共享（两级目录：设备文件夹 → 文件）────────────
@@ -214,6 +207,43 @@ function setPanel(tab) {
   // 切 tab 不重建文件列表 DOM（重建会重播 clipIn 挂载动画）。
   // 数据更新走 refresh()/file-changed 里对 renderFiles() 的调用；这里只保证首次进入渲染一次。
   if (tab === 'files' && !filesRendered) { renderFiles(); filesRendered = true; }
+  if (tab === 'tasks') renderTasks();
+}
+
+/** 传输中心：全群任务列表（只读）。数据源 = knot://file-tasks → state.transferTasks。 */
+function renderTasks() {
+  const box = $('transferList');
+  if (!box) return;
+  const tasks = state.transferTasks || [];
+  if (!tasks.length) {
+    box.innerHTML = `<div class="empty">${t('tasks_empty')}</div>`;
+    return;
+  }
+  const ongoing = tasks.filter((x) => x.status === 'queuing' || x.status === 'transferring');
+  const finished = tasks.filter((x) => x.status === 'done' || x.status === 'failed');
+  const row = (x) => {
+    // 方向由 seederName -> downloaderName 文本表达，箭头固定 → 无需判断
+    const seederName = x.seeder_name;
+    const downloaderName = x.downloader_name;
+    const label = ({
+      queuing: t('task_queuing'), transferring: t('task_transferring'),
+      done: t('task_done'), failed: t('task_failed'),
+    })[x.status] || x.status;
+    const meta = x.status === 'failed'
+      ? `${label}${x.error ? ' · ' + escapeHtml(x.error) : ''}`
+      : x.status === 'queuing' ? label : `${label} · ${x.progress}%`;
+    const pct = x.status === 'done' ? 100 : (x.progress || 0);
+    return `<li class="transfer-row ${x.status}">
+      <span class="t-dir">→</span>
+      <div class="t-main">
+        <div class="t-name">${escapeHtml(x.name)}</div>
+        <div class="t-peer">${escapeHtml(seederName)} -> ${escapeHtml(downloaderName)}</div>
+        <div class="t-bar"><i style="width:${pct}%"></i></div>
+      </div>
+      <div class="t-meta">${meta}</div>
+    </li>`;
+  };
+  box.innerHTML = [...ongoing, ...finished].map(row).join('');
 }
 
 function renderFiles() {
@@ -242,7 +272,7 @@ function renderFiles() {
       row.className = `file-folder${seen ? ' no-anim' : ''}`;
       row.innerHTML = `
         <div class="folder-ic"><svg class="icon"><use href="#i-folder"/></svg></div>
-        <span class="folder-name">${escapeHtml(nameOf(m.id))}</span>
+        <span class="folder-name">${escapeHtml(m.name)}</span>
         <span class="folder-count">${files.length}</span>
       `;
       row.onclick = () => { fileViewDevice = m.id; renderFiles(); };

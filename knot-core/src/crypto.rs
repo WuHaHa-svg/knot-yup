@@ -81,6 +81,7 @@ mod tests {
         let c = Cipher::from_pin("123456");
         let m = Message::Clipboard {
             from: "dev".into(),
+            from_name: "dev name".into(),
             payload: ClipboardPayload { kind: ClipboardKind::Text, text: Some("你好".into()), hash: "ab".into() },
         };
         let sealed = c.encrypt(&m);

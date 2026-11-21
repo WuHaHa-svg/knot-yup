@@ -22,12 +22,12 @@ internal fun AppDialogs(
     transferring: Boolean,
     connLost: Boolean,
     confirmLeave: Boolean,
-    pendingKick: String?,
+    pendingKick: Pair<String, String>?,
     pinDialogFor: GroupAd?,
     showQr: Boolean,
     onDismissConfirmLeave: () -> Unit,
     onConfirmLeaveOk: (String?) -> Unit,
-    onPendingKick: (String?) -> Unit,
+    onPendingKick: (Pair<String, String>?) -> Unit,
     onPinDialogFor: (GroupAd?) -> Unit,
     onShowQr: (Boolean) -> Unit,
     startJoin: (String, String) -> Unit,
@@ -49,11 +49,10 @@ internal fun AppDialogs(
     }
 
     // 移出成员二次确认
-    pendingKick?.let { kickId ->
-        val m = AppState.session.value.members.firstOrNull { it.id == kickId }
+    pendingKick?.let { (kickId, kickName) ->
         KnotConfirm(
             title = t("kick"),
-            message = t("confirm_kick_msg").replace("{name}", m?.name ?: ""),
+            message = t("confirm_kick_msg").replace("{name}", kickName),
             okText = t("confirm_ok"),
             cancelText = t("confirm_cancel"),
             onOk = {

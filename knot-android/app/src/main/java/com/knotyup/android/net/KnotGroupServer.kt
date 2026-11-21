@@ -23,6 +23,8 @@ class KnotGroupServer(
     private val cipher = KnotCipher(pin)
     private var owner = owner.copy(role = "owner") // 服务端权威赋值；file_list 随本机文件增删变化
     private val members = LinkedHashMap<String, Pair<DeviceInfo, WebSocket>>()
+    // 传输任务数组（群主权威；终态锁定，保留到群解散）
+    private val tasks = ConcurrentHashMap<String, TransferTask>()
     // 心跳看门狗：每连接最近活跃时间（任何入站消息都算活跃）
     private val lastActive = ConcurrentHashMap<WebSocket, Long>()
     // 转让回执等待表：device_id → future（transfer() 注册，onMessage 收到 TransferReady 完成）
@@ -68,6 +70,8 @@ class KnotGroupServer(
                 members[dev.id] = dev to ws
                 ws.send(Msg.JoinResult(true, null, memberList()).toJson())
                 // fileList 已内嵌在成员表里，JoinResult.members 自带全群文件列表
+                // 传输任务数组不内嵌成员表，入群后补发一条全量快照（明文）
+                ws.send(Msg.FileTasks(taskSnapshot()).toJson())
                 broadcastMembers()
             } else {
                 ws.send(Msg.JoinResult(false, "WRONG_PIN", emptyList()).toJson())
@@ -87,7 +91,7 @@ class KnotGroupServer(
                 }
             }
             is Msg.Clipboard -> {
-                onEvent(GroupEvent.Clipboard(inner.from, inner.payload))
+                onEvent(GroupEvent.Clipboard(inner.from, inner.fromName, inner.payload))
                 // 原样转发密文给其他成员
                 members.values.forEach { (d, w) ->
                     if (d.id != senderId) runCatching { w.send(message) }
@@ -98,7 +102,7 @@ class KnotGroupServer(
                 updateMemberFiles(inner.from) { list ->
                     if (list.none { it.fileId == inner.file.fileId }) list.add(inner.file)
                 }
-                onEvent(GroupEvent.FileAdd(inner.from, inner.file))
+                onEvent(GroupEvent.FileAdd(inner.from, inner.fromName, inner.file))
                 members.values.forEach { (d, w) ->
                     if (d.id != senderId) runCatching { w.send(message) }
                 }
@@ -107,10 +111,54 @@ class KnotGroupServer(
                 updateMemberFiles(inner.from) { list ->
                     list.removeAll { f -> f.fileId in inner.fileIds }
                 }
-                onEvent(GroupEvent.FileRemove(inner.from, inner.fileIds))
+                onEvent(GroupEvent.FileRemove(inner.from, inner.fromName, inner.fileIds))
                 members.values.forEach { (d, w) ->
                     if (d.id != senderId) runCatching { w.send(message) }
                 }
+            }
+            is Msg.FileTaskAdd -> {
+                if (!tasks.containsKey(inner.task.taskId)) tasks[inner.task.taskId] = inner.task
+                broadcastTasks()
+            }
+            is Msg.FileTaskQueued -> {
+                applyTask(inner.taskId) { t ->
+                    if (t.status == TaskStatus.QUEUING) t.copy(updatedAt = System.currentTimeMillis()) else t
+                }
+                broadcastTasks()
+            }
+            is Msg.FileTaskStarted -> {
+                applyTask(inner.taskId) { t ->
+                    if (t.status == TaskStatus.QUEUING) t.copy(
+                        status = TaskStatus.TRANSFERRING, updatedAt = System.currentTimeMillis(),
+                    ) else t
+                }
+                broadcastTasks()
+            }
+            is Msg.FileTaskProgress -> {
+                applyTask(inner.taskId) { t ->
+                    if (t.status == TaskStatus.TRANSFERRING && inner.progress >= t.progress) t.copy(
+                        progress = inner.progress.coerceAtMost(100), transferred = inner.transferred,
+                        updatedAt = System.currentTimeMillis(),
+                    ) else t
+                }
+                broadcastTasks()
+            }
+            is Msg.FileTaskFinish -> {
+                applyTask(inner.taskId) { t ->
+                    if (t.status == TaskStatus.TRANSFERRING) t.copy(
+                        status = TaskStatus.DONE, progress = 100, updatedAt = System.currentTimeMillis(),
+                    ) else t
+                }
+                broadcastTasks()
+            }
+            is Msg.FileTaskFailed -> {
+                // 终态锁定：已 done/failed 的任务忽略后到终态
+                applyTask(inner.taskId) { t ->
+                    if (t.status != TaskStatus.DONE && t.status != TaskStatus.FAILED) t.copy(
+                        status = TaskStatus.FAILED, error = inner.error, updatedAt = System.currentTimeMillis(),
+                    ) else t
+                }
+                broadcastTasks()
             }
             is Msg.TransferReady -> {
                 // 转让回执：有等待者则完成握手；无（已超时）则回 transfer_error
@@ -141,10 +189,59 @@ class KnotGroupServer(
     /** 实时成员数（发现应答用）。 */
     fun memberCount(): Int = 1 + members.size
 
+    /** 群主本机登记新任务（下载方为群主自己时）。 */
+    fun localTaskAdd(task: TransferTask) {
+        if (!tasks.containsKey(task.taskId)) tasks[task.taskId] = task
+        broadcastTasks()
+    }
+
+    /** 群主本机任务事件（群主自己下载/供种时无 ws 自连接，走这里）。 */
+    fun localTaskEvent(ev: TaskEvent) {
+        when (ev) {
+            is TaskEvent.Queued -> applyTask(ev.taskId) { it.copy(updatedAt = System.currentTimeMillis()) }
+            is TaskEvent.Started -> applyTask(ev.taskId) { t ->
+                if (t.status == TaskStatus.QUEUING) t.copy(status = TaskStatus.TRANSFERRING, updatedAt = System.currentTimeMillis()) else t
+            }
+            is TaskEvent.Progress -> applyTask(ev.taskId) { t ->
+                if (t.status == TaskStatus.TRANSFERRING) {
+                    val p = if (ev.total == 0L) 0 else (ev.transferred * 100 / ev.total).toInt().coerceAtMost(100)
+                    if (p >= t.progress) t.copy(progress = p, transferred = ev.transferred, updatedAt = System.currentTimeMillis()) else t
+                } else t
+            }
+            is TaskEvent.Done -> applyTask(ev.taskId) { t ->
+                if (t.status == TaskStatus.TRANSFERRING) t.copy(status = TaskStatus.DONE, progress = 100, updatedAt = System.currentTimeMillis()) else t
+            }
+            is TaskEvent.Failed -> applyTask(ev.taskId) { t ->
+                if (t.status != TaskStatus.DONE && t.status != TaskStatus.FAILED) t.copy(
+                    status = TaskStatus.FAILED, error = ev.error, updatedAt = System.currentTimeMillis(),
+                ) else t
+            }
+        }
+        broadcastTasks()
+    }
+
+    /** 按 task_id 原地修改任务（不存在忽略）。 */
+    private fun applyTask(taskId: String, mutate: (TransferTask) -> TransferTask) {
+        val t = tasks[taskId] ?: return
+        tasks[taskId] = mutate(t)
+    }
+
+    /** 任务数组快照（按创建时间排序）。 */
+    fun taskSnapshot(): List<TransferTask> =
+        tasks.values.sortedBy { it.createdAt }
+
+    /** 广播全量任务数组（明文）+ 通知本机 UI。 */
+    fun broadcastTasks() {
+        val list = taskSnapshot()
+        val json = Msg.FileTasks(list).toJson()
+        members.values.forEach { (_, w) -> runCatching { w.send(json) } }
+        onEvent(GroupEvent.FileTasks(list))
+    }
+
     /** 本机（群主）剪贴板变化 → 加密广播。 */
     fun broadcastClipboard(text: String) {
         val payload = ClipboardPayload("text", text, textHash(text))
-        val sealed = Msg.Clipboard(owner.id, payload).sealed(cipher).toJson()
+        val sealed = Msg.Clipboard(owner.id, owner.name, payload).sealed(cipher).toJson()
         members.values.forEach { (_, w) -> runCatching { w.send(sealed) } }
     }
 
@@ -153,17 +250,17 @@ class KnotGroupServer(
         if (owner.fileList.none { it.fileId == file.fileId }) {
             owner = owner.copy(fileList = owner.fileList + file)
         }
-        val sealed = Msg.FileAdd(owner.id, file).sealed(cipher).toJson()
+        val sealed = Msg.FileAdd(owner.id, owner.name, file).sealed(cipher).toJson()
         members.values.forEach { (_, w) -> runCatching { w.send(sealed) } }
-        onEvent(GroupEvent.FileAdd(owner.id, file))
+        onEvent(GroupEvent.FileAdd(owner.id, owner.name, file))
     }
 
     /** 群主本机删除文件 → 更新 owner.file_list + 加密广播。 */
     fun broadcastFileRemove(fileIds: List<String>) {
         owner = owner.copy(fileList = owner.fileList.filterNot { it.fileId in fileIds })
-        val sealed = Msg.FileRemove(owner.id, fileIds).sealed(cipher).toJson()
+        val sealed = Msg.FileRemove(owner.id, owner.name, fileIds).sealed(cipher).toJson()
         members.values.forEach { (_, w) -> runCatching { w.send(sealed) } }
-        onEvent(GroupEvent.FileRemove(owner.id, fileIds))
+        onEvent(GroupEvent.FileRemove(owner.id, owner.name, fileIds))
     }
 
     /** 更新成员表里某设备 DeviceInfo.file_list（Pair 不可变，remove + put）。 */

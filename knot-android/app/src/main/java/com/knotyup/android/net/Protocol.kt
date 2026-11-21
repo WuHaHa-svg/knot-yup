@@ -87,6 +87,55 @@ data class SharedFile(
     }
 }
 
+/** 传输任务状态（与 knot-core TaskStatus 逐字段一致，snake_case 线上值）。 */
+enum class TaskStatus(val wire: String) {
+    QUEUING("queuing"), TRANSFERRING("transferring"), DONE("done"), FAILED("failed");
+    companion object { fun fromWire(s: String) = values().firstOrNull { it.wire == s } ?: QUEUING }
+}
+
+/** 一条传输任务：一次 P2P 传输 = 一条任务，含下载方与供种方两个视角。 */
+data class TransferTask(
+    val taskId: String,
+    val fileId: String,
+    val name: String,
+    val size: Long,
+    val mime: String,
+    val seederId: String,
+    val seederName: String,
+    val downloaderId: String,
+    val downloaderName: String,
+    val status: TaskStatus,
+    val progress: Int,
+    val transferred: Long,
+    val error: String,
+    val createdAt: Long,
+    val updatedAt: Long,
+) {
+    fun toJson() = JSONObject().apply {
+        put("task_id", taskId); put("file_id", fileId); put("name", name)
+        put("size", size); put("mime", mime)
+        put("seeder_id", seederId); put("seeder_name", seederName)
+        put("downloader_id", downloaderId); put("downloader_name", downloaderName)
+        put("status", status.wire); put("progress", progress); put("transferred", transferred)
+        put("error", error); put("created_at", createdAt); put("updated_at", updatedAt)
+    }
+
+    companion object {
+        fun fromJson(o: JSONObject) = TransferTask(
+            o.getString("task_id"), o.getString("file_id"), o.getString("name"),
+            o.getLong("size"), o.getString("mime"),
+            o.getString("seeder_id"), o.getString("seeder_name"),
+            o.getString("downloader_id"), o.getString("downloader_name"),
+            TaskStatus.fromWire(o.getString("status")),
+            o.optInt("progress"), o.optLong("transferred"), o.optString("error"),
+            o.optLong("created_at"), o.optLong("updated_at"),
+        )
+
+        fun listFromJson(arr: org.json.JSONArray) =
+            (0 until arr.length()).map { i -> fromJson(arr.getJSONObject(i)) }
+    }
+}
+
 sealed class Msg {
     data class Join(val pin: String, val device: DeviceInfo) : Msg()
     data class JoinResult(val ok: Boolean, val reason: String?, val members: List<DeviceInfo>) : Msg()
@@ -95,7 +144,7 @@ sealed class Msg {
     /** 心跳回执：成员表快照即状态同步（群主身份看 role 字段） */
     data class Pong(val members: List<DeviceInfo>, val seq: Long, val tsMs: Long) : Msg()
     /** 剪贴板：from = 发送者 device.id，接收端 from == 自己 id 时忽略（回声去重） */
-    data class Clipboard(val from: String, val payload: ClipboardPayload) : Msg()
+    data class Clipboard(val from: String, val fromName: String, val payload: ClipboardPayload) : Msg()
     data class Kick(val reason: String?) : Msg()
     /** 解散通知：成员收到后 0.8s 自行退出，不回发 */
     object Dissolve : Msg()
@@ -108,9 +157,23 @@ sealed class Msg {
     /** 转让第三步：群主 → 全员迁移 */
     data class NewService(val addr: String, val pin: String, val owner: DeviceInfo) : Msg()
     /** 文件共享①：文件夹新增 */
-    data class FileAdd(val from: String, val file: SharedFile) : Msg()
+    data class FileAdd(val from: String, val fromName: String, val file: SharedFile) : Msg()
     /** 文件共享②：删除自己文件夹内条目 */
-    data class FileRemove(val from: String, val fileIds: List<String>) : Msg()
+    data class FileRemove(val from: String, val fromName: String, val fileIds: List<String>) : Msg()
+    /** 传输中心①：任务诞生（下载方 → 群主，queuing） */
+    data class FileTaskAdd(val task: TransferTask) : Msg()
+    /** 传输中心②：供种方确认排队 */
+    data class FileTaskQueued(val taskId: String) : Msg()
+    /** 传输中心③：供种方开始发送 */
+    data class FileTaskStarted(val taskId: String) : Msg()
+    /** 传输中心④：供种方节流进度 */
+    data class FileTaskProgress(val taskId: String, val progress: Int, val transferred: Long) : Msg()
+    /** 传输中心⑤：供种方完成 */
+    data class FileTaskFinish(val taskId: String) : Msg()
+    /** 传输中心⑥：失败（双方都报，幂等） */
+    data class FileTaskFailed(val taskId: String, val error: String, val reporter: String) : Msg()
+    /** 传输中心⑦：群主广播全量任务数组 */
+    data class FileTasks(val tasks: List<TransferTask>) : Msg()
     data class Encrypted(val data: String) : Msg()
 
     fun toJson(): String {
@@ -125,7 +188,8 @@ sealed class Msg {
                 .put("seq", seq).put("ts_ms", tsMs)
             is Members -> JSONObject().put("type", "members")
                 .put("members", org.json.JSONArray(members.map { it.toJson() }))
-            is Clipboard -> JSONObject().put("type", "clipboard").put("from", from).put("payload", payload.toJson())
+            is Clipboard -> JSONObject().put("type", "clipboard").put("from", from)
+                .put("from_name", fromName).put("payload", payload.toJson())
             is Kick -> JSONObject().put("type", "kick").putOpt("reason", reason)
             is Dissolve -> JSONObject().put("type", "dissolve")
             is TransferOffer -> JSONObject().put("type", "transfer_offer").put("pin", pin)
@@ -133,9 +197,20 @@ sealed class Msg {
             is TransferError -> JSONObject().put("type", "transfer_error")
             is NewService -> JSONObject().put("type", "new_service").put("addr", addr).put("pin", pin)
                 .put("owner", owner.toJson())
-            is FileAdd -> JSONObject().put("type", "file_add").put("from", from).put("file", file.toJson())
+            is FileAdd -> JSONObject().put("type", "file_add").put("from", from)
+                .put("from_name", fromName).put("file", file.toJson())
             is FileRemove -> JSONObject().put("type", "file_remove").put("from", from)
-                .put("file_ids", org.json.JSONArray(fileIds))
+                .put("from_name", fromName).put("file_ids", org.json.JSONArray(fileIds))
+            is FileTaskAdd -> JSONObject().put("type", "file_task_add").put("task", task.toJson())
+            is FileTaskQueued -> JSONObject().put("type", "file_task_queued").put("task_id", taskId)
+            is FileTaskStarted -> JSONObject().put("type", "file_task_started").put("task_id", taskId)
+            is FileTaskProgress -> JSONObject().put("type", "file_task_progress")
+                .put("task_id", taskId).put("progress", progress).put("transferred", transferred)
+            is FileTaskFinish -> JSONObject().put("type", "file_task_finish").put("task_id", taskId)
+            is FileTaskFailed -> JSONObject().put("type", "file_task_failed")
+                .put("task_id", taskId).put("error", error).put("reporter", reporter)
+            is FileTasks -> JSONObject().put("type", "file_tasks")
+                .put("tasks", org.json.JSONArray(tasks.map { it.toJson() }))
             is Encrypted -> JSONObject().put("type", "encrypted").put("data", data)
         }
         return o.toString()
@@ -162,7 +237,7 @@ sealed class Msg {
                     )
                     "members" -> Members(o.getJSONArray("members").devices())
                     "clipboard" -> Clipboard(
-                        o.getString("from"),
+                        o.getString("from"), o.getString("from_name"),
                         o.getJSONObject("payload").let {
                             ClipboardPayload(it.getString("kind"), it.optString("text"), it.getString("hash"))
                         },
@@ -176,11 +251,25 @@ sealed class Msg {
                         o.getString("addr"), o.getString("pin"),
                         DeviceInfo.fromJson(o.getJSONObject("owner")),
                     )
-                    "file_add" -> FileAdd(o.getString("from"), SharedFile.fromJson(o.getJSONObject("file")))
+                    "file_add" -> FileAdd(
+                        o.getString("from"), o.getString("from_name"),
+                        SharedFile.fromJson(o.getJSONObject("file")),
+                    )
                     "file_remove" -> FileRemove(
-                        o.getString("from"),
+                        o.getString("from"), o.getString("from_name"),
                         o.getJSONArray("file_ids").let { arr -> (0 until arr.length()).map { i -> arr.getString(i) } },
                     )
+                    "file_task_add" -> FileTaskAdd(TransferTask.fromJson(o.getJSONObject("task")))
+                    "file_task_queued" -> FileTaskQueued(o.getString("task_id"))
+                    "file_task_started" -> FileTaskStarted(o.getString("task_id"))
+                    "file_task_progress" -> FileTaskProgress(
+                        o.getString("task_id"), o.optInt("progress"), o.optLong("transferred"),
+                    )
+                    "file_task_finish" -> FileTaskFinish(o.getString("task_id"))
+                    "file_task_failed" -> FileTaskFailed(
+                        o.getString("task_id"), o.optString("error"), o.getString("reporter"),
+                    )
+                    "file_tasks" -> FileTasks(TransferTask.listFromJson(o.getJSONArray("tasks")))
                     "encrypted" -> Encrypted(o.getString("data"))
                     else -> null
                 }
@@ -192,6 +281,15 @@ sealed class Msg {
         private fun org.json.JSONArray.devices() =
             (0 until length()).map { i -> DeviceInfo.fromJson(getJSONObject(i)) }
     }
+}
+
+/** 供种端引擎向上抛的任务事件（与 knot-core TaskEvent 对齐）。 */
+sealed class TaskEvent {
+    data class Queued(val taskId: String) : TaskEvent()
+    data class Started(val taskId: String) : TaskEvent()
+    data class Progress(val taskId: String, val transferred: Long, val total: Long) : TaskEvent()
+    data class Done(val taskId: String) : TaskEvent()
+    data class Failed(val taskId: String, val error: String) : TaskEvent()
 }
 
 /** AES-256-GCM，密钥 = SHA-256("knotyup-v1|PIN")，与 knot-core crypto.rs 一致。 */

@@ -22,6 +22,8 @@ pub(crate) enum Role {
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct HistoryItem {
     pub from: String,
+    /// 发送方设备名快照（创建时固化）
+    pub name: String,
     pub text: String,
     pub at_ms: u64,
 }
@@ -97,13 +99,14 @@ pub(crate) fn has_lan() -> bool {
 }
 
 /// 追加历史记录（新条目置顶，保留 50 条）。
-pub(crate) async fn push_history(state: &SharedState, from: &str, payload: &knot_core::protocol::ClipboardPayload) {
+pub(crate) async fn push_history(state: &SharedState, from: &str, name: &str, payload: &knot_core::protocol::ClipboardPayload) {
     if let Some(text) = &payload.text {
         let mut h = state.history.lock().await;
         h.insert(
             0,
             HistoryItem {
                 from: from.to_string(),
+                name: name.to_string(),
                 text: text.clone(),
                 at_ms: now_ms(),
             },

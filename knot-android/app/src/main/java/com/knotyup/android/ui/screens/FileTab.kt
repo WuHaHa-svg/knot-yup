@@ -55,6 +55,8 @@ import com.knotyup.android.R
 import com.knotyup.android.data.AppState
 import com.knotyup.android.net.DeviceInfo
 import com.knotyup.android.net.SharedFile
+import com.knotyup.android.net.TaskStatus
+import com.knotyup.android.net.TransferTask
 import com.knotyup.android.ui.Motion
 import com.knotyup.android.ui.components.KnotConfirm
 import kotlinx.coroutines.launch
@@ -67,6 +69,7 @@ import kotlinx.coroutines.launch
 @Composable
 internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileItems: MutableSet<String>) {
     val groupFiles by AppState.groupFiles.collectAsState()
+    val transferTasks by AppState.transferTasks.collectAsState()
     var viewDevice by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf<SharedFile?>(null) }
     val scope = rememberCoroutineScope()
@@ -78,11 +81,6 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileI
                 .onSuccess { AppState.toast(t("shared_ok"), 1) }
                 .onFailure { AppState.toast(it.message ?: "error", 2) }
         }
-    }
-
-    fun nameOf(id: String): String {
-        if (id == AppState.device.id) return AppState.device.name
-        return members.firstOrNull { it.id == id }?.name ?: id.take(6)
     }
 
     Column(
@@ -136,6 +134,26 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileI
                             )
                         }
                     }
+                }
+                // 传输中心段：与群信息 tab 同款（标题 + 副标题 + 内容），与文件夹列表一起滚动
+                item(key = "transfer_center") {
+                    Spacer(Modifier.height(10.dp))
+                    Text(t("tasks"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                    Spacer(Modifier.height(2.dp))
+                    Text(t("tasks_hint"), fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(6.dp))
+                    if (transferTasks.isEmpty()) {
+                        Text(
+                            t("tasks_empty"), fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
+                        )
+                    } else {
+                        val ongoing = transferTasks.filter { it.status == TaskStatus.QUEUING || it.status == TaskStatus.TRANSFERRING }
+                        val finished = transferTasks.filter { it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED }
+                        (ongoing + finished).forEach { task -> TransferTaskRow(task, t) }
+                    }
+                    Spacer(Modifier.height(6.dp))
                 }
             }
         } else {
@@ -266,6 +284,55 @@ private fun DeviceFolderRow(member: DeviceInfo, count: Int, onClick: () -> Unit)
                 textAlign = TextAlign.Center,
             )
         }
+    }
+}
+
+/** 传输中心任务行：方向图标 + 文件名 + 对方 + 状态/进度条（只读）。 */
+@Composable
+private fun TransferTaskRow(task: TransferTask, t: (String) -> String) {
+    val statusText = when (task.status) {
+        TaskStatus.QUEUING -> t("task_queuing")
+        TaskStatus.TRANSFERRING -> t("task_transferring")
+        TaskStatus.DONE -> t("task_done")
+        TaskStatus.FAILED -> t("task_failed")
+    }
+    // 方向文本固定为创建时固化的设备名快照：seederName -> downloaderName
+    val seederName = task.seederName
+    val downloaderName = task.downloaderName
+    val pct = if (task.status == TaskStatus.DONE) 100 else task.progress.coerceIn(0, 100)
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 3.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("→", fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary)
+        Spacer(Modifier.width(8.dp))
+        Column(Modifier.weight(1f)) {
+            Text(task.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                "$seederName -> $downloaderName", fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Box(
+                Modifier.fillMaxWidth().height(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Box(Modifier.fillMaxWidth(pct / 100f).height(3.dp).background(MaterialTheme.colorScheme.primary))
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(
+            if (task.status == TaskStatus.FAILED && task.error.isNotBlank()) "$statusText · ${task.error}"
+            else if (task.status == TaskStatus.QUEUING) statusText
+            else "$statusText · $pct%",
+            fontSize = 11.sp,
+            color = if (task.status == TaskStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 2,
+        )
     }
 }
 

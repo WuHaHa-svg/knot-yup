@@ -45,7 +45,7 @@ async function main() {
     }
   });
   await listen('knot://clipboard', (e) => {
-    clipItems = [{ from: e.payload.from, text: e.payload.text || '', at_ms: Date.now() }, ...clipItems].slice(0, 50);
+    clipItems = [{ from: e.payload.from, name: e.payload.name, text: e.payload.text || '', at_ms: Date.now() }, ...clipItems].slice(0, 50);
     renderClipboard();
   });
   await listen('knot://kicked', (e) => {
@@ -120,7 +120,7 @@ async function main() {
     // FileAdd 事件带 from/name：他人共享时弹 toast「XXX共享了文件」+ 文件名副标题；自己共享不弹
     const p = e.payload;
     if (p && p.from && p.name && state.device && p.from !== state.device.id) {
-      toast(t('file_shared', { name: nameOf(p.from) }), 'info', p.name);
+      toast(t('file_shared', { name: p.from_name }), 'info', p.name);
     }
     try {
       const f = await invoke('get_files', {});
@@ -128,6 +128,11 @@ async function main() {
       localFileIds = new Set((f.local_files || []).map((x) => x.file_id));
       if (typeof renderFiles === 'function') renderFiles();
     } catch { /* ignore */ }
+  });
+
+  await listen('knot://file-tasks', (e) => {
+    state.transferTasks = e.payload || [];
+    if (typeof renderTasks === 'function' && (typeof activePanel === 'undefined' || activePanel === 'tasks')) renderTasks();
   });
 
   // 调试入口：双击首页右下角版号 → 系统浏览器打开实时日志页（软件继续运行）

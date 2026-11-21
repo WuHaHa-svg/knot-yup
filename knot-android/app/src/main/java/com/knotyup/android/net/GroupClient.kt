@@ -14,7 +14,7 @@ import okhttp3.WebSocketListener
 /** 群事件（上行到 UI/会话层，与 knot-core CoreEvent v2 对应）。 */
 sealed class GroupEvent {
     data class Members(val members: List<DeviceInfo>) : GroupEvent()
-    data class Clipboard(val from: String, val payload: ClipboardPayload) : GroupEvent()
+    data class Clipboard(val from: String, val fromName: String, val payload: ClipboardPayload) : GroupEvent()
     data class Kicked(val reason: String) : GroupEvent()
     /** 解散：会话层 0.8s 后自动退出（不回发任何消息） */
     object Dissolve : GroupEvent()
@@ -30,9 +30,11 @@ sealed class GroupEvent {
     object TransferCompleted : GroupEvent()
     data class Error(val message: String) : GroupEvent()
     /** 某设备文件夹新增文件 */
-    data class FileAdd(val from: String, val file: SharedFile) : GroupEvent()
+    data class FileAdd(val from: String, val fromName: String, val file: SharedFile) : GroupEvent()
     /** 某设备删除文件条目 */
-    data class FileRemove(val from: String, val fileIds: List<String>) : GroupEvent()
+    data class FileRemove(val from: String, val fromName: String, val fileIds: List<String>) : GroupEvent()
+    /** 传输任务数组全量快照（群主广播；客户端整体替换） */
+    data class FileTasks(val tasks: List<TransferTask>) : GroupEvent()
 }
 
 /** 群客户端 v2：连接群主 WebSocket，自动处理加密封装/解封、心跳（30s/单次 3s 失联）、回声去重。 */
@@ -96,7 +98,7 @@ class GroupClient(
                     is Msg.Clipboard -> {
                         // from-id 回声去重：自己发出去的广播不再上报
                         if (msg.from == echoId) return
-                        trySend(Result.success(GroupEvent.Clipboard(msg.from, msg.payload)))
+                        trySend(Result.success(GroupEvent.Clipboard(msg.from, msg.fromName, msg.payload)))
                     }
                     is Msg.Kick -> {
                         trySend(Result.success(GroupEvent.Kicked(msg.reason ?: "")))
@@ -112,8 +114,9 @@ class GroupClient(
                         trySend(Result.success(GroupEvent.NewService(msg.addr, msg.pin, msg.owner)))
                         close()
                     }
-                    is Msg.FileAdd -> trySend(Result.success(GroupEvent.FileAdd(msg.from, msg.file)))
-                    is Msg.FileRemove -> trySend(Result.success(GroupEvent.FileRemove(msg.from, msg.fileIds)))
+                    is Msg.FileAdd -> trySend(Result.success(GroupEvent.FileAdd(msg.from, msg.fromName, msg.file)))
+                    is Msg.FileRemove -> trySend(Result.success(GroupEvent.FileRemove(msg.from, msg.fromName, msg.fileIds)))
+                    is Msg.FileTasks -> trySend(Result.success(GroupEvent.FileTasks(msg.tasks)))
                     else -> {}
                 }
             }
@@ -177,7 +180,7 @@ class GroupClient(
         val c = cipher ?: return false
         val socket = ws ?: return false
         val payload = ClipboardPayload("text", text, textHash(text))
-        return socket.send(Msg.Clipboard(dev.id, payload).sealed(c).toJson())
+        return socket.send(Msg.Clipboard(dev.id, dev.name, payload).sealed(c).toJson())
     }
 
     /** 转让第二步：standby 服务就绪后，通过原 ws 回告群主。 */
@@ -192,7 +195,7 @@ class GroupClient(
         val dev = localDevice ?: return false
         val c = cipher ?: return false
         val socket = ws ?: return false
-        return socket.send(Msg.FileAdd(dev.id, file).sealed(c).toJson())
+        return socket.send(Msg.FileAdd(dev.id, dev.name, file).sealed(c).toJson())
     }
 
     /** 删除自己文件夹内条目。 */
@@ -200,7 +203,30 @@ class GroupClient(
         val dev = localDevice ?: return false
         val c = cipher ?: return false
         val socket = ws ?: return false
-        return socket.send(Msg.FileRemove(dev.id, fileIds).sealed(c).toJson())
+        return socket.send(Msg.FileRemove(dev.id, dev.name, fileIds).sealed(c).toJson())
+    }
+
+    /** 传输中心消息统一发送（明文，不进加密信封）。 */
+    private fun sendTaskMsg(msg: Msg): Boolean {
+        val socket = ws ?: return false
+        return socket.send(msg.toJson())
+    }
+
+    /** ① 任务诞生（下载方）：status=queuing。 */
+    fun sendTaskAdd(task: TransferTask): Boolean = sendTaskMsg(Msg.FileTaskAdd(task))
+    /** ② 供种方确认排队。 */
+    fun sendTaskQueued(taskId: String): Boolean = sendTaskMsg(Msg.FileTaskQueued(taskId))
+    /** ③ 供种方开始发送。 */
+    fun sendTaskStarted(taskId: String): Boolean = sendTaskMsg(Msg.FileTaskStarted(taskId))
+    /** ④ 供种方节流进度。 */
+    fun sendTaskProgress(taskId: String, progress: Int, transferred: Long): Boolean =
+        sendTaskMsg(Msg.FileTaskProgress(taskId, progress, transferred))
+    /** ⑤ 供种方完成。 */
+    fun sendTaskFinish(taskId: String): Boolean = sendTaskMsg(Msg.FileTaskFinish(taskId))
+    /** ⑥ 失败（双方都报，幂等）。 */
+    fun sendTaskFailed(taskId: String, error: String): Boolean {
+        val dev = localDevice ?: return false
+        return sendTaskMsg(Msg.FileTaskFailed(taskId, error, dev.id))
     }
 
     fun leave() {

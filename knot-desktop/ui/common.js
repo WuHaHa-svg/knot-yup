@@ -5,7 +5,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
-const state = { device: null, session: null, discovered: [], discoveredScanning: false };
+const state = { device: null, session: null, discovered: [], discoveredScanning: false, transferTasks: [] };
 
 // 全局禁用浏览器原生右键菜单（让应用更像原生桌面程序）
 document.addEventListener('contextmenu', (e) => e.preventDefault());

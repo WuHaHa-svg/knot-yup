@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
-use crate::protocol::{SharedFile, ClipboardPayload, DeviceInfo};
+use crate::protocol::{SharedFile, ClipboardPayload, DeviceInfo, TransferTask};
 
 /// 核心层向上（UI 层）抛出的事件（v2，见 docs/ws-design.md §3）。
 #[derive(Debug, Clone)]
@@ -20,11 +20,13 @@ pub enum CoreEvent {
     /// 成员列表更新（群主身份看 DeviceInfo.role）
     Members(Vec<DeviceInfo>),
     /// 收到远端剪贴板（from 为来源设备；自己发的已在连接层过滤）
-    Clipboard { from: String, payload: ClipboardPayload },
+    Clipboard { from: String, from_name: String, payload: ClipboardPayload },
     /// 某设备文件夹新增文件（含自己广播的回声，UI 按 from 自行判断）
-    FileAdd { from: String, file: SharedFile },
+    FileAdd { from: String, from_name: String, file: SharedFile },
     /// 某设备删除文件（file_ids 数组）
-    FileRemove { from: String, file_ids: Vec<String> },
+    FileRemove { from: String, from_name: String, file_ids: Vec<String> },
+    /// 传输任务数组全量快照（群主广播；客户端整体替换）
+    FileTasks(Vec<TransferTask>),
     /// 本设备被群主剔除
     Kicked(String),
     /// 群解散：UI 层延迟 0.8s 后退出群（不回发任何消息）
@@ -236,7 +238,7 @@ mod tests {
         while let Ok(_) = rx.try_recv() {} // 清空缓冲
 
         client_b
-            .send_clipboard(ClipboardPayload {
+            .send_clipboard("Device B".into(), ClipboardPayload {
                 kind: crate::protocol::ClipboardKind::Text,
                 text: Some("hello".into()),
                 hash: "a1b2c3d4e5f60718".into(),

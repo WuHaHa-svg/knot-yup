@@ -272,6 +272,7 @@
         <div class="panel-tabs" id="panelTabs" data-active="clipboard">
           <button class="panel-tab active" data-tab="clipboard" data-i18n="clipboard"></button>
           <button class="panel-tab" data-tab="files" data-i18n="files"></button>
+          <button class="panel-tab" data-tab="tasks" data-i18n="tasks"></button>
           <span class="tab-slider"></span>
         </div>
         <div class="panel-body" id="panelBody" data-active="clipboard">
@@ -290,6 +291,13 @@
               <button class="btn-mini" id="btnShareFile"><svg class="icon sm"><use href="#i-plus"/></svg><span data-i18n="share_file"></span></button>
             </div>
             <div id="fileList" class="file-list"></div>
+          </div>
+          <div class="panel-pane" id="paneTasks">
+            <div class="panel-head">
+              <svg class="icon sm muted"><use href="#i-refresh"/></svg>
+              <span class="hint" data-i18n="tasks_hint"></span>
+            </div>
+            <div id="transferList" class="transfer-list"></div>
           </div>
         </div>
       </section>

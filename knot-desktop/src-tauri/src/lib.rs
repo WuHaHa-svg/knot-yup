@@ -144,6 +144,14 @@ pub fn run() {
                 *shared.clip_tx.lock().await = Some(clip_tx);
                 *shared.core_tx.lock().await = Some(core_tx);
             });
+            // 供种端任务事件 → 状态层上报（供种服务只创建一次，setup 时注入通道）
+            let (task_tx, task_rx) = tokio::sync::mpsc::unbounded_channel::<knot_core::protocol::TaskEvent>();
+            {
+                use tauri::async_runtime::block_on;
+                block_on(shared.files.set_task_sink(task_tx));
+            }
+            tauri::async_runtime::spawn(bridge::forward_task_events(shared.clone(), task_rx));
+
             tauri::async_runtime::spawn(bridge::forward_core_events(
                 handle.clone(),
                 shared.clone(),
@@ -157,13 +165,11 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 while let Some(payload) = local_rx.recv().await {
                     dlog("evt/local-clip", format!("本机复制 len={} hash={}", payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash));
-                    let from = shared_clip
-                        .device
-                        .lock()
-                        .await
-                        .as_ref()
-                        .map(|d| d.id.clone())
-                        .unwrap_or_default();
+                    let (from, from_name) = {
+                        let d = shared_clip.device.lock().await;
+                        (d.as_ref().map(|x| x.id.clone()).unwrap_or_default(),
+                         d.as_ref().map(|x| x.name.clone()).unwrap_or_default())
+                    };
                     // 记录本机指纹：成员回声同指纹时会被忽略
                     *shared_clip.last_clip_hash.lock().await = payload.hash.clone();
                     {
@@ -173,22 +179,22 @@ pub fn run() {
                                 Role::Owner => {
                                     if let Some(server) = &session.server {
                                         server
-                                            .broadcast_clipboard(from.clone(), payload.clone())
+                                            .broadcast_clipboard(from.clone(), from_name.clone(), payload.clone())
                                             .await;
                                     }
                                 }
                                 Role::Member => {
                                     if let Some(client) = &session.client {
-                                        let _ = client.send_clipboard(payload.clone()).await;
+                                        let _ = client.send_clipboard(from_name.clone(), payload.clone()).await;
                                     }
                                 }
                             }
                         }
                     }
-                    push_history(&shared_clip, &from, &payload).await;
+                    push_history(&shared_clip, &from, &from_name, &payload).await;
                     let _ = handle_clip.emit(
                         "knot://clipboard",
-                        serde_json::json!({ "from": from, "text": payload.text, "hash": payload.hash }),
+                        serde_json::json!({ "from": from, "name": from_name, "text": payload.text, "hash": payload.hash }),
                     );
                 }
             });

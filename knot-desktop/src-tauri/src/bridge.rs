@@ -74,7 +74,7 @@ pub(crate) async fn forward_core_events(
                     }
                 }
             }
-            Ok(CoreEvent::Clipboard { from, payload }) => {
+            Ok(CoreEvent::Clipboard { from, from_name, payload }) => {
                 dlog("evt/clipboard", format!("from={} len={} hash={}", from, payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash));
                 // 防回环（第二道保险；from-id 已在连接层过滤）
                 let mut guard = state.last_clip_hash.lock().await;
@@ -86,13 +86,13 @@ pub(crate) async fn forward_core_events(
                 if let Some(tx) = state.clip_tx.lock().await.as_ref() {
                     let _ = tx.send(crate::state::ClipCmd::Set(payload.clone())).await;
                 }
-                push_history(&state, &from, &payload).await;
+                push_history(&state, &from, &from_name, &payload).await;
                 let _ = app.emit(
                     "knot://clipboard",
-                    serde_json::json!({ "from": from, "text": payload.text, "hash": payload.hash }),
+                    serde_json::json!({ "from": from, "name": from_name, "text": payload.text, "hash": payload.hash }),
                 );
             }
-            Ok(CoreEvent::FileAdd { from, file }) => {
+            Ok(CoreEvent::FileAdd { from, from_name, file }) => {
                 dlog("evt/file-add", format!("from={from} id={}", file.file_id));
                 let name = file.name.clone();
                 let map = &mut *state.file_map.lock().await;
@@ -100,18 +100,22 @@ pub(crate) async fn forward_core_events(
                 if !list.iter().any(|f| f.file_id == file.file_id) {
                     list.push(file);
                 }
-                // 带 from/name 供前端弹「XXX共享了文件 + 文件名副标题」；前端会过滤自己的 from
+                // from=共享者id, from_name=共享者名, name=文件名；前端过滤自己的 from
                 let _ = app.emit(
                     "knot://file-changed",
-                    serde_json::json!({ "from": from, "name": name }),
+                    serde_json::json!({ "from": from, "from_name": from_name, "name": name }),
                 );
             }
-            Ok(CoreEvent::FileRemove { from, file_ids }) => {
+            Ok(CoreEvent::FileRemove { from, from_name, file_ids }) => {
                 dlog("evt/file-remove", format!("from={from} n={}", file_ids.len()));
                 if let Some(list) = state.file_map.lock().await.get_mut(&from) {
                     list.retain(|f| !file_ids.contains(&f.file_id));
                 }
-                let _ = app.emit("knot://file-changed", serde_json::json!({}));
+                let _ = app.emit("knot://file-changed", serde_json::json!({ "from": from, "from_name": from_name }));
+            }
+            Ok(CoreEvent::FileTasks(tasks)) => {
+                dlog("evt/file-tasks", format!("n={}", tasks.len()));
+                let _ = app.emit("knot://file-tasks", serde_json::json!(tasks));
             }
             Ok(CoreEvent::Kicked(reason)) => {
                 dlog("evt/kicked", &reason);
@@ -313,3 +317,52 @@ async fn handle_migrate(app: AppHandle, state: SharedState, addr: String, pin: S
 
 // 自动承接/重连机制已移除：成员侧连接断开（connection closed）统一改为清会话 +
 // 发 knot://conn-lost 事件，由前端弹「连接已断开」对话框交用户决策（见 forward_core_events）。
+
+/// 供种端任务事件 → ws 上报（群主走本地方法，成员走 client）。
+/// 设计见 docs/transfer-center.md：queuing/started/progress/done 由供种方上报。
+pub(crate) async fn forward_task_events(
+    state: SharedState,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<knot_core::protocol::TaskEvent>,
+) {
+    use knot_core::protocol::TaskEvent;
+    while let Some(ev) = rx.recv().await {
+        let session = state.session.lock().await;
+        let Some(s) = session.as_ref() else { continue };
+        match &ev {
+            TaskEvent::Queued { task_id }
+            | TaskEvent::Started { task_id }
+            | TaskEvent::Done { task_id } => {
+                if let Some(server) = &s.server {
+                    server.local_task_event(ev.clone()).await;
+                } else if let Some(client) = &s.client {
+                    let r = match &ev {
+                        TaskEvent::Queued { .. } => client.send_task_queued(task_id.clone()).await,
+                        TaskEvent::Started { .. } => client.send_task_started(task_id.clone()).await,
+                        TaskEvent::Done { .. } => client.send_task_finish(task_id.clone()).await,
+                        _ => unreachable!(),
+                    };
+                    if let Err(e) = r { dlog("evt/task", format!("上报失败: {e}")); }
+                }
+            }
+            TaskEvent::Progress { task_id, transferred, total } => {
+                let progress = if *total == 0 { 0 } else { (*transferred * 100 / *total).min(100) as u32 };
+                if let Some(server) = &s.server {
+                    server.local_task_event(ev.clone()).await;
+                } else if let Some(client) = &s.client {
+                    if let Err(e) = client.send_task_progress(task_id.clone(), progress, *transferred).await {
+                        dlog("evt/task", format!("进度上报失败: {e}"));
+                    }
+                }
+            }
+            TaskEvent::Failed { task_id, error } => {
+                if let Some(server) = &s.server {
+                    server.local_task_event(ev.clone()).await;
+                } else if let Some(client) = &s.client {
+                    if let Err(e) = client.send_task_failed(task_id.clone(), error.clone()).await {
+                        dlog("evt/task", format!("失败上报失败: {e}"));
+                    }
+                }
+            }
+        }
+    }
+}

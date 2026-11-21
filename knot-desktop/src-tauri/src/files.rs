@@ -3,8 +3,8 @@
 //! 本地清单存 ~/KnotYup/shared/index.json，条目 = 网络元数据(SharedFile) + 本地路径。
 //! 入群期间起 FileSeeder，resolver 动态查 path_map（增删文件即时生效、端口稳定）；离群停服。
 
-use knot_core::file::{sha256_file, FileSeeder};
-use knot_core::protocol::{now_ms, SharedFile};
+use knot_core::file::{sha256_file, FileSeeder, TaskEventSink};
+use knot_core::protocol::{now_ms, SharedFile, TaskEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +26,8 @@ pub(crate) struct FileManager {
     /// file_id → 本地路径；供种 resolver 动态读，增删即时生效，seeder 端口稳定不重启
     path_map: Arc<RwLock<HashMap<String, PathBuf>>>,
     pub seeder: Mutex<Option<FileSeeder>>,
+    /// 供种端任务事件 → 状态层上报（setup 时注入）
+    task_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<TaskEvent>>>,
 }
 
 impl FileManager {
@@ -47,7 +49,13 @@ impl FileManager {
             files: Mutex::new(files),
             path_map: Arc::new(RwLock::new(path_map)),
             seeder: Mutex::new(None),
+            task_tx: Mutex::new(None),
         }
+    }
+
+    /// 注入任务事件上报通道（App setup 调用，供种服务启动前）。
+    pub async fn set_task_sink(&self, tx: tokio::sync::mpsc::UnboundedSender<TaskEvent>) {
+        *self.task_tx.lock().await = Some(tx);
     }
 
     fn index_path(&self) -> PathBuf {
@@ -72,7 +80,11 @@ impl FileManager {
         let map = self.path_map.clone();
         let resolver: knot_core::file::FileResolver =
             Arc::new(move |id| map.read().ok().and_then(|m| m.get(id).cloned()));
-        match FileSeeder::start(0, pin.to_string(), local_id.to_string(), resolver).await {
+        let task_tx = self.task_tx.lock().await.clone();
+        let on_event: TaskEventSink = Arc::new(move |e| {
+            if let Some(tx) = &task_tx { let _ = tx.send(e); }
+        });
+        match FileSeeder::start(0, pin.to_string(), local_id.to_string(), resolver, on_event).await {
             Ok(s) => {
                 let addr = format!("{}:{}", ip, s.port());
                 *guard = Some(s);

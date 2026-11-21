@@ -153,7 +153,7 @@ private fun App(
     var pin by remember { mutableStateOf("") }
     var sendText by remember { mutableStateOf(sharedText ?: "") }
     var confirmLeave by remember { mutableStateOf(false) }
-    var pendingKick by remember { mutableStateOf<String?>(null) }
+    var pendingKick by remember { mutableStateOf<Pair<String, String>?>(null) }
     var pinDialogFor by remember { mutableStateOf<GroupAd?>(null) }
     var showQr by remember { mutableStateOf(false) }
     // rememberSaveable：横竖屏旋转（Activity 重建）不重播开屏动画
@@ -287,7 +287,7 @@ private fun App(
                     GroupBody(t, session.members, history, sendText,
                         role = session.role,
                         groupAddr = session.addr, groupPin = session.pin,
-                        onKick = { pendingKick = it },
+                        onKick = { id, name -> pendingKick = id to name },
                         onCopy = { text ->
                             // 点击历史复制：先同步指纹/文本闸门，避免被监听器当作本机复制再发回群
                             AppState.clipGuard = textHash(text)

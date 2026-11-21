@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::crypto::Cipher;
 use crate::net::{CoreEvent, Tx};
-use crate::protocol::{self, ClipboardPayload, DeviceInfo, Message, SharedFile};
+use crate::protocol::{self, ClipboardPayload, DeviceInfo, Message, SharedFile, TransferTask};
 
 /// 成员（客户端）句柄。drop 时中止读任务 → 断开连接，群主侧才能感知离开。
 pub struct GroupClient {
@@ -120,7 +120,7 @@ impl GroupClient {
                                 // Pong 携带成员表快照 → 心跳即状态同步
                                 event_tx.send(CoreEvent::Members(members)).ok();
                             }
-                            Some(Message::Clipboard { from, payload }) => {
+                            Some(Message::Clipboard { from, from_name, payload }) => {
                                 // from-id 回声去重：自己发出去的广播不再抛事件
                                 if from == echo_local_id {
                                     tracing::debug!(target: "ws/client", "<- clipboard 回声（自己发送），忽略");
@@ -128,15 +128,19 @@ impl GroupClient {
                                 }
                                 tracing::debug!(target: "ws/client", "<- clipboard from={} len={} hash={}",
                                     from, payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash);
-                                event_tx.send(CoreEvent::Clipboard { from, payload }).ok();
+                                event_tx.send(CoreEvent::Clipboard { from, from_name, payload }).ok();
                             }
-                            Some(Message::FileAdd { from, file }) => {
+                            Some(Message::FileAdd { from, from_name, file }) => {
                                 tracing::debug!(target: "ws/client", "<- file_add from={from} id={}", file.file_id);
-                                event_tx.send(CoreEvent::FileAdd { from, file }).ok();
+                                event_tx.send(CoreEvent::FileAdd { from, from_name, file }).ok();
                             }
-                            Some(Message::FileRemove { from, file_ids }) => {
+                            Some(Message::FileRemove { from, from_name, file_ids }) => {
                                 tracing::debug!(target: "ws/client", "<- file_remove from={from} n={}", file_ids.len());
-                                event_tx.send(CoreEvent::FileRemove { from, file_ids }).ok();
+                                event_tx.send(CoreEvent::FileRemove { from, from_name, file_ids }).ok();
+                            }
+                            Some(Message::FileTasks { tasks }) => {
+                                tracing::debug!(target: "ws/client", "<- file_tasks n={}", tasks.len());
+                                event_tx.send(CoreEvent::FileTasks(tasks)).ok();
                             }
                             Some(Message::Kick { reason }) => {
                                 tracing::debug!(target: "ws/client", "<- kick reason={:?}", reason.as_deref().unwrap_or(""));
@@ -236,12 +240,13 @@ impl GroupClient {
     }
 
     /// 发送本机剪贴板变化到组主（加密信封）。
-    pub async fn send_clipboard(&self, payload: ClipboardPayload) -> Result<(), String> {
+    pub async fn send_clipboard(&self, from_name: String, payload: ClipboardPayload) -> Result<(), String> {
         tracing::debug!(target: "ws/client", "-> clipboard len={} hash={}",
             payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash);
         let text = serde_json::to_string(
             &Message::Clipboard {
                 from: self.local_id.clone(),
+                from_name,
                 payload,
             }
             .seal(&self.cipher),
@@ -254,23 +259,58 @@ impl GroupClient {
     }
 
     /// 自己文件夹新增文件。
-    pub async fn send_file_add(&self, file: SharedFile) -> Result<(), String> {
+    pub async fn send_file_add(&self, from_name: String, file: SharedFile) -> Result<(), String> {
         tracing::debug!(target: "ws/client", "-> file_add id={}", file.file_id);
         let text = serde_json::to_string(
-            &Message::FileAdd { from: self.local_id.clone(), file }.seal(&self.cipher),
+            &Message::FileAdd { from: self.local_id.clone(), from_name, file }.seal(&self.cipher),
         )
         .unwrap();
         self.tx.send(WsMessage::Text(text)).await.map_err(|_| "连接已关闭".to_string())
     }
 
     /// 删除自己文件夹内的一条或多条。
-    pub async fn send_file_remove(&self, file_ids: Vec<String>) -> Result<(), String> {
+    pub async fn send_file_remove(&self, from_name: String, file_ids: Vec<String>) -> Result<(), String> {
         tracing::debug!(target: "ws/client", "-> file_remove n={}", file_ids.len());
         let text = serde_json::to_string(
-            &Message::FileRemove { from: self.local_id.clone(), file_ids }.seal(&self.cipher),
+            &Message::FileRemove { from: self.local_id.clone(), from_name, file_ids }.seal(&self.cipher),
         )
         .unwrap();
         self.tx.send(WsMessage::Text(text)).await.map_err(|_| "连接已关闭".to_string())
+    }
+
+    /// 传输中心消息统一发送（明文，不进加密信封）。
+    async fn send_task_msg(&self, msg: Message) -> Result<(), String> {
+        let text = serde_json::to_string(&msg).unwrap();
+        self.tx.send(WsMessage::Text(text)).await.map_err(|_| "连接已关闭".to_string())
+    }
+
+    /// ① 任务诞生（下载方）：status=queuing。
+    pub async fn send_task_add(&self, task: TransferTask) -> Result<(), String> {
+        tracing::debug!(target: "ws/client", "-> file_task_add id={}", task.task_id);
+        self.send_task_msg(Message::FileTaskAdd { task }).await
+    }
+    /// ② 供种方确认排队。
+    pub async fn send_task_queued(&self, task_id: String) -> Result<(), String> {
+        self.send_task_msg(Message::FileTaskQueued { task_id }).await
+    }
+    /// ③ 供种方开始发送。
+    pub async fn send_task_started(&self, task_id: String) -> Result<(), String> {
+        self.send_task_msg(Message::FileTaskStarted { task_id }).await
+    }
+    /// ④ 供种方节流进度。
+    pub async fn send_task_progress(&self, task_id: String, progress: u32, transferred: u64) -> Result<(), String> {
+        self.send_task_msg(Message::FileTaskProgress { task_id, progress, transferred }).await
+    }
+    /// ⑤ 供种方完成。
+    pub async fn send_task_finish(&self, task_id: String) -> Result<(), String> {
+        self.send_task_msg(Message::FileTaskFinish { task_id }).await
+    }
+    /// ⑥ 失败（双方都报，幂等）。
+    pub async fn send_task_failed(&self, task_id: String, error: String) -> Result<(), String> {
+        tracing::debug!(target: "ws/client", "-> file_task_failed id={task_id} error={error}");
+        self.send_task_msg(Message::FileTaskFailed {
+            task_id, error, reporter: self.local_id.clone(),
+        }).await
     }
 
     /// 转让第二步：standby 服务就绪后，通过原 ws 回告群主。

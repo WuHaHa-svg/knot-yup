@@ -6,7 +6,7 @@ use knot_core::clipboard::text_hash;
 use knot_core::discovery::{self, GroupAd};
 use knot_core::file::fetch_file;
 use knot_core::net::{GroupClient, GroupServer};
-use knot_core::protocol::{ClipboardKind, ClipboardPayload, SharedFile};
+use knot_core::protocol::{device_id, now_ms, ClipboardKind, ClipboardPayload, SharedFile, TaskStatus, TransferTask};
 use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
@@ -257,7 +257,11 @@ pub(crate) async fn share_file(
     path: String,
 ) -> Result<serde_json::Value, String> {
     let file = state.files.add_local(&path).await?;
-    let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+    let (my_id, my_name) = {
+        let d = state.device.lock().await;
+        (d.as_ref().map(|x| x.id.clone()).unwrap_or_default(),
+         d.as_ref().map(|x| x.name.clone()).unwrap_or_default())
+    };
     // 更新自己本地条目 + device.file_list（Members 广播携带真相源）+ 广播 file_add
     state.file_map.lock().await.entry(my_id.clone()).or_default().push(file.clone());
     if let Some(d) = state.device.lock().await.as_mut() {
@@ -265,7 +269,7 @@ pub(crate) async fn share_file(
             d.file_list.push(file.clone());
         }
     }
-    match send_file_add(&state, &my_id, file.clone()).await {
+    match send_file_add(&state, &my_id, &my_name, file.clone()).await {
         Ok(_) => {}
         Err(e) => return Err(e),
     }
@@ -281,14 +285,18 @@ pub(crate) async fn remove_files(
     file_ids: Vec<String>,
 ) -> Result<(), String> {
     state.files.remove_local(&file_ids).await;
-    let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+    let (my_id, my_name) = {
+        let d = state.device.lock().await;
+        (d.as_ref().map(|x| x.id.clone()).unwrap_or_default(),
+         d.as_ref().map(|x| x.name.clone()).unwrap_or_default())
+    };
     if let Some(list) = state.file_map.lock().await.get_mut(&my_id) {
         list.retain(|f| !file_ids.contains(&f.file_id));
     }
     if let Some(d) = state.device.lock().await.as_mut() {
         d.file_list.retain(|f| !file_ids.contains(&f.file_id));
     }
-    match send_file_remove(&state, &my_id, file_ids).await {
+    match send_file_remove(&state, &my_id, &my_name, file_ids).await {
         Ok(_) => {}
         Err(e) => return Err(e),
     }
@@ -307,12 +315,15 @@ pub(crate) async fn download_file(
     dest: String,
 ) -> Result<serde_json::Value, String> {
     // 找供种者 file_addr
-    let (pin, my_id, seed_addr, src_meta) = {
+    let (pin, my_id, my_name, seed_name, seed_addr, src_meta) = {
         let s = state.session.lock().await;
         let session = s.as_ref().ok_or("NOT_IN_GROUP")?;
         let pin = session.pin.clone();
-        let my_id = state.device.lock().await.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+        let my = state.device.lock().await.clone();
+        let my_id = my.as_ref().map(|d| d.id.clone()).unwrap_or_default();
+        let my_name = my.as_ref().map(|d| d.name.clone()).unwrap_or_default();
         let seed = session.members.iter().find(|m| m.id == seed_device_id);
+        let seed_name = seed.map(|m| m.name.clone()).unwrap_or_default();
         let seed_addr = seed.and_then(|m| m.file_addr.clone()).ok_or("SEED_NO_ADDR")?;
         let src_meta = {
             let map = state.file_map.lock().await;
@@ -320,40 +331,88 @@ pub(crate) async fn download_file(
                 .and_then(|list| list.iter().find(|f| f.file_id == src_file_id).cloned())
                 .ok_or("FILE_NOT_FOUND")?
         };
-        (pin, my_id, seed_addr, src_meta)
+        (pin, my_id, my_name, seed_name, seed_addr, src_meta)
     };
     let dest_path = std::path::Path::new(&dest);
-    fetch_file(
+    // 传输任务诞生（下载方上报，status=queuing）；task_id 随 P2P 请求帧传给供种方
+    let task_id = device_id();
+    let now = now_ms();
+    let task = TransferTask {
+        task_id: task_id.clone(),
+        file_id: src_file_id.clone(),
+        name: src_meta.name.clone(),
+        size: src_meta.size,
+        mime: src_meta.mime.clone(),
+        seeder_id: seed_device_id.clone(),
+        seeder_name: seed_name.clone(),
+        downloader_id: my_id.clone(),
+        downloader_name: my_name.clone(),
+        status: TaskStatus::Queuing,
+        progress: 0,
+        transferred: 0,
+        error: String::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    {
+        let s = state.session.lock().await;
+        if let Some(session) = s.as_ref() {
+            if let Some(server) = &session.server {
+                server.local_task_add(task).await;
+            } else if let Some(client) = &session.client {
+                if let Err(e) = client.send_task_add(task).await {
+                    dlog("evt/task", format!("task_add 上报失败: {e}"));
+                }
+            }
+        }
+    }
+    let result = fetch_file(
         &seed_addr, &pin, &src_file_id, &seed_device_id, &my_id,
-        &src_meta.name, &src_meta.mime, dest_path,
+        &src_meta.name, &src_meta.mime, dest_path, &task_id,
     )
-    .await
-    .map_err(|e| format!("下载失败: {e}"))?;
+    .await;
+    // 下载方失败上报（与供种方形成双保险：任一方掉线，另一方仍能把失败送达）
+    if let Err(e) = &result {
+        let s = state.session.lock().await;
+        if let Some(session) = s.as_ref() {
+            if let Some(server) = &session.server {
+                use knot_core::protocol::TaskEvent;
+                server.local_task_event(TaskEvent::Failed {
+                    task_id: task_id.clone(), error: e.clone(),
+                }).await;
+            } else if let Some(client) = &session.client {
+                if let Err(er) = client.send_task_failed(task_id.clone(), e.clone()).await {
+                    dlog("evt/task", format!("task_failed 上报失败: {er}"));
+                }
+            }
+        }
+    }
+    result.map_err(|e| format!("下载失败: {e}"))?;
     // 下载即终点：不再登记/广播，前端也不消费返回值
     Ok(serde_json::Value::Null)
 }
 
-async fn send_file_add(state: &SharedState, my_id: &str, file: SharedFile) -> Result<(), String> {
+async fn send_file_add(state: &SharedState, my_id: &str, my_name: &str, file: SharedFile) -> Result<(), String> {
     let s = state.session.lock().await;
     let session = s.as_ref().ok_or("NOT_IN_GROUP")?;
     if let Some(server) = &session.server {
-        server.broadcast_file_add(my_id.to_string(), file).await;
+        server.broadcast_file_add(my_id.to_string(), my_name.to_string(), file).await;
         Ok(())
     } else if let Some(client) = &session.client {
-        client.send_file_add(file).await
+        client.send_file_add(my_name.to_string(), file).await
     } else {
         Err("NO_SESSION".into())
     }
 }
 
-async fn send_file_remove(state: &SharedState, my_id: &str, ids: Vec<String>) -> Result<(), String> {
+async fn send_file_remove(state: &SharedState, my_id: &str, my_name: &str, ids: Vec<String>) -> Result<(), String> {
     let s = state.session.lock().await;
     let session = s.as_ref().ok_or("NOT_IN_GROUP")?;
     if let Some(server) = &session.server {
-        server.broadcast_file_remove(my_id.to_string(), ids).await;
+        server.broadcast_file_remove(my_id.to_string(), my_name.to_string(), ids).await;
         Ok(())
     } else if let Some(client) = &session.client {
-        client.send_file_remove(ids).await
+        client.send_file_remove(my_name.to_string(), ids).await
     } else {
         Err("NO_SESSION".into())
     }

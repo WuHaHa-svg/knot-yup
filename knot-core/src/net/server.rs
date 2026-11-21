@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::crypto::Cipher;
 use crate::net::{CoreEvent, MemberMap, Tx};
-use crate::protocol::{self, ClipboardPayload, DeviceInfo, Message, SharedFile};
+use crate::protocol::{self, ClipboardPayload, DeviceInfo, Message, SharedFile, TransferTask, TaskStatus};
 
 /// 转让回执等待表：device_id → 一次性通道（transfer() 注册，读循环收到 TransferReady 唤醒）
 type TransferWaiters = Arc<std::sync::Mutex<HashMap<String, oneshot::Sender<String>>>>;
@@ -27,6 +27,8 @@ pub struct GroupServer {
     event_tx: tokio::sync::broadcast::Sender<CoreEvent>,
     shutdown: Tx,
     waiters: TransferWaiters,
+    /// 传输任务数组（群主权威；终态锁定，保留到群解散）
+    tasks: Arc<RwLock<Vec<TransferTask>>>,
 }
 
 impl GroupServer {
@@ -53,6 +55,7 @@ impl GroupServer {
             event_tx,
             shutdown,
             waiters: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tasks: Arc::new(RwLock::new(Vec::new())),
         });
 
         let accept_server = server.clone();
@@ -128,6 +131,10 @@ impl GroupServer {
             })?))
             .await;
         // fileList 已内嵌在成员表里，JoinResult.members 自带全群文件列表，无需单独下发快照。
+        // 传输任务数组不内嵌成员表，入群后补发一条全量快照（明文）
+        if let Ok(text) = serde_json::to_string(&Message::FileTasks { tasks: self.tasks.read().await.clone() }) {
+            let _ = sink.send(WsMessage::Text(text)).await;
+        }
         self.broadcast_members().await;
 
         // 3. 读循环：转发成员消息；写任务：消费出站通道
@@ -136,6 +143,8 @@ impl GroupServer {
         let event_tx = self.event_tx.clone();
         let device_id = device.id.clone();
         let waiters = self.waiters.clone();
+        let tasks = self.tasks.clone();
+        let tasks_server = self.clone(); // 处理任务消息后广播全量快照
 
         // 空闲看门狗：成员每 30s 心跳，超过 35s 无任何入站消息即判定假死
         let last_activity = std::sync::Arc::new(std::sync::Mutex::new(tokio::time::Instant::now()));
@@ -179,12 +188,13 @@ impl GroupServer {
                         .ok()
                         .and_then(|m| m.open(&cipher));
                     match inner {
-                        Some(Message::Clipboard { from, payload }) => {
+                        Some(Message::Clipboard { from, from_name, payload }) => {
                             tracing::debug!(target: "ws/server", "<- clipboard [{peer}] from={} len={} hash={}",
                                 from, payload.text.as_deref().map(str::len).unwrap_or(0), payload.hash);
                             // 通知本机 UI，并把原始密文转发给其他成员（同 PIN 同密钥）
                             event_tx.send(CoreEvent::Clipboard {
                                 from: from.clone(),
+                                from_name,
                                 payload: payload.clone(),
                             })
                             .ok();
@@ -195,7 +205,7 @@ impl GroupServer {
                                 }
                             }
                         }
-                        Some(Message::FileAdd { from, file }) => {
+                        Some(Message::FileAdd { from, from_name, file }) => {
                             tracing::debug!(target: "ws/server", "<- file_add [{peer}] from={from} id={}", file.file_id);
                             // 成员表是文件列表唯一真相源：更新发送者 DeviceInfo.file_list
                             {
@@ -206,7 +216,7 @@ impl GroupServer {
                                     }
                                 }
                             }
-                            event_tx.send(CoreEvent::FileAdd { from: from.clone(), file }).ok();
+                            event_tx.send(CoreEvent::FileAdd { from: from.clone(), from_name, file }).ok();
                             let map = members.read().await;
                             for (id, (_, tx)) in map.iter() {
                                 if id != &device_id {
@@ -214,7 +224,7 @@ impl GroupServer {
                                 }
                             }
                         }
-                        Some(Message::FileRemove { from, file_ids }) => {
+                        Some(Message::FileRemove { from, from_name, file_ids }) => {
                             tracing::debug!(target: "ws/server", "<- file_remove [{peer}] from={from} n={}", file_ids.len());
                             {
                                 let mut map = members.write().await;
@@ -222,13 +232,71 @@ impl GroupServer {
                                     info.file_list.retain(|f| !file_ids.contains(&f.file_id));
                                 }
                             }
-                            event_tx.send(CoreEvent::FileRemove { from: from.clone(), file_ids }).ok();
+                            event_tx.send(CoreEvent::FileRemove { from: from.clone(), from_name, file_ids }).ok();
                             let map = members.read().await;
                             for (id, (_, tx)) in map.iter() {
                                 if id != &device_id {
                                     tx.try_send(WsMessage::Text(t.clone())).ok();
                                 }
                             }
+                        }
+                        Some(Message::FileTaskAdd { task }) => {
+                            tracing::debug!(target: "ws/server", "<- file_task_add [{peer}] id={} seeder={} downloader={}",
+                                task.task_id, task.seeder_id, task.downloader_id);
+                            let mut list = tasks.write().await;
+                            if !list.iter().any(|t| t.task_id == task.task_id) {
+                                list.push(task);
+                            }
+                            drop(list);
+                            tasks_server.broadcast_tasks().await;
+                        }
+                        Some(Message::FileTaskQueued { task_id }) => {
+                            tasks_server.update_task(&task_id, |t| {
+                                if t.status == TaskStatus::Queuing { t.updated_at = protocol::now_ms(); }
+                            }).await;
+                            tasks_server.broadcast_tasks().await;
+                        }
+                        Some(Message::FileTaskStarted { task_id }) => {
+                            tasks_server.update_task(&task_id, |t| {
+                                if t.status == TaskStatus::Queuing {
+                                    t.status = TaskStatus::Transferring;
+                                    t.updated_at = protocol::now_ms();
+                                }
+                            }).await;
+                            tasks_server.broadcast_tasks().await;
+                        }
+                        Some(Message::FileTaskProgress { task_id, progress, transferred }) => {
+                            tasks_server.update_task(&task_id, |t| {
+                                if t.status == TaskStatus::Transferring && progress >= t.progress {
+                                    t.progress = progress.min(100);
+                                    t.transferred = transferred;
+                                    t.updated_at = protocol::now_ms();
+                                }
+                            }).await;
+                            tasks_server.broadcast_tasks().await;
+                        }
+                        Some(Message::FileTaskFinish { task_id }) => {
+                            tasks_server.update_task(&task_id, |t| {
+                                if t.status == TaskStatus::Transferring {
+                                    t.status = TaskStatus::Done;
+                                    t.progress = 100;
+                                    t.updated_at = protocol::now_ms();
+                                }
+                            }).await;
+                            tasks_server.broadcast_tasks().await;
+                        }
+                        Some(Message::FileTaskFailed { task_id, error, reporter }) => {
+                            tracing::debug!(target: "ws/server", "<- file_task_failed [{peer}] id={} reporter={} error={}",
+                                task_id, reporter, error);
+                            // 终态锁定：已 done/failed 的任务忽略后到终态（防失败被延迟 done 翻回）
+                            tasks_server.update_task(&task_id, |t| {
+                                if t.status != TaskStatus::Done && t.status != TaskStatus::Failed {
+                                    t.status = TaskStatus::Failed;
+                                    t.error = error;
+                                    t.updated_at = protocol::now_ms();
+                                }
+                            }).await;
+                            tasks_server.broadcast_tasks().await;
                         }
                         Some(Message::Ping { seq, .. }) => {
                             // 回执：成员表快照即状态同步（群主身份看 role 字段）
@@ -324,11 +392,11 @@ impl GroupServer {
     }
 
     /// 广播本机剪贴板变化到所有成员。
-    pub async fn broadcast_clipboard(&self, from: String, payload: ClipboardPayload) {
+    pub async fn broadcast_clipboard(&self, from: String, from_name: String, payload: ClipboardPayload) {
         tracing::debug!(target: "ws/server", "-> clipboard 广播 n={} len={}",
             self.members.read().await.len(), payload.text.as_deref().map(str::len).unwrap_or(0));
         let text = serde_json::to_string(
-            &Message::Clipboard { from, payload }.seal(&self.cipher),
+            &Message::Clipboard { from, from_name, payload }.seal(&self.cipher),
         )
         .unwrap();
         let map = self.members.read().await;
@@ -338,7 +406,7 @@ impl GroupServer {
     }
 
     /// 群主本机新增文件：更新 owner.file_list + 广播全员。
-    pub async fn broadcast_file_add(&self, from: String, file: SharedFile) {
+    pub async fn broadcast_file_add(&self, from: String, from_name: String, file: SharedFile) {
         tracing::debug!(target: "ws/server", "-> file_add 广播 from={from} id={}", file.file_id);
         {
             let mut owner = self.owner.write().await;
@@ -347,7 +415,7 @@ impl GroupServer {
             }
         }
         let text = serde_json::to_string(
-            &Message::FileAdd { from, file }.seal(&self.cipher),
+            &Message::FileAdd { from, from_name, file }.seal(&self.cipher),
         )
         .unwrap();
         let map = self.members.read().await;
@@ -357,7 +425,7 @@ impl GroupServer {
     }
 
     /// 群主本机删除文件：更新 owner.file_list + 广播全员。
-    pub async fn broadcast_file_remove(&self, from: String, file_ids: Vec<String>) {
+    pub async fn broadcast_file_remove(&self, from: String, from_name: String, file_ids: Vec<String>) {
         tracing::debug!(target: "ws/server", "-> file_remove 广播 from={from} n={}", file_ids.len());
         {
             let mut owner = self.owner.write().await;
@@ -366,13 +434,92 @@ impl GroupServer {
             }
         }
         let text = serde_json::to_string(
-            &Message::FileRemove { from: from.clone(), file_ids: file_ids.clone() }.seal(&self.cipher),
+            &Message::FileRemove { from: from.clone(), from_name, file_ids: file_ids.clone() }.seal(&self.cipher),
         )
         .unwrap();
         let map = self.members.read().await;
         for (_, (_, tx)) in map.iter() {
             tx.try_send(WsMessage::Text(text.clone())).ok();
         }
+    }
+
+    /// 群主本机任务事件（群主自己下载/供种时无 ws 自连接，走这里）。
+    pub async fn local_task_event(&self, ev: protocol::TaskEvent) {
+        use protocol::TaskEvent::*;
+        match ev {
+            Queued { task_id } => {
+                self.update_task(&task_id, |t| { t.updated_at = protocol::now_ms(); }).await;
+            }
+            Started { task_id } => {
+                self.update_task(&task_id, |t| {
+                    if t.status == TaskStatus::Queuing {
+                        t.status = TaskStatus::Transferring;
+                        t.updated_at = protocol::now_ms();
+                    }
+                }).await;
+            }
+            Progress { task_id, transferred, total } => {
+                self.update_task(&task_id, |t| {
+                    if t.status == TaskStatus::Transferring {
+                        let p = if total == 0 { 0 } else { (transferred * 100 / total).min(100) as u32 };
+                        if p >= t.progress {
+                            t.progress = p; t.transferred = transferred;
+                            t.updated_at = protocol::now_ms();
+                        }
+                    }
+                }).await;
+            }
+            Done { task_id } => {
+                self.update_task(&task_id, |t| {
+                    if t.status == TaskStatus::Transferring {
+                        t.status = TaskStatus::Done; t.progress = 100;
+                        t.updated_at = protocol::now_ms();
+                    }
+                }).await;
+            }
+            Failed { task_id, error } => {
+                self.update_task(&task_id, |t| {
+                    if t.status != TaskStatus::Done && t.status != TaskStatus::Failed {
+                        t.status = TaskStatus::Failed; t.error = error;
+                        t.updated_at = protocol::now_ms();
+                    }
+                }).await;
+            }
+        }
+        self.broadcast_tasks().await;
+    }
+
+    /// 群主本机登记新任务（下载方为群主自己时）。
+    pub async fn local_task_add(&self, task: TransferTask) {
+        let mut list = self.tasks.write().await;
+        if !list.iter().any(|t| t.task_id == task.task_id) { list.push(task); }
+        drop(list);
+        self.broadcast_tasks().await;
+    }
+
+    /// 按 task_id 原地修改任务（不存在则忽略）。
+    pub(crate) async fn update_task<F: FnOnce(&mut TransferTask)>(&self, task_id: &str, f: F) {
+        let mut list = self.tasks.write().await;
+        if let Some(t) = list.iter_mut().find(|t| t.task_id == task_id) {
+            f(t);
+        }
+    }
+
+    /// 广播全量任务数组给所有成员 + 通知本机 UI。
+    pub async fn broadcast_tasks(&self) {
+        let list = self.tasks.read().await.clone();
+        let text = serde_json::to_string(&Message::FileTasks { tasks: list.clone() }).unwrap();
+        let map = self.members.read().await;
+        for (_, (_, tx)) in map.iter() {
+            tx.try_send(WsMessage::Text(text.clone())).ok();
+        }
+        drop(map);
+        self.event_tx.send(CoreEvent::FileTasks(list)).ok();
+    }
+
+    /// 群主本机最近一次任务数组快照（UI 首次拉取用）。
+    pub async fn task_snapshot(&self) -> Vec<TransferTask> {
+        self.tasks.read().await.clone()
     }
 
     /// 剔除成员（群主自身不可被移出）。

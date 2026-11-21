@@ -10,6 +10,9 @@ import com.knotyup.android.net.GroupAd
 import com.knotyup.android.net.GroupClient
 import com.knotyup.android.net.GroupEvent
 import com.knotyup.android.net.KnotGroupServer
+import com.knotyup.android.net.TaskEvent
+import com.knotyup.android.net.TaskStatus
+import com.knotyup.android.net.TransferTask
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -26,7 +29,7 @@ import kotlinx.coroutines.launch
 import java.net.ServerSocket
 import java.util.UUID
 
-data class HistoryItem(val from: String, val text: String, val atMs: Long)
+data class HistoryItem(val from: String, val name: String, val text: String, val atMs: Long)
 
 data class SessionState(
     val role: String = "member", // owner / member
@@ -62,11 +65,16 @@ object AppState {
         indexProvider = { fileIndex },
         localIdProvider = { device.id },
         contextProvider = { appContext ?: error("appContext 未注入") },
+        onEvent = { ev -> reportSeederEvent(ev) },
     )
 
     /** 群文件列表（按 device_id 分组；UI 文件 tab 观察） */
     private val _groupFiles = MutableStateFlow<Map<String, List<SharedFile>>>(emptyMap())
     val groupFiles: StateFlow<Map<String, List<SharedFile>>> = _groupFiles
+
+    /** 群传输任务数组（群主权威；全量快照替换） */
+    private val _transferTasks = MutableStateFlow<List<TransferTask>>(emptyList())
+    val transferTasks: StateFlow<List<TransferTask>> = _transferTasks
 
     /** 群主服务端（role == owner 时存在） */
     var server: KnotGroupServer? = null
@@ -173,6 +181,24 @@ object AppState {
 
     fun isOwner(): Boolean = _session.value.role == "owner"
 
+    /** 供种端任务事件 → 群主（本地）或 ws 上报（成员）。 */
+    private fun reportSeederEvent(ev: TaskEvent) {
+        if (isOwner()) {
+            server?.localTaskEvent(ev)
+            return
+        }
+        when (ev) {
+            is TaskEvent.Queued -> client.sendTaskQueued(ev.taskId)
+            is TaskEvent.Started -> client.sendTaskStarted(ev.taskId)
+            is TaskEvent.Progress -> {
+                val p = if (ev.total == 0L) 0 else (ev.transferred * 100 / ev.total).toInt().coerceAtMost(100)
+                client.sendTaskProgress(ev.taskId, p, ev.transferred)
+            }
+            is TaskEvent.Done -> client.sendTaskFinish(ev.taskId)
+            is TaskEvent.Failed -> client.sendTaskFailed(ev.taskId, ev.error)
+        }
+    }
+
     /** 成员入群时记录（重连/承接群主时需要同一 PIN 与地址）。 */
     fun onJoining(addr: String, pin: String) {
         _session.value = _session.value.copy(role = "member", addr = addr, pin = pin)
@@ -208,7 +234,7 @@ object AppState {
                 joined = true,
             )
             is GroupEvent.Clipboard -> _history.value = (
-                listOf(HistoryItem(event.from, event.payload.text, System.currentTimeMillis())) + _history.value
+                listOf(HistoryItem(event.from, event.fromName, event.payload.text, System.currentTimeMillis())) + _history.value
                 ).take(50)
             else -> {}
         }
@@ -216,7 +242,7 @@ object AppState {
 
     fun addLocalHistory(text: String) {
         _history.value = (
-            listOf(HistoryItem(device.id, text, System.currentTimeMillis())) + _history.value
+            listOf(HistoryItem(device.id, device.name, text, System.currentTimeMillis())) + _history.value
         ).take(50)
     }
 
@@ -306,7 +332,7 @@ object AppState {
                 } else {
                     // 后台：Android 禁止读剪贴板，也不静默写（用户无感）→ 发悬浮通知告知，
                     // 由用户点「复制」按钮才写入（见 ClipboardCopyReceiver）
-                    val fromName = _session.value.members.firstOrNull { it.id == event.from }?.name ?: ""
+                    val fromName = event.fromName
                     appContext?.let {
                         android.util.Log.d("KnotYup", "后台收到剪贴板 from=$fromName len=${text.length} → 悬浮通知")
                         com.knotyup.android.service.ClipboardNotification.show(it, text, fromName)
@@ -321,7 +347,7 @@ object AppState {
                 _groupFiles.value = cur
                 // 他人共享：前台 toast「XXX共享了文件」+ 文件名副标题；后台发悬浮通知（含下载按钮）
                 if (event.from != device.id) {
-                    val fromName = _session.value.members.firstOrNull { it.id == event.from }?.name ?: ""
+                    val fromName = event.fromName
                     if (inForeground) {
                         toastKey("file_shared", 1, mapOf("name" to fromName), event.file.name)
                     } else {
@@ -342,6 +368,7 @@ object AppState {
                 }
                 _groupFiles.value = cur
             }
+            is GroupEvent.FileTasks -> _transferTasks.value = event.tasks
             is GroupEvent.Kicked -> {
                 reset()
                 toastKey("kicked", 2)
@@ -578,8 +605,18 @@ object AppState {
     /** 从供种者下载文件 → 写公共 Downloads/knotShare。纯本地行为：不登记共享清单、不广播、不成为供种者。 */
     suspend fun downloadSharedFile(seedId: String, file: SharedFile): String = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         val ctx = appContext ?: error("appContext 未注入")
-        val seedAddr = session.value.members.firstOrNull { it.id == seedId }?.fileAddr
-            ?: error("供种者不在线")
+        val seedMember = session.value.members.firstOrNull { it.id == seedId }
+        val seedAddr = seedMember?.fileAddr ?: error("供种者不在线")
+        val seedName = seedMember!!.name
+        // 传输任务诞生（下载方上报 queuing）；task_id 随 P2P 请求帧传给供种方
+        val taskId = java.util.UUID.randomUUID().toString()
+        val now = System.currentTimeMillis()
+        val task = TransferTask(
+            taskId, file.fileId, file.name, file.size, file.mime,
+            seedId, seedName, device.id, device.name,
+            TaskStatus.QUEUING, 0, 0L, "", now, now,
+        )
+        if (isOwner()) server?.localTaskAdd(task) else client.sendTaskAdd(task)
         val resolver = ctx.contentResolver
         val collection = android.provider.MediaStore.Downloads.getContentUri(android.provider.MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val values = android.content.ContentValues().apply {
@@ -594,9 +631,12 @@ object AppState {
         try {
             val out = resolver.openOutputStream(uri) ?: error("打开输出流失败")
             try {
-                p2pFile.download(seedAddr, seedId, file.fileId, out) { received, total ->
-                    com.knotyup.android.service.DownloadProgressNotification.update(ctx, file.name, received, total)
-                }
+                p2pFile.download(seedAddr, seedId, file.fileId, out,
+                    onProgress = { received, total ->
+                        com.knotyup.android.service.DownloadProgressNotification.update(ctx, file.name, received, total)
+                    },
+                    taskId = taskId,
+                )
             } finally {
                 out.close()
             }
@@ -605,6 +645,10 @@ object AppState {
             resolver.update(uri, values, null, null)
         } catch (e: Exception) {
             resolver.delete(uri, null, null)
+            // 下载方失败上报（与供种方双保险）
+            val err = e.message ?: "下载失败"
+            if (isOwner()) server?.localTaskEvent(TaskEvent.Failed(taskId, err))
+            else client.sendTaskFailed(taskId, err)
             throw e
         } finally {
             com.knotyup.android.service.DownloadProgressNotification.cancel(ctx)
@@ -805,6 +849,7 @@ object AppState {
         standby = null
         _session.value = SessionState()
         _history.value = emptyList()
+        _transferTasks.value = emptyList()
         _joining.value = false
     }
 
