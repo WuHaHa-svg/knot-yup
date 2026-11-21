@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -43,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -249,15 +251,21 @@ private fun DeviceFolderRow(member: DeviceInfo, count: Int, onClick: () -> Unit)
             modifier = Modifier.weight(1f),
             maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis,
         )
-        // 数量徽章：主题色柔和底
-        Text(
-            "$count", fontSize = 11.sp, fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f))
-                .padding(horizontal = 9.dp, vertical = 2.dp),
-        )
+        // 数量徽章：与桌面一致的主题色 9% 混白底 + 正圆
+        Box(
+            Modifier.size(18.dp)
+                .clip(CircleShape)
+                .background(lerp(Color.White, MaterialTheme.colorScheme.primary, 0.09f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "$count", fontSize = 10.sp, lineHeight = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = TextAlign.Center,
+            )
+        }
     }
 }
 
