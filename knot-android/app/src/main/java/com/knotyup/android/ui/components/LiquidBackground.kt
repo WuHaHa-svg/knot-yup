@@ -71,27 +71,28 @@ internal fun LiquidBackground(dark: Boolean = androidx.compose.foundation.isSyst
             .clipToBounds()
     ) {
         @Suppress("UNUSED_EXPRESSION") tick // 读快照状态：tick 变化即触发本绘制块重绘
-        // 底色随系统深浅色：浅色纯白 / 深色纯黑（色斑颜色不变）
-        drawRect(if (dark) Color.Black else Color.White)
+        // 底色随系统深浅色：浅色纯白 / 深色深灰（色斑颜色不变）
+        drawRect(if (dark) Color(0xFF212121) else Color.White)
         val w = size.width
         val h = size.height
         val minDim = size.minDimension
         // 色斑定义：基准位置（比例）+ 漂移幅度（比例，xy 各异）+ 半径基准/呼吸幅度（比例）+ 颜色
+        // color=浅色模式柔色，darkColor=深色模式柔色（深灰底上柔和可辨的暗色调）
         data class Blob(
             val bx: Float, val by: Float,
             val ax: Float, val ay: Float,
             val rBase: Float, val rBreathe: Float,
-            val color: Color,
+            val color: Color, val darkColor: Color,
         )
         val blobs = listOf(
-            Blob(0.16f, 0.22f, 0.13f, 0.10f, 0.62f, 0.10f, Color(0xFFDCE7FB)), // 淡蓝
-            Blob(0.86f, 0.28f, 0.11f, 0.14f, 0.58f, 0.12f, Color(0xFFEDE3FB)), // 淡紫
-            Blob(0.24f, 0.84f, 0.14f, 0.09f, 0.66f, 0.09f, Color(0xFFDFF6F0)), // 淡青
-            Blob(0.80f, 0.82f, 0.10f, 0.13f, 0.56f, 0.13f, Color(0xFFFBE7EE)), // 淡粉
-            Blob(0.52f, 0.50f, 0.08f, 0.08f, 0.50f, 0.08f, Color(0xFFFBF3DC)), // 中央淡金（融合用）
-            Blob(0.05f, 0.55f, 0.09f, 0.12f, 0.54f, 0.11f, Color(0xFFE3F5E3)), // 淡绿
-            Blob(0.55f, 0.08f, 0.12f, 0.09f, 0.60f, 0.10f, Color(0xFFFEFBF2)), // 淡橙（极淡，仅隐约点缀）
-            Blob(0.45f, 0.92f, 0.10f, 0.11f, 0.58f, 0.09f, Color(0xFFE4F0FC)), // 淡天蓝
+            Blob(0.16f, 0.22f, 0.13f, 0.10f, 0.62f, 0.10f, Color(0xFFDCE7FB), Color(0xFF354660)), // 蓝
+            Blob(0.86f, 0.28f, 0.11f, 0.14f, 0.58f, 0.12f, Color(0xFFEDE3FB), Color(0xFF443A5E)), // 紫
+            Blob(0.24f, 0.84f, 0.14f, 0.09f, 0.66f, 0.09f, Color(0xFFDFF6F0), Color(0xFF2E4A44)), // 青
+            Blob(0.80f, 0.82f, 0.10f, 0.13f, 0.56f, 0.13f, Color(0xFFFBE7EE), Color(0xFF503640)), // 粉
+            Blob(0.52f, 0.50f, 0.08f, 0.08f, 0.50f, 0.08f, Color(0xFFFBF3DC), Color(0xFF4E4632)), // 中央金（融合用）
+            Blob(0.05f, 0.55f, 0.09f, 0.12f, 0.54f, 0.11f, Color(0xFFE3F5E3), Color(0xFF354A35)), // 绿
+            Blob(0.55f, 0.08f, 0.12f, 0.09f, 0.60f, 0.10f, Color(0xFFFEFBF2), Color(0xFF484234)), // 橙（极淡，仅隐约点缀）
+            Blob(0.45f, 0.92f, 0.10f, 0.11f, 0.58f, 0.09f, Color(0xFFE4F0FC), Color(0xFF324358)), // 天蓝
         )
         blobs.forEachIndexed { i, b ->
             val px = phases[i * PHASE_PER_BLOB]
@@ -106,7 +107,7 @@ internal fun LiquidBackground(dark: Boolean = androidx.compose.foundation.isSyst
             val r = minDim * (b.rBase + b.rBreathe * sin(breath + i * 2.1f))
             drawCircle(
                 brush = Brush.radialGradient(
-                    colors = listOf(b.color, Color.Transparent),
+                    colors = listOf(if (dark) b.darkColor else b.color, Color.Transparent),
                     center = Offset(cx, cy),
                     radius = r,
                 ),
