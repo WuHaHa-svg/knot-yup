@@ -614,7 +614,8 @@ object AppState {
         val task = TransferTask(
             taskId, file.fileId, file.name, file.size, file.mime,
             seedId, seedName, device.id, device.name,
-            TaskStatus.QUEUING, 0, 0L, "", now, now,
+            TaskStatus.QUEUING, 0, 0L, "", "", "",
+            now, now,
         )
         if (isOwner()) server?.localTaskAdd(task) else client.sendTaskAdd(task)
         val resolver = ctx.contentResolver

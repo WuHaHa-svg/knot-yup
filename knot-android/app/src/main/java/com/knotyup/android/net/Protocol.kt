@@ -89,7 +89,7 @@ data class SharedFile(
 
 /** 传输任务状态（与 knot-core TaskStatus 逐字段一致，snake_case 线上值）。 */
 enum class TaskStatus(val wire: String) {
-    QUEUING("queuing"), TRANSFERRING("transferring"), DONE("done"), FAILED("failed");
+    QUEUING("queuing"), TRANSFERRING("transferring"), DONE("done"), FAILED("failed"), CANCELLED("cancelled");
     companion object { fun fromWire(s: String) = values().firstOrNull { it.wire == s } ?: QUEUING }
 }
 
@@ -108,6 +108,8 @@ data class TransferTask(
     val progress: Int,
     val transferred: Long,
     val error: String,
+    val cancellerId: String,
+    val cancellerName: String,
     val createdAt: Long,
     val updatedAt: Long,
 ) {
@@ -117,7 +119,8 @@ data class TransferTask(
         put("seeder_id", seederId); put("seeder_name", seederName)
         put("downloader_id", downloaderId); put("downloader_name", downloaderName)
         put("status", status.wire); put("progress", progress); put("transferred", transferred)
-        put("error", error); put("created_at", createdAt); put("updated_at", updatedAt)
+        put("error", error); put("canceller_id", cancellerId); put("canceller_name", cancellerName)
+        put("created_at", createdAt); put("updated_at", updatedAt)
     }
 
     companion object {
@@ -128,6 +131,7 @@ data class TransferTask(
             o.getString("downloader_id"), o.getString("downloader_name"),
             TaskStatus.fromWire(o.getString("status")),
             o.optInt("progress"), o.optLong("transferred"), o.optString("error"),
+            o.getString("canceller_id"), o.getString("canceller_name"),
             o.optLong("created_at"), o.optLong("updated_at"),
         )
 

@@ -351,6 +351,8 @@ pub(crate) async fn download_file(
         progress: 0,
         transferred: 0,
         error: String::new(),
+        canceller_id: String::new(),
+        canceller_name: String::new(),
         created_at: now,
         updated_at: now,
     };

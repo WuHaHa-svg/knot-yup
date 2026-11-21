@@ -236,6 +236,8 @@ body {
   padding: 16px 18px 12px;
 }
 .panel-head h2 { font-size: 14px; font-weight: 650; letter-spacing: .3px; }
+.head-title { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; font-weight: 600; color: var(--text-2); }
+.root-title { display: inline-flex; }
 .count {
   font-size: 11.5px; font-weight: 600; color: var(--accent);
   background: var(--accent-soft); padding: 2px 8px; border-radius: 999px;
@@ -587,15 +589,21 @@ body {
   padding: 8px 10px; margin: 4px 0; border: 1px solid var(--border);
   border-radius: 12px; background: var(--surface-2); font-size: 12.5px;
 }
-.transfer-row.done, .transfer-row.failed { opacity: .62; }
+.transfer-row.done, .transfer-row.failed, .transfer-row.cancelled { opacity: .62; }
 .transfer-row .t-dir { flex: 0 0 auto; color: var(--accent); display: inline-flex; }
+.transfer-row .t-sent { color: var(--accent); font-weight: 700; }
 .transfer-row .t-main { flex: 1; min-width: 0; }
 .transfer-row .t-name { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .transfer-row .t-peer { color: var(--text-3); font-size: 11px; margin-top: 2px; }
-.transfer-row .t-meta { flex: 0 0 auto; text-align: right; font-size: 11px; color: var(--text-2); }
+.transfer-row .t-meta { flex: 0 0 auto; text-align: right; font-size: 11px; }
+/* 状态文本配色：排队灰 / 传输中主色 / 已完成绿 / 失败红 */
+.transfer-row.queuing .t-meta { color: var(--text-3); }
+.transfer-row.transferring .t-meta { color: var(--accent); }
+.transfer-row.done .t-meta { color: var(--ok); }
 .transfer-row .t-bar { height: 3px; border-radius: 2px; background: var(--border); margin-top: 4px; overflow: hidden; }
 .transfer-row .t-bar > i { display: block; height: 100%; background: var(--accent); }
 .transfer-row.failed .t-meta { color: var(--danger); }
+.transfer-row.cancelled .t-meta { color: var(--text-3); }
 .transfer-list .empty { padding: 30px 12px; text-align: center; color: var(--text-3); font-size: 12.5px; }
 .folder-ic, .file-ic {
   width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;

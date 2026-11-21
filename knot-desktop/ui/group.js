@@ -220,24 +220,24 @@ function renderTasks() {
     return;
   }
   const ongoing = tasks.filter((x) => x.status === 'queuing' || x.status === 'transferring');
-  const finished = tasks.filter((x) => x.status === 'done' || x.status === 'failed');
+  const finished = tasks.filter((x) => x.status === 'done' || x.status === 'failed' || x.status === 'cancelled');
   const row = (x) => {
     // 方向由 seederName -> downloaderName 文本表达，箭头固定 → 无需判断
     const seederName = x.seeder_name;
     const downloaderName = x.downloader_name;
     const label = ({
       queuing: t('task_queuing'), transferring: t('task_transferring'),
-      done: t('task_done'), failed: t('task_failed'),
+      done: t('task_done'), failed: t('task_failed'), cancelled: t('task_cancelled'),
     })[x.status] || x.status;
     const meta = x.status === 'failed'
       ? `${label}${x.error ? ' · ' + escapeHtml(x.error) : ''}`
       : x.status === 'queuing' ? label : `${label} · ${x.progress}%`;
     const pct = x.status === 'done' ? 100 : (x.progress || 0);
     return `<li class="transfer-row ${x.status}">
-      <span class="t-dir">→</span>
+      <svg class="icon sm t-dir"><use href="#i-transfer"/></svg>
       <div class="t-main">
         <div class="t-name">${escapeHtml(x.name)}</div>
-        <div class="t-peer">${escapeHtml(seederName)} -> ${escapeHtml(downloaderName)}</div>
+        <div class="t-peer">${escapeHtml(seederName)} <span class="t-sent">${t('task_sent_to')}</span> ${escapeHtml(downloaderName)}</div>
         <div class="t-bar"><i style="width:${pct}%"></i></div>
       </div>
       <div class="t-meta">${meta}</div>
@@ -252,6 +252,8 @@ function renderFiles() {
   box.innerHTML = '';
   // 头部：一级隐藏返回，二级显示返回；共享按钮两级都在
   const backBtn = $('btnFileBack');
+  const rootTitle = $('fileRootTitle');
+  if (rootTitle) rootTitle.classList.toggle('hidden', !!fileViewDevice);
   if (backBtn) {
     backBtn.classList.toggle('hidden', !fileViewDevice);
     backBtn.onclick = () => { fileViewDevice = null; renderFiles(); };

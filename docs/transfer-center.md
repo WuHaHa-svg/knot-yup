@@ -18,7 +18,7 @@
 | 上报职责 | **任务诞生**由下载方报（add）；**正常状态**（queuing/started/progress/done）由**供种方**报；**失败由双方各自上报**（任一方掉线，另一方仍能把失败送达） |
 | 进度上报 | **节流**：仅整数百分比变化时上报（一个文件约 100 条） |
 | UI | **桌面新增第三个 tab「传输中心」**（与剪切板/文件并列）；**安卓在文件 tab 的文件夹列表下方**加「传输中心」段（标题+副标题，与群信息 tab 同款一起滚动） |
-| 操作 | **只读监控**，无取消、无重试 |
+| 操作 | 传输中心初版为**只读监控**；取消功能见 [§10 取消传输（待实现）](#10-取消传输待实现)：**群内任一成员**可取消 `queuing`/`transferring` 的任务 |
 
 ## 2. 核心概念：一次传输 = 一条任务
 
@@ -46,10 +46,12 @@ TransferTask {
   mime:          "application/zip",
   seeder_id:     "<device id>",   // 供种者（文件所在设备）
   downloader_id: "<device id>",   // 下载者
-  status:        queuing | transferring | done | failed,
+  status:        queuing | transferring | done | failed | cancelled,
   progress:      0..100,          // 整数百分比；queuing 阶段恒为 0
   transferred:   3355443,         // 已传字节（UI 可显示 3.2/10 MB）
   error:         "",              // 失败原因（status=failed 时有值；双方上报时各自填自己看到的原因）
+  canceller_id:  "<device id>",   // 取消者 id（status=cancelled 时有值；发起取消的成员，可能是第三方；任务诞生时为空）
+  canceller_name: "张三",         // 取消者设备名快照（创建取消时固化，UI 直接用）
   created_at:    ms,              // 任务创建时间
   updated_at:    ms,              // 最近一次进度/状态变化时间
 }
@@ -61,13 +63,14 @@ TransferTask {
   - `transferring`（传输中）：供种方发出 `ok` 帧、开始发送块；进度 0→100，**由供种方随发送进度上报**。
   - `done`（完成）：供种方发完最后一块、收到下载方 `done` 控制帧，**由供种方上报**。
   - `failed`（失败）：P2P 断线、HASH_MISMATCH、超时等，**由下载方与供种方双方各自上报**——任一方掉线，另一方仍在线即可把失败送达群主。
-- **四态流转**：`queuing → transferring → done|failed`；也可能 `queuing → failed` / `transferring → failed`。
+  - `cancelled`（已取消，终态）：群内任一成员主动取消，详见 §10。记录 `canceller_id`/`canceller_name`。
+- **五态流转**：`queuing → transferring → done|failed`；也可能 `queuing → failed` / `transferring → failed`；`queuing|transferring → cancelled`（任一成员取消）。终态 `done/failed/cancelled` 之间不再流转（群主终态锁定，先到为准）。
 - **上报方分工**：任务诞生（add）由下载方发起；正常状态由供种方驱动；失败双方都报、群主按 task_id 幂等覆盖（先到为准，后到同状态无害）。
 - **无 status 字段污染 SharedFile**：任务与文件清单彻底解耦，撤销 status 的决定保持不变。
 
 ## 4. ws 协议（明文；群主权威）
 
-新增 7 条消息，均**明文**（沿用"只剪贴板加密"的既定策略）。群主是唯一写入者。
+新增 7 条消息（取消功能落地后为 8 条，见 §10），均**明文**（沿用"只剪贴板加密"的既定策略）。群主是唯一写入者。
 
 ### 4.1 消息表
 
@@ -79,6 +82,7 @@ TransferTask {
 | `file_task_progress` | 供种方 → 群主 | `{task_id, progress, transferred}` | 供种方随块发送节流上报进度 |
 | `file_task_finish` | 供种方 → 群主 | `{task_id}` | 供种方发完最后一块并收到下载方 `done` 帧，状态=done |
 | `file_task_failed` | **下载方或供种方 → 群主** | `{task_id, error, reporter}` | 失败：**双方各自上报**，任一方掉线另一方仍可送达；群主按 task_id 幂等覆盖 |
+| `file_task_cancel` | **群内任一成员 → 群主** | `{task_id, canceller, canceller_name}` | 取消任务（§10 实现时新增）：任意成员可取消 queuing/transferring 的任务；群主置 cancelled + 广播 |
 | `file_tasks` | 群主 → 全群 | `{tasks: [TransferTask…]}` | 群主广播**全量任务数组**快照 |
 
 - `reporter` = 上报方 device id（`seeder_id` 或 `downloader_id`），仅用于排障展示；群主不因 reporter 不同拒绝覆盖。
@@ -223,7 +227,8 @@ TransferTask {
 | **P1 协议 + 群主数组** | `TransferTask`/`TaskEvent` 模型（四态）、7 条消息双端对齐、`FileRequest` 加 task_id、群主任务数组与广播+终态锁定、新成员补发 | 协议层可收发 `file_tasks`，群主持有真相源 |
 | **P2 引擎回调 + 上报** | 两端供种端五类事件回调、下载端失败回调、下载方 add、节流上报、失败双报 | 一次传输能在群主数组里看到 queuing→0→100→done；任一端掉线都能收敛到 failed |
 | **P3 双端 UI** | 桌面第三 tab「传输中心」+ `knot://file-tasks`；安卓文件 tab 内传输中心段 + StateFlow + 图标 | 全群可见的只读任务列表 |
-| **P4（未来）** | per-task 通知、取消/重试、持久化与断点续传 | 不在本期 |
+| **P4（未来）** | per-task 通知、重试、持久化与断点续传 | 不在本期 |
+| **P5 取消传输** | 见 §10：新增取消消息 + 群主取消终态 + 双端 P2P 中断 + UI 取消入口 | 全群任一成员可取消 queuing/transferring 任务，真正中断 P2P |
 
 ## 9. 风险与待定
 
@@ -232,3 +237,93 @@ TransferTask {
 - **失败双报幂等**：两端先后报 `task_failed` 时按 task_id 覆盖即可（同状态无害）；`error` 取先到那条，reporter 仅排障展示。
 - **任一方中途离群 / P2P 断线**：P2P 连接断开会报错，**在线的一方**通过 `on_failed` / `Failed` 回调上报 `task_failed`——不必依赖掉线方自报，也不依赖群主超时兜底。这是"失败双方上报"的核心价值。
 - **供种方视角文案**：一条任务的 `seeder_id == 我` 显示"供种给 XXX"，否则"从 XXX 下载"；需 i18n 加 `task_uploading` / `task_downloading` / `task_queuing` / `task_done` / `task_failed`。
+
+## 10. 取消传输（待实现的设计）
+
+> 本节是**后续功能的设计稿**，当前仅落地了 `cancelled` 状态枚举与文案（双端 `TaskStatus` + i18n），消息/引擎/UI 均**未实现**。实现按本节推进。
+
+### 10.1 需求与权限
+
+- **谁能取消**：群内**任一成员**（包括群主、也包括既不是 seeder 也不是 downloader 的第三方）都能取消任意一条 `queuing` / `transferring` 的任务。取消入口对全群可见、无成员角色/归属限制——这是明确需求。
+- **可取消的状态**：仅 `queuing`（排队中）与 `transferring`（传输中）。终态 `done/failed/cancelled` 不可取消，群主收到针对终态的 cancel 消息**幂等忽略**。
+- **取消的语义**：一条任务被取消 = 传输**真正中断**（不是只改状态文字）+ 群主把该任务置 `cancelled` 终态 + 全群同步。`cancelled` 与 `done/failed` 同为终态，参与"先到终态锁定"。
+
+### 10.2 核心难点：群主不在 P2P 数据通路上
+
+传输是**下载方 ↔ 供种方的端到端直连**（`knot-core/src/file.rs`、`P2pFileService.kt`），群主只在 ws 控制面维护任务状态、不转发文件块。因此"群主把状态改成 cancelled"本身**不会**让正在跑的 P2P 传输停下来。必须分成两层：
+
+| 层 | 做什么 | 谁负责 |
+|---|---|---|
+| **控制面（状态权威）** | 收到取消 → 群主置 `cancelled` + 广播全量 `file_tasks` | 群主（唯一写入者） |
+| **数据面（真正中断）** | 两端客户端收到快照，发现**自己参与的**任务变成 `cancelled` → 主动 abort 对应 P2P 传输（关闭 socket / 触发取消信号） | 下载方 + 供种方各自本地执行 |
+
+关键：**取消指令借道已有的 `file_tasks` 全量广播下发给两端**，不需要新增一条"群主→某端"的专门中断消息——两端本来就在收全量快照，只需在消费快照时多做一步"比对任务状态、命中 cancelled 则中断本地传输"。
+
+### 10.3 协议改动（实现时新增）
+
+| 消息 | 方向 | 载荷 | 说明 |
+|---|---|---|---|
+| `file_task_cancel` | **任一成员 → 群主** | `{task_id, canceller, canceller_name}` | 取消请求。`canceller`=发起者 id、`canceller_name`=设备名快照（延续"存 id 必存 name"约定） |
+
+- `TransferTask` 新增两字段（仅 `cancelled` 时有值）：`canceller_id` / `canceller_name`（见 §3，双端结构与序列化已加）。
+- 群主处理 `file_task_cancel`：按 `task_id` 找任务 → **仅当状态 ∈ {queuing, transferring}** 时置 `cancelled`，写 `canceller_id/name`、`updated_at` → 广播 `file_tasks`；否则（任务不存在 / 已是终态）忽略。
+- 群主自己取消：无 ws 自连接，直接调本地方法改数组 + 广播（与现有 `localTaskEvent` 同构）。
+
+### 10.4 数据面中断机制（双端引擎）
+
+两端都要维护 **task_id → 当前传输 abort 句柄** 的映射，在收到 `file_tasks` 快照时驱动中断：
+
+- **Rust（`knot-core/src/file.rs`）**：
+  - `fetch_file`（下载侧）与 `FileSeeder::serve_one`（供种侧）的传输循环接受一个取消信号（如 `tokio_util::sync::CancellationToken`，或 `oneshot` 关闭通道）。
+  - 块读写循环（当前裸 `read_exact`/`write_all`）用 `tokio::select!` 同时等待"下一块 I/O"与"取消信号"，命中取消立即返回 `Cancelled` 结果并关闭流。
+  - 上层维护 `task_id → CancellationToken` 注册表：传输启动时登记，结束（done/failed/cancelled）时移除。
+- **Android（`P2pFileService.kt`）**：
+  - `download()` 与 `serveOne()` 的 while 循环每轮检查一个 `cancelFlags: ConcurrentHashMap<String, Boolean>`（按 task_id）；命中取消则跳出循环、`socket.close()`。因为 `readFully/readInt` 是阻塞 IO，关闭 socket 会让阻塞读抛异常，据此退出。
+  - 暴露 `fun cancel(taskId: String)`：置标志 + 关闭该 task 的 socket。
+
+- **中断后的上报抑制**：abort 会让引擎走 `Failed`/`on_failed` 分支，但群主已把任务置 `cancelled` 终态，**终态锁定会忽略后到的 failed/done**——所以不需要在引擎里特殊区分"因取消而失败"，终态锁自然收敛。
+- **排队中的任务**：下载方此时 socket 已连上供种方、阻塞在等 `ok` 帧；同样按上面的 abort 句柄关闭 socket 即可。供种侧若在 accept 后查到该 task 已 cancelled，可直接拒绝（发 `{"error":"CANCELLED"}` 控制帧）不占闸门。
+
+### 10.5 触发链路（时序）
+
+```
+成员 X(任意)   群主(O)        下载方(A)       供种方(B)
+   |              |               |               |
+   |-- cancel ---->|               |               |
+   |  {task_id,    |               |               |
+   |   canceller=X}|               |               |
+   |              | status=cancelled              |
+   |              |--- file_tasks 全量 ----------->|
+   |              |-------------------------------->|
+   |              |   A/B 各自比对：我参与的 task 变 cancelled
+   |              |               |-- abort -------|
+   |              |               |   (关闭 P2P socket / 触发 CancellationToken)
+   |              |  [引擎 Failed 被终态锁定忽略]     |
+   |              |<-- 后续 progress/done 均被忽略 ---|
+```
+
+- 关键顺序：**群主先置 cancelled 再广播**；两端以 `file_tasks` 快照为取消指令来源。
+- 即便 X 是第三方（既非 A 也非 B），A、B 也会通过全量快照收到取消并执行中断。
+
+### 10.6 状态层改动（实现时）
+
+- 群主两端（`net/server.rs`、`KnotGroupServer.kt`）读循环加 `file_task_cancel` 分支：查 task → 仅 queuing/transferring 可置 cancelled → 写 `canceller_id/name` → 广播。
+- **终态判定扩展**：现有"终态锁定"检查是 `!= DONE && != FAILED`，需把 `CANCELLED` 也纳入终态集合（即 `Done/Failed/Cancelled` 三者互斥、先到为准）。
+- 成员两端（`net/client.rs`、`GroupClient.kt`）加 `send_task_cancel(task_id)`。
+- 协议层（`protocol.rs`/`Protocol.kt`）加消息定义 + 序列化/解析；`TransferTask` 加两字段。
+
+### 10.7 UI 改动（实现时）
+
+- **取消入口**：桌面传输条目、安卓传输条目在 `queuing`/`transferring` 时显示一个"取消"按钮（icon + 文案 `task_cancel`）；终态不显示。任何成员看到任何进行中任务都有此按钮（无归属限制）。
+- 点击 → 调 `send_task_cancel(task_id)`；按钮随即禁用防重复点击（群主终态锁定也兜底幂等）。
+- 状态文案：`task_cancelled = 已取消`；**配色**：已取消用**灰色**（与排队一致的弱色，区别于失败红/完成绿）。UI 的 `when(status)`/`label` 映射已预留 `cancelled` 分支。
+- 分组：`cancelled` 归入"终态组"（与 done/failed 一起置底、灰化）——这组逻辑已在 P3 UI 中预留。
+
+### 10.8 边界与风险
+
+- **取消与完成竞态**：取消消息到群主时传输恰好刚 done → 群主"先到终态为准"，若 done 先到则 cancel 被忽略（任务保持 done）；若 cancel 先到则后续 done 被终态锁定忽略（任务保持 cancelled）。二者只保留其一，不翻转。
+- **取消方掉线**：cancel 消息发出前掉线则取消不发生；群主已收到的 cancel 不受影响（已落终态并广播）。
+- **被取消端掉线**：若 A/B 之一已掉线，另一端的 abort 仍会执行；群主终态已是 cancelled，掉线端重连后从全量快照看到 cancelled，不会有残留传输。
+- **下载残留文件**：下载侧 abort 时要清理已写入的临时/待完成文件（安卓 MediaStore `IS_PENDING` 的条目 delete，桌面目标文件 remove），避免留下半截文件。
+- **第三方取消的体验**：由于不限归属，A/B 会看到"我的传输被 X 取消了"——`canceller_name` 用于提示（可选 toast/日志），让被取消方知道是谁操作的。
+- **不重试**：本期取消后不提供"重新传输"，取消即终止（重试仍属 P4）。

@@ -106,6 +106,8 @@ pub enum TaskStatus {
     Done,
     /// 失败（终态）
     Failed,
+    /// 已取消（终态）：群内任一成员取消传输
+    Cancelled,
 }
 
 /// 一条传输任务：一次 P2P 传输 = 一条任务，含下载方与供种方两个视角。
@@ -132,6 +134,10 @@ pub struct TransferTask {
     pub transferred: u64,
     /// 失败原因（status=failed 时有值）
     pub error: String,
+    /// 取消者 device id（status=cancelled 时有值；任务诞生时为空）
+    pub canceller_id: String,
+    /// 取消者设备名快照（创建取消时固化，UI 直接用）
+    pub canceller_name: String,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -276,7 +282,8 @@ mod tests {
             seeder_id: "dev-B".into(), seeder_name: "Bob's Mac".into(),
             downloader_id: "dev-A".into(), downloader_name: "Alice's PC".into(),
             status: TaskStatus::Transferring, progress: 42, transferred: 440401,
-            error: "".into(), created_at: 1000, updated_at: 2000,
+            error: "".into(), canceller_id: "dev-C".into(), canceller_name: "Carol's PC".into(),
+            created_at: 1000, updated_at: 2000,
         }
     }
 
@@ -299,6 +306,8 @@ mod tests {
                 assert_eq!(t.seeder_name, "Bob's Mac");
                 assert_eq!(t.downloader_id, "dev-A");
                 assert_eq!(t.downloader_name, "Alice's PC");
+                assert_eq!(t.canceller_id, "dev-C");
+                assert_eq!(t.canceller_name, "Carol's PC");
             }
             _ => panic!("wrong variant"),
         }

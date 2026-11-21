@@ -46,9 +46,12 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.knotyup.android.R
@@ -150,7 +153,7 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileI
                         )
                     } else {
                         val ongoing = transferTasks.filter { it.status == TaskStatus.QUEUING || it.status == TaskStatus.TRANSFERRING }
-                        val finished = transferTasks.filter { it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED }
+                        val finished = transferTasks.filter { it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED || it.status == TaskStatus.CANCELLED }
                         (ongoing + finished).forEach { task -> TransferTaskRow(task, t) }
                     }
                     Spacer(Modifier.height(6.dp))
@@ -295,10 +298,20 @@ private fun TransferTaskRow(task: TransferTask, t: (String) -> String) {
         TaskStatus.TRANSFERRING -> t("task_transferring")
         TaskStatus.DONE -> t("task_done")
         TaskStatus.FAILED -> t("task_failed")
+        TaskStatus.CANCELLED -> t("task_cancelled")
     }
-    // 方向文本固定为创建时固化的设备名快照：seederName -> downloaderName
+    // 方向由固化的设备名快照表达：seederName 发送给 downloaderName（"发送给"主色加粗）
     val seederName = task.seederName
     val downloaderName = task.downloaderName
+    val peerText = buildAnnotatedString {
+        append(seederName)
+        append(" ")
+        withStyle(SpanStyle(color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)) {
+            append(t("task_sent_to"))
+        }
+        append(" ")
+        append(downloaderName)
+    }
     val pct = if (task.status == TaskStatus.DONE) 100 else task.progress.coerceIn(0, 100)
     Row(
         Modifier.fillMaxWidth().padding(vertical = 3.dp)
@@ -307,13 +320,17 @@ private fun TransferTaskRow(task: TransferTask, t: (String) -> String) {
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("→", fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary)
+        Image(
+            painter = painterResource(R.drawable.ic_transfer),
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.primary),
+        )
         Spacer(Modifier.width(8.dp))
         Column(Modifier.weight(1f)) {
             Text(task.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(
-                "$seederName -> $downloaderName", fontSize = 11.sp,
+                peerText, fontSize = 11.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Box(
@@ -330,7 +347,14 @@ private fun TransferTaskRow(task: TransferTask, t: (String) -> String) {
             else if (task.status == TaskStatus.QUEUING) statusText
             else "$statusText · $pct%",
             fontSize = 11.sp,
-            color = if (task.status == TaskStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+            // 状态配色：排队灰 / 传输中主色 / 已完成绿 / 失败红
+            color = when (task.status) {
+                TaskStatus.QUEUING -> MaterialTheme.colorScheme.onSurfaceVariant
+                TaskStatus.TRANSFERRING -> MaterialTheme.colorScheme.primary
+                TaskStatus.DONE -> Color(0xFF34A97B)
+                TaskStatus.FAILED -> MaterialTheme.colorScheme.error
+                TaskStatus.CANCELLED -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
             maxLines = 2,
         )
     }
