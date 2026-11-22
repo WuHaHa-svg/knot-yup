@@ -115,16 +115,16 @@ pub(crate) async fn forward_core_events(
             }
             Ok(CoreEvent::FileTasks(tasks)) => {
                 dlog("evt/file-tasks", format!("n={}", tasks.len()));
-                // 数据面中断：本机正在下载的任务若在全量快照中已 cancelled，触发本地 abort
+                // 数据面中断：全量快照中已 cancelled 的任务，本机若在下载/供种均触发本地中止
                 // （覆盖第三方取消场景——本机没调 cancel_task，只能靠快照感知）
-                {
-                    let cancels = state.task_cancels.lock().await;
-                    for t in &tasks {
-                        if t.status == knot_core::protocol::TaskStatus::Cancelled {
-                            if let Some(tx) = cancels.get(&t.task_id) {
-                                let _ = tx.send(true);
-                            }
+                for t in &tasks {
+                    if t.status == knot_core::protocol::TaskStatus::Cancelled {
+                        if let Some(tx) = state.task_cancels.lock().await.get(&t.task_id) {
+                            let _ = tx.send(true);
                         }
+                        // A 供种场景：本机是供种方时同样中止写块（cancel_task 可能先于快照、
+                        // 或因时序未生效；快照是权威兜底）
+                        state.files.cancel_seed(&t.task_id).await;
                     }
                 }
                 let _ = app.emit("knot://file-tasks", serde_json::json!(tasks));

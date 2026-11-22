@@ -219,8 +219,10 @@ function renderTasks() {
     box.innerHTML = `<div class="empty">${t('tasks_empty')}</div>`;
     return;
   }
-  const ongoing = tasks.filter((x) => x.status === 'queuing' || x.status === 'transferring');
-  const finished = tasks.filter((x) => x.status === 'done' || x.status === 'failed' || x.status === 'cancelled');
+  // 按场景创建时间倒序：新的在前、旧的在后（各组内保持此顺序）
+  const ordered = [...tasks].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+  const ongoing = ordered.filter((x) => x.status === 'queuing' || x.status === 'transferring');
+  const finished = ordered.filter((x) => x.status === 'done' || x.status === 'failed' || x.status === 'cancelled');
   const row = (x) => {
     // 方向由 seederName -> downloaderName 文本表达，箭头固定 → 无需判断
     const seederName = x.seeder_name;
@@ -360,7 +362,9 @@ async function downloadFile(seedId, file) {
     const dest = await invoke('pick_save_path', { defaultName: file.name });
     if (!dest) return;
     toast(t('downloading') || 'Downloading…');
-    await invoke('download_file', { seedDeviceId: seedId, srcFileId: file.file_id, dest });
+    const res = await invoke('download_file', { seedDeviceId: seedId, srcFileId: file.file_id, dest });
+    // 后端区分：done=真成功弹完成；cancelled=用户取消（群主已置已取消终态）不弹成功
+    if (res && res.cancelled) return;
     toast(t('download_done') || 'Downloaded', 'success');
     await refresh();
   } catch (err) {

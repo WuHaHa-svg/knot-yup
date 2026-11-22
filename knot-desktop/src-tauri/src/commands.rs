@@ -397,9 +397,15 @@ pub(crate) async fn download_file(
             }
         }
     }
+    // 区分成功与取消：前端据此弹不同提示（取消不弹"下载完成"）
+    if let Err(e) = &result {
+        if e == knot_core::file::DOWNLOAD_CANCELLED {
+            return Ok(serde_json::json!({ "cancelled": true }));
+        }
+    }
     result.map_err(|e| format!("下载失败: {e}"))?;
-    // 下载即终点：不再登记/广播，前端也不消费返回值
-    Ok(serde_json::Value::Null)
+    // 下载即终点：不再登记/广播，前端只消费 done 标识
+    Ok(serde_json::json!({ "done": true }))
 }
 
 /// 取消传输：群内任一成员可取消 queuing/transferring 的任务。
@@ -413,6 +419,8 @@ pub(crate) async fn cancel_task(
     if let Some(tx) = state.task_cancels.lock().await.get(&task_id) {
         let _ = tx.send(true);
     }
+    // 本机供种中的任务：中止 serve_one 写块（不依赖对端关 socket 的连带效应）
+    state.files.cancel_seed(&task_id).await;
     let (my_id, my_name) = {
         let d = state.device.lock().await;
         (d.as_ref().map(|x| x.id.clone()).unwrap_or_default(),

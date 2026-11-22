@@ -68,6 +68,13 @@ impl FileManager {
         let _ = tokio::fs::write(self.index_path(), json).await;
     }
 
+    /// 本机取消某传输任务：若本机正在供种该任务，立即中止写块（对称于下载端取消）。
+    pub async fn cancel_seed(&self, task_id: &str) {
+        if let Some(s) = self.seeder.lock().await.as_ref() {
+            s.cancel(task_id);
+        }
+    }
+
     /// 入群时启动/更新供种服务。设备级常驻：首次入群启动，之后入新群只更新 PIN（端口不变），
     /// 离群不停服——本机共享文件夹与群无关，仍可持续供种。
     pub async fn ensure_seeder(&self, pin: &str, local_id: &str, ip: &str) -> Option<String> {

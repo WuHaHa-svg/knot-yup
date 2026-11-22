@@ -124,6 +124,8 @@ pub type TaskEventSink = Arc<dyn Fn(TaskEvent) + Send + Sync>;
 pub struct FileSeeder {
     port: u16,
     pin: Arc<RwLock<String>>,
+    /// 已被本机取消的 task_id 集合（兜底：serve_one 启动前/间隙被取消也能拦住）。
+    cancelled: Arc<RwLock<std::collections::HashSet<String>>>,
     shutdown: mpsc::Sender<()>,
     handle: Option<JoinHandle<()>>,
     _on_event: TaskEventSink,
@@ -151,6 +153,9 @@ impl FileSeeder {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         let pin = Arc::new(RwLock::new(pin));
         let pin_for_handle = pin.clone();
+        let cancelled: Arc<RwLock<std::collections::HashSet<String>>> =
+            Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let cancelled_for_handle = cancelled.clone();
         let on_event_for_handle = on_event.clone();
         // 并发闸门：容量 1 → 同一时刻只服务 1 个下载者，后续连接排队
         let gate = Arc::new(Semaphore::new(1));
@@ -168,8 +173,9 @@ impl FileSeeder {
                         let resolver = resolver.clone();
                         let gate = gate.clone();
                         let on_event = on_event.clone();
+                        let cancelled = cancelled_for_handle.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = serve_one(stream, &pin, &local_id, &resolver, &gate, &on_event).await {
+                            if let Err(e) = serve_one(stream, &pin, &local_id, &resolver, &gate, &on_event, &cancelled).await {
                                 tracing::debug!(target: "file", "会话结束 [{peer}]: {e}");
                             }
                         });
@@ -177,7 +183,7 @@ impl FileSeeder {
                 }
             }
         });
-        Ok(Self { port: actual_port, pin: pin_for_handle, shutdown: shutdown_tx, handle: Some(handle), _on_event: on_event_for_handle })
+        Ok(Self { port: actual_port, pin: pin_for_handle, cancelled, shutdown: shutdown_tx, handle: Some(handle), _on_event: on_event_for_handle })
     }
 
     pub fn port(&self) -> u16 {
@@ -188,6 +194,14 @@ impl FileSeeder {
     pub fn update_pin(&self, pin: &str) {
         if let Ok(mut p) = self.pin.write() {
             *p = pin.to_string();
+        }
+    }
+
+    /// 本机取消某传输任务：标记 task_id，供种会话在检查点检测到即中止。
+    /// 供种同一时刻只服务 1 个下载者，任务结束不影响后续任务。
+    pub fn cancel(&self, task_id: &str) {
+        if let Ok(mut c) = self.cancelled.write() {
+            c.insert(task_id.to_string());
         }
     }
 
@@ -207,6 +221,7 @@ async fn serve_one(
     resolver: &FileResolver,
     gate: &Arc<Semaphore>,
     on_event: &TaskEventSink,
+    cancelled: &Arc<RwLock<std::collections::HashSet<String>>>,
 ) -> Result<(), String> {
     let _ = stream.set_nodelay(true); // 关 Nagle：小帧/大块都立即发出，不攒延迟
     let req: FileRequest = read_frame(&mut stream).await.map_err(|e| format!("读请求头: {e}"))?;
@@ -220,7 +235,7 @@ async fn serve_one(
     if !task_id.is_empty() {
         on_event(TaskEvent::Started { task_id: task_id.clone() });
     }
-    let result = serve_one_inner(&mut stream, req, pin, local_id, resolver, &task_id, on_event).await;
+    let result = serve_one_inner(&mut stream, req, pin, local_id, resolver, &task_id, on_event, cancelled).await;
     if let Err(e) = &result {
         if !task_id.is_empty() {
             on_event(TaskEvent::Failed { task_id: task_id.clone(), error: e.clone() });
@@ -238,6 +253,7 @@ async fn serve_one_inner(
     resolver: &FileResolver,
     task_id: &str,
     on_event: &TaskEventSink,
+    cancelled: &Arc<RwLock<std::collections::HashSet<String>>>,
 ) -> Result<(), String> {
     // 校验 token
     let expect = auth_token(pin, &req.src_file_id, &req.from, &req.to);
@@ -264,6 +280,10 @@ async fn serve_one_inner(
     // 三件事合一次 write_all：少两次 syscall/块，配合 TCP_NODELAY 填满带宽。
     let mut frame = Vec::with_capacity(FILE_CHUNK_SIZE + 16);
     loop {
+        // 本机取消：供种会话立即中止（不依赖下载端关 socket 的连带效应）
+        if cancelled.read().map(|c| c.contains(task_id)).unwrap_or(false) {
+            return Err("本机取消供种".into());
+        }
         let n = file.read(&mut buf).await.map_err(|e| format!("读文件: {e}"))?;
         if n == 0 {
             break;

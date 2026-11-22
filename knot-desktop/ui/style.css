@@ -601,7 +601,12 @@ body {
 .transfer-row.transferring .t-meta { color: var(--accent); }
 .transfer-row.done .t-meta { color: var(--ok); }
 .transfer-row .t-bar { height: 3px; border-radius: 2px; background: var(--border); margin-top: 4px; overflow: hidden; }
+/* 进度条配色与状态文字一致：排队灰 / 传输中主色 / 完成绿 / 失败红 / 取消灰 */
 .transfer-row .t-bar > i { display: block; height: 100%; background: var(--accent); }
+.transfer-row.queuing .t-bar > i { background: var(--text-3); }
+.transfer-row.done .t-bar > i { background: var(--ok); }
+.transfer-row.failed .t-bar > i { background: var(--danger); }
+.transfer-row.cancelled .t-bar > i { background: var(--text-3); }
 .transfer-row.failed .t-meta { color: var(--danger); }
 .transfer-row.cancelled .t-meta { color: var(--text-3); }
 .transfer-row .t-cancel {

@@ -378,8 +378,10 @@ object AppState {
                 // 数据面中断：本机正在下载的任务若在全量快照中已 cancelled，触发 abort
                 // （第三方取消场景：本机没调 cancelTask，只能靠快照感知）
                 event.tasks.forEach { t ->
-                    if (t.status == TaskStatus.CANCELLED && p2pFile.isDownloading(t.taskId)) {
-                        p2pFile.cancelDownload(t.taskId)
+                    if (t.status == TaskStatus.CANCELLED) {
+                        if (p2pFile.isDownloading(t.taskId)) p2pFile.cancelDownload(t.taskId)
+                        // 本机供种该任务时同样中止（第三方取消的权威兜底）
+                        p2pFile.cancelSeed(t.taskId)
                     }
                 }
             }
@@ -678,9 +680,14 @@ object AppState {
     fun cancelTask(taskId: String) {
         // 本机正在下载该任务 → 立即 abort（关闭 socket，阻塞读退出并清理 MediaStore）
         p2pFile.cancelDownload(taskId)
+        // 本机供种该任务 → 立即中止写块
+        p2pFile.cancelSeed(taskId)
         // 上报群主：群主置 cancelled + 广播全量
         if (isOwner()) server?.localTaskCancel(taskId, device.id, device.name)
         else client.sendTaskCancel(taskId)
+        // 本机主动取消成功：轻提示 + 文件名副标题（第三方取消走快照，不弹）
+        val name = _transferTasks.value.firstOrNull { it.taskId == taskId }?.name.orEmpty()
+        toastKey("task_cancel_ok", 1, subtitle = name)
     }
 
     private fun broadcastFileAdd(file: SharedFile) {

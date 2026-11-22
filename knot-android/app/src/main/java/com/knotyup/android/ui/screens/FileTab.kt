@@ -153,8 +153,10 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileI
                             modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center,
                         )
                     } else {
-                        val ongoing = transferTasks.filter { it.status == TaskStatus.QUEUING || it.status == TaskStatus.TRANSFERRING }
-                        val finished = transferTasks.filter { it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED || it.status == TaskStatus.CANCELLED }
+                        // 按场景创建时间倒序：新的在前、旧的在后（各组内保持此顺序）
+                        val ordered = transferTasks.sortedByDescending { it.createdAt }
+                        val ongoing = ordered.filter { it.status == TaskStatus.QUEUING || it.status == TaskStatus.TRANSFERRING }
+                        val finished = ordered.filter { it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED || it.status == TaskStatus.CANCELLED }
                         (ongoing + finished).forEach { task ->
                             TransferTaskRow(task, t) { confirmCancelTask = task }
                         }
@@ -205,7 +207,12 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileI
                                             AppState.toast(t("downloading"))
                                             runCatching { AppState.downloadSharedFile(viewDevice!!, file) }
                                                 .onSuccess { AppState.notifyDownloaded(file.name) }
-                                                .onFailure { AppState.toast(it.message ?: "error", 2) }
+                                                .onFailure { e ->
+                                                    // 本机取消不是失败：群主已置"已取消"终态，不弹错误提示
+                                                    if (e !is com.knotyup.android.file.DownloadCancelledException) {
+                                                        AppState.toast(e.message ?: "error", 2)
+                                                    }
+                                                }
                                         }
                                     }
                                 },
@@ -356,7 +363,16 @@ private fun TransferTaskRow(task: TransferTask, t: (String) -> String, onCancel:
                     .clip(RoundedCornerShape(2.dp))
                     .background(MaterialTheme.colorScheme.outlineVariant),
             ) {
-                Box(Modifier.fillMaxWidth(pct / 100f).height(3.dp).background(MaterialTheme.colorScheme.primary))
+                // 进度条配色与状态文字一致：排队灰 / 传输中主色 / 完成绿 / 失败红 / 取消灰
+                Box(Modifier.fillMaxWidth(pct / 100f).height(3.dp).background(
+                    when (task.status) {
+                        TaskStatus.QUEUING -> MaterialTheme.colorScheme.onSurfaceVariant
+                        TaskStatus.TRANSFERRING -> MaterialTheme.colorScheme.primary
+                        TaskStatus.DONE -> Color(0xFF34A97B)
+                        TaskStatus.FAILED -> MaterialTheme.colorScheme.error
+                        TaskStatus.CANCELLED -> MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                ))
             }
         }
         Spacer(Modifier.width(8.dp))

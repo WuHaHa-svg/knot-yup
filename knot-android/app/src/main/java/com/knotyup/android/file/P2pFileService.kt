@@ -59,6 +59,8 @@ class P2pFileService(
     private val gate = Semaphore(1)
     /** task_id → 本机下载 socket；cancel() 关闭它让阻塞读抛异常退出。 */
     private val downloadSockets = ConcurrentHashMap<String, Socket>()
+    /** 本机已取消供种的 task_id；serveOne 写循环每次检查，命中即中止（对称桌面 FileSeeder）。 */
+    private val cancelledSeeds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** 本机是否正在下载该任务（含排队等 ok 阶段）。 */
     fun isDownloading(taskId: String): Boolean = downloadSockets.containsKey(taskId)
@@ -66,6 +68,11 @@ class P2pFileService(
     /** 取消本机正在进行的下载：关闭 socket，阻塞的 readFully 会抛异常。 */
     fun cancelDownload(taskId: String) {
         downloadSockets.remove(taskId)?.let { runCatching { it.close() } }
+    }
+
+    /** 取消本机正在进行的供种：标记 task_id，serveOne 写循环中止（不依赖对端关 socket）。 */
+    fun cancelSeed(taskId: String) {
+        if (taskId.isNotEmpty()) cancelledSeeds.add(taskId)
     }
 
     fun updatePin(pin: String) {
@@ -154,6 +161,10 @@ class P2pFileService(
                 // 纯流式：连续写块不等 ACK（TCP 自身保证可靠+按序+流控）。
                 // 帧 [u32 idx][u32 len][enc] 拼一次 write，少两次 syscall/块。
                 while (true) {
+                    // 本机取消供种：立即中止写块（不依赖对端关 socket 的连带效应）
+                    if (taskId.isNotEmpty() && cancelledSeeds.contains(taskId)) {
+                        throw IllegalStateException("本机取消供种")
+                    }
                     val n = inputStream.read(buf)
                     if (n <= 0) break
                     val enc = cipher.encryptChunk(buf.copyOfRange(0, n))
