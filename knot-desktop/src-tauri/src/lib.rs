@@ -16,7 +16,9 @@ mod bridge;
 mod clipboard;
 mod commands;
 mod files;
+mod injector;
 mod state;
+mod touchpad;
 
 /// 调试日志：仅 debug 构建生效（发布版为空操作，参数被编译器消除）。
 #[cfg(debug_assertions)]
@@ -63,6 +65,7 @@ pub fn run() {
                 file_map: tokio::sync::Mutex::new(knot_core::protocol::FileMap::new()),
                 task_cancels: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 files: std::sync::Arc::new(files::FileManager::load()),
+                touchpad: tokio::sync::Mutex::new(None),
             });
 
             // 本机设备身份
@@ -72,6 +75,7 @@ pub fn run() {
                 platform: std::env::consts::OS.to_string(),
                 addr: None,
                 file_addr: None,
+                touchpad_addr: None,
                 role: None,
                 file_list: vec![],
             };

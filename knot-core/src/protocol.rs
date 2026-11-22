@@ -45,6 +45,9 @@ pub struct DeviceInfo {
     /// 文件共享的 P2P 供种服务地址（ip:port）。与 ws 端口、standby 转让端口各自独立。
     #[serde(default)]
     pub file_addr: Option<String>,
+    /// 触控板专用 TCP 地址（ip:port）。与 ws/standby/file 端口各自独立；桌面端常驻监听。
+    #[serde(default)]
+    pub touchpad_addr: Option<String>,
     /// 成员身份：owner | member。服务端权威赋值；join 上报省略（默认 member）。
     #[serde(default)]
     pub role: Option<String>,

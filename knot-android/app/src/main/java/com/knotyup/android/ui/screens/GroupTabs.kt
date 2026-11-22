@@ -275,7 +275,7 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
     var oled by remember { mutableStateOf(TouchpadSettings.oled) }
     var particles by remember { mutableStateOf(TouchpadSettings.particles) }
 
-    // 待确认连接的设备；确认后只置全局控制状态，控制页由 MainActivity 的独立全屏覆盖层渲染
+    // 待确认连接的设备；确认后启动独立控制 Activity（自己一个 window，与群页完全隔离）
     var pendingDevice by remember { mutableStateOf<DeviceInfo?>(null) }
 
     val desktops = members.filter { it.platform == "windows" || it.platform == "macos" }
@@ -350,7 +350,13 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
             okText = t("confirm_ok"),
             cancelText = t("confirm_cancel"),
             danger = false,
-            onOk = { AppState.setTouchpadControlling(dev.id); pendingDevice = null },
+            onOk = {
+                AppState.setTouchpadControlling(dev.id)
+                pendingDevice = null
+                ctx.startActivity(
+                    android.content.Intent(ctx, com.knotyup.android.TouchpadControlActivity::class.java)
+                )
+            },
             onCancel = { pendingDevice = null },
         )
     }

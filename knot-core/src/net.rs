@@ -57,7 +57,7 @@ mod tests {
     use std::time::Duration;
 
     fn dev(name: &str, addr: Option<String>) -> DeviceInfo {
-        DeviceInfo { id: device_id(), name: name.into(), platform: "test".into(), addr, file_addr: None, role: None, file_list: vec![] }
+        DeviceInfo { id: device_id(), name: name.into(), platform: "test".into(), addr, file_addr: None, touchpad_addr: None, role: None, file_list: vec![] }
     }
 
     /// 收集事件直到条件满足（100ms 轮询，上限 3s）

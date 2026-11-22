@@ -148,7 +148,6 @@ private fun App(
     val joining by AppState.joining.collectAsState()
     val transferring by AppState.transferring.collectAsState()
     val connLost by AppState.connLost.collectAsState()
-    val touchpadControlling by AppState.touchpadControllingId.collectAsState()
     val discovered = AppState.discovered.collectAsState().value
     var addr by remember { mutableStateOf("") }
     var pin by remember { mutableStateOf("") }
@@ -341,15 +340,8 @@ private fun App(
 
         // 返回键拦截：群页面 back = 弹退出群确认（成员：退出；群主：转让/解散）。
         // 必须组合在 NavHost 之后——后注册的回调优先生效，否则导航栈 pop 回首页。
-        // 触摸板控制中时禁用：返回交给控制页自己的 BackHandler（弹退出控制），
-        // 避免触发退出群确认（控制页仍属于群页面，不能误退群）。
-        androidx.activity.compose.BackHandler(enabled = session.joined && touchpadControlling == null) {
+        androidx.activity.compose.BackHandler(enabled = session.joined) {
             confirmLeave = true
-        }
-
-        // 触摸板控制页：独立全屏覆盖层，盖住 Header 与 Tab；仅在控制中组合。
-        if (touchpadControlling != null) {
-            com.knotyup.android.ui.screens.TouchpadControlOverlay(t = t)
         }
 
         // Sonner 顶部轻提示（独立于内容层的弹出队列）：显式 TopCenter + 顶部留出刘海安全距离

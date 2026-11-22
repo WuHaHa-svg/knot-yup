@@ -30,6 +30,8 @@ data class DeviceInfo(
     val addr: String? = null,
     /** 文件共享 P2P 供种服务地址（ip:port），与 ws/standby 端口独立 */
     val fileAddr: String? = null,
+    /** 触控板专用 TCP 地址（ip:port），桌面端常驻监听；安卓端为 null */
+    val touchpadAddr: String? = null,
     /** 成员身份：owner | member。服务端权威赋值；join 上报省略 */
     val role: String? = null,
     /** 该成员共享的文件列表（文件夹随成员走）。join 时携带，随成员表同步 */
@@ -50,6 +52,7 @@ data class DeviceInfo(
             o.getString("id"), o.getString("name"), o.optString("platform", "android"),
             if (o.has("addr")) o.getString("addr") else null,
             if (o.has("file_addr")) o.getString("file_addr") else null,
+            if (o.has("touchpad_addr")) o.getString("touchpad_addr") else null,
             if (o.has("role")) o.getString("role") else null,
             if (o.has("file_list")) SharedFile.listFromJson(o.getJSONArray("file_list")) else emptyList(),
         )

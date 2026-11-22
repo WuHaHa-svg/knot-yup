@@ -44,6 +44,14 @@
             </intent-filter>
         </activity>
 
+        <!-- 触摸板控制页：独立 window、全屏横屏；与群页触摸/返回完全隔离 -->
+        <activity
+            android:name=".TouchpadControlActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
+            android:theme="@style/Theme.KnotYup" />
+
         <!-- 群组前台服务：入群期间常驻，保 ws 连接（后台剪贴板改由悬浮通知告知） -->
         <service
             android:name=".service.KnotForegroundService"
