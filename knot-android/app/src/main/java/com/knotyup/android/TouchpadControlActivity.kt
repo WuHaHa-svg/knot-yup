@@ -21,6 +21,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -30,6 +31,7 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import com.knotyup.android.data.AppState
 import com.knotyup.android.data.TouchpadSettings
+import com.knotyup.android.touchpad.Haptics
 import com.knotyup.android.touchpad.TouchpadClient
 import com.knotyup.android.ui.KnotYupTheme
 import com.knotyup.android.ui.Strings
@@ -133,14 +135,28 @@ private fun ControlScreen(
     onExit: () -> Unit,
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    LaunchedEffect(Unit) { TouchpadSettings.init(ctx) }
+    LaunchedEffect(Unit) {
+        TouchpadSettings.init(ctx)
+        Haptics.init(ctx)
+    }
     val oled = TouchpadSettings.oled
+    val naturalScroll = TouchpadSettings.naturalScroll
     var confirmExit by remember { mutableStateOf(false) }
     val client = remember { TouchpadClient() }
+    // 上次三指轻点时刻（用于三指双击判定，跨手势保留）
+    val lastThreeTap = remember { mutableLongStateOf(0L) }
 
     // 建立触控板专用 TCP：从成员表取目标设备的 touchpad_addr，PIN 作握手令牌
     val controllingId by AppState.touchpadControllingId.collectAsState()
     val session by AppState.session.collectAsState()
+    // 群连接断开时直接退出控制页：本页是独立 window，看不到 MainActivity 的"已退出群"提示
+    val connLost by AppState.connLost.collectAsState()
+    LaunchedEffect(connLost) {
+        if (connLost) {
+            client.disconnect()
+            onExit()
+        }
+    }
     LaunchedEffect(Unit) {
         val id = controllingId
         val dev = id?.let { did -> session.members.firstOrNull { it.id == did } }
@@ -181,7 +197,7 @@ private fun ControlScreen(
         )
     }
 
-    // 全屏触摸采集：单指滑动 → move；双指滑动 → scroll；轻点 → click。
+    // 全屏触摸采集：由 handleGesture 识别单指/双指/三指手势。
     // 独立 Activity 的 window 与群页隔离，触摸不会触发切 tab。
     Box(
         Modifier
@@ -189,36 +205,108 @@ private fun ControlScreen(
             .background(if (oled) Color(0xFF000000) else Color(0xFF212121))
             .pointerInput(Unit) {
                 awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    down.consume()
-                    var totalDx = 0f
-                    var totalDy = 0f
-                    var everMulti = false
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Main)
-                        var dx = 0f
-                        var dy = 0f
-                        for (c in event.changes) {
-                            if (c.pressed) {
-                                dx += c.position.x - c.previousPosition.x
-                                dy += c.position.y - c.previousPosition.y
-                                c.consume()
-                            }
-                        }
-                        if (event.changes.size > 1) everMulti = true
-                        totalDx += dx
-                        totalDy += dy
-                        if (everMulti) {
-                            if (dx != 0f || dy != 0f) client.scroll(dx.toInt(), dy.toInt())
-                        } else {
-                            if (dx != 0f || dy != 0f) client.move(dx.toInt(), dy.toInt())
-                        }
-                        if (event.changes.all { !it.pressed }) break
-                    }
-                    if (kotlin.math.abs(totalDx) < 8f && kotlin.math.abs(totalDy) < 8f && !everMulti) {
-                        client.click("left")
-                    }
+                    handleGesture(client, naturalScroll, lastThreeTap)
                 }
             }
     )
+}
+
+/**
+ * 单个手势的完整识别状态机（运行在 AwaitPointerEventScope 内）。
+ *
+ * 手势分类：
+ * - 单指轻点 → 左键 click
+ * - 单指滑动 → move（光标）；按住 280ms 再移动 → 拖动（down+move+up，触发时震动）
+ * - 双指轻点 → 右键 click（震动）；双指滑动 → scroll（按 naturalScroll 决定方向）
+ * - 三指双击（300ms 内两次三指轻点）→ 调度中心开关 shortcut（震动）
+ *
+ * 长按判定用时间戳：在第一个 move 事件到来时检查按下时长，避免 withTimeout 取消 await 的风险。
+ */
+private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.handleGesture(
+    client: TouchpadClient,
+    naturalScroll: Boolean,
+    lastThreeTap: androidx.compose.runtime.MutableState<Long>,
+) {
+    val down = awaitFirstDown(requireUnconsumed = false)
+    down.consume()
+    val startTime = System.currentTimeMillis()
+    var maxPointers = 1
+    var totalDx = 0f
+    var totalDy = 0f
+    // 手势模式："" 未定 / move / scroll / drag / three
+    var mode = ""
+    var dragging = false
+
+    while (true) {
+        val event = awaitPointerEvent(PointerEventPass.Main)
+        var dx = 0f
+        var dy = 0f
+        val pressedCount = event.changes.count { it.pressed }
+        if (pressedCount > maxPointers) maxPointers = pressedCount
+        for (c in event.changes) {
+            if (c.pressed) {
+                dx += c.position.x - c.previousPosition.x
+                dy += c.position.y - c.previousPosition.y
+                c.consume()
+            }
+        }
+        totalDx += dx
+        totalDy += dy
+        val elapsed = System.currentTimeMillis() - startTime
+        val moved = kotlin.math.abs(dx) > 0.5f || kotlin.math.abs(dy) > 0.5f
+
+        // 未定模式时，根据指针数+位移+时长判定手势类型
+        if (mode.isEmpty()) {
+            when {
+                maxPointers >= 3 -> mode = "three" // 三指手势中途不发送，松手判定双击
+                moved && maxPointers == 2 -> mode = "scroll"
+                moved && maxPointers == 1 -> {
+                    // 单指长按 280ms 后移动 → 拖动，达标时震动一下
+                    if (elapsed >= 280L) {
+                        client.down("left")
+                        Haptics.tick()
+                        dragging = true
+                        mode = "drag"
+                    } else {
+                        mode = "move"
+                    }
+                }
+            }
+        }
+
+        when (mode) {
+            "move", "drag" -> if (moved) client.move(dx.toInt(), dy.toInt())
+            "scroll" -> if (moved) {
+                val scrollY = if (naturalScroll) dy else -dy
+                client.scroll(dx.toInt(), scrollY.toInt())
+            }
+        }
+        if (event.changes.all { !it.pressed }) break
+    }
+
+    // 手势结束：按最终模式结算
+    when {
+        dragging -> client.up("left") // 拖动结束，抬起
+        mode == "three" -> {
+            // 三指轻点（位移极小）参与双击判定；滑动不参与
+            if (kotlin.math.abs(totalDx) < 24f && kotlin.math.abs(totalDy) < 24f) {
+                val now = System.currentTimeMillis()
+                if (now - lastThreeTap.value < 300L) {
+                    // 300ms 内第二次三指轻点 → 调度中心开关
+                    Haptics.tick()
+                    client.shortcut("mission_control")
+                    lastThreeTap.value = 0L
+                } else {
+                    lastThreeTap.value = now // 记录第一次
+                }
+            }
+        }
+        mode.isEmpty() -> {
+            if (maxPointers >= 2) {
+                client.click("right") // 双指轻点 → 右键（不震动）
+            } else {
+                client.click("left")
+            }
+        }
+    }
 }

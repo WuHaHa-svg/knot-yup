@@ -109,6 +109,7 @@ class TouchpadClient {
     fun down(button: String = "left") = enqueue("down") { put("button", button) }
     fun up(button: String = "left") = enqueue("up") { put("button", button) }
     fun click(button: String = "left") = enqueue("click") { put("button", button) }
+    fun shortcut(code: String) = enqueue("shortcut") { put("code", code) }
 
     fun disconnect() {
         connected = false

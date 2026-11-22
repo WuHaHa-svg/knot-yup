@@ -18,7 +18,6 @@ mod macos {
         fn CGEventPost(tap: u32, event: *mut c_void);
         fn CGEventGetLocation(event: *const c_void) -> CGPoint;
         fn CFRelease(cf: *const c_void);
-        fn AXIsProcessTrusted() -> bool;
     }
 
     // CGEventType 真实 rawValue（经 Swift CGEventType.rawValue 核实）：
@@ -92,6 +91,19 @@ mod macos {
         unsafe { post(CGEventCreateScrollWheelEvent(std::ptr::null(), SCROLL_UNIT_PIXEL, 2, -dy, dx, 0)); }
     }
 
+    /// 触发调度中心（Control+Up）——三指双击的固定动作。
+    ///
+    /// 系统级全局快捷键由 WindowServer 拦截，CGEventPost 注入的事件到不了这层
+    /// （改 source / 改按键序列都无效，实测确认）。改走 System Events 的 AppleScript
+    /// 按键——它经由系统的辅助功能通道，能触发 Spotlight / Mission Control 这类系统快捷键。
+    pub fn mission_control() {
+        use std::process::Command;
+        let script = "tell application \"System Events\" to key code 126 using control down";
+        if let Err(e) = Command::new("/usr/bin/osascript").args(["-e", script]).output() {
+            tracing::warn!(target: "injector", "触发调度中心失败: {e}");
+        }
+    }
+
     /// 全局抬起（松开兜底：连接断开时避免按键卡住）。
     pub fn release_all() {
         button_up("left");
@@ -99,10 +111,6 @@ mod macos {
         button_up("middle");
     }
 
-    /// 辅助功能授权检测（否决权：未授权时 CGEventPost 无效）。
-    pub fn accessibility_trusted() -> bool {
-        unsafe { AXIsProcessTrusted() }
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -122,4 +130,4 @@ pub fn scroll(_dx: i32, _dy: i32) {}
 #[cfg(not(target_os = "macos"))]
 pub fn release_all() {}
 #[cfg(not(target_os = "macos"))]
-pub fn accessibility_trusted() -> bool { true }
+pub fn mission_control() {}

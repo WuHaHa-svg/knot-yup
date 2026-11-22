@@ -3,10 +3,7 @@
 //! 与群组 ws / 文件 P2P 端口完全独立；同一时刻只接受一个控制连接（一对一）。
 
 use crate::injector;
-use crate::state::SharedState;
 use serde_json::Value;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -87,7 +84,7 @@ async fn serve_connection(stream: TcpStream, token: &str) -> Result<(), String> 
 
         // seq 过滤：move/scroll 丢弃乱序旧帧；down/up/click 可靠送达不过滤
         let seq = msg.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
-        let reliable = matches!(kind, "down" | "up" | "click" | "key" | "ping");
+        let reliable = matches!(kind, "down" | "up" | "click" | "shortcut" | "key" | "ping");
         if !reliable {
             if seq < last_seq { continue; }
             last_seq = seq;
@@ -118,6 +115,7 @@ async fn serve_connection(stream: TcpStream, token: &str) -> Result<(), String> 
                 let btn = msg.get("button").and_then(|v| v.as_str()).unwrap_or("left");
                 injector::click(btn);
             }
+            "shortcut" => injector::mission_control(),
             "ping" => {
                 let ts = msg.get("ts_ms").and_then(|v| v.as_u64()).unwrap_or(0);
                 let pong = serde_json::json!({"type":"pong","ts_ms":ts});

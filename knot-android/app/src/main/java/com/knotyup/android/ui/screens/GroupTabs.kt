@@ -271,9 +271,9 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
     LaunchedEffect(Unit) { TouchpadSettings.init(ctx) }
 
     // 设置开关本地 state（读自持久化；点击同时写回 TouchpadSettings）
-    var haptics by remember { mutableStateOf(TouchpadSettings.haptics) }
     var oled by remember { mutableStateOf(TouchpadSettings.oled) }
     var particles by remember { mutableStateOf(TouchpadSettings.particles) }
+    var naturalScroll by remember { mutableStateOf(TouchpadSettings.naturalScroll) }
 
     // 待确认连接的设备；确认后启动独立控制 Activity（自己一个 window，与群页完全隔离）
     var pendingDevice by remember { mutableStateOf<DeviceInfo?>(null) }
@@ -329,14 +329,14 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surface),
             ) {
-                SettingSwitch(t("touchpad_haptics"), t("touchpad_haptics_tip"), haptics, t, onToggle = {
-                    haptics = it; TouchpadSettings.haptics = it
-                })
                 SettingSwitch(t("touchpad_oled"), t("touchpad_oled_tip"), oled, t, onToggle = {
                     oled = it; TouchpadSettings.oled = it
                 })
                 SettingSwitch(t("touchpad_particles"), t("touchpad_particles_tip"), particles, t, onToggle = {
                     particles = it; TouchpadSettings.particles = it
+                })
+                SettingSwitch(t("touchpad_natural_scroll"), t("touchpad_natural_scroll_tip"), naturalScroll, t, onToggle = {
+                    naturalScroll = it; TouchpadSettings.naturalScroll = it
                 })
             }
         }
