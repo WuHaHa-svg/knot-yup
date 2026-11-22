@@ -233,6 +233,10 @@ function renderTasks() {
       ? `${label}${x.error ? ' · ' + escapeHtml(x.error) : ''}`
       : x.status === 'queuing' ? label : `${label} · ${x.progress}%`;
     const pct = x.status === 'done' ? 100 : (x.progress || 0);
+    // 仅进行中（queuing/transferring）显示取消按钮；任何成员都可取消，无归属限制
+    const cancelBtn = (x.status === 'queuing' || x.status === 'transferring')
+      ? `<button class="t-cancel" data-cancel="${escapeHtml(x.task_id)}" data-cancel-name="${escapeHtml(x.name)}" title="${t('task_cancel')}">${t('task_cancel')}</button>`
+      : '';
     return `<li class="transfer-row ${x.status}">
       <svg class="icon sm t-dir"><use href="#i-transfer"/></svg>
       <div class="t-main">
@@ -240,10 +244,27 @@ function renderTasks() {
         <div class="t-peer">${escapeHtml(seederName)} <span class="t-sent">${t('task_sent_to')}</span> ${escapeHtml(downloaderName)}</div>
         <div class="t-bar"><i style="width:${pct}%"></i></div>
       </div>
-      <div class="t-meta">${meta}</div>
+      <div class="t-meta">${meta}${cancelBtn}</div>
     </li>`;
   };
   box.innerHTML = [...ongoing, ...finished].map(row).join('');
+  // 取消按钮事件：调后端 cancel_task；按钮立即禁用防重复点击（群主终态锁定兜底幂等）
+  box.querySelectorAll('.t-cancel').forEach((btn) => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.cancel;
+      const name = btn.dataset.cancelName || '';
+      // 二次确认（复用统一确认弹窗：与退出群/删除文件同款）
+      const ok = await showConfirm(
+        t('task_cancel'), t('confirm_cancel_task_msg', { name }),
+        t('confirm_ok'), t('confirm_cancel'),
+      );
+      if (!ok) return; // 取消：关闭弹窗即可，不动作
+      btn.disabled = true;
+      try { await invoke('cancel_task', { taskId: id }); }
+      catch (err) { console.error('cancel_task failed', err); btn.disabled = false; }
+    };
+  });
 }
 
 function renderFiles() {

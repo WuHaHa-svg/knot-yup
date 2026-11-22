@@ -76,6 +76,11 @@ object AppState {
     private val _transferTasks = MutableStateFlow<List<TransferTask>>(emptyList())
     val transferTasks: StateFlow<List<TransferTask>> = _transferTasks
 
+    /** 触摸板正在控制的桌面设备 id（null=未控制）。提升到全局以便 MainActivity 的返回拦截感知。 */
+    private val _touchpadControllingId = MutableStateFlow<String?>(null)
+    val touchpadControllingId: StateFlow<String?> = _touchpadControllingId
+    fun setTouchpadControlling(id: String?) { _touchpadControllingId.value = id }
+
     /** 群主服务端（role == owner 时存在） */
     var server: KnotGroupServer? = null
         private set
@@ -368,7 +373,16 @@ object AppState {
                 }
                 _groupFiles.value = cur
             }
-            is GroupEvent.FileTasks -> _transferTasks.value = event.tasks
+            is GroupEvent.FileTasks -> {
+                _transferTasks.value = event.tasks
+                // 数据面中断：本机正在下载的任务若在全量快照中已 cancelled，触发 abort
+                // （第三方取消场景：本机没调 cancelTask，只能靠快照感知）
+                event.tasks.forEach { t ->
+                    if (t.status == TaskStatus.CANCELLED && p2pFile.isDownloading(t.taskId)) {
+                        p2pFile.cancelDownload(t.taskId)
+                    }
+                }
+            }
             is GroupEvent.Kicked -> {
                 reset()
                 toastKey("kicked", 2)
@@ -646,16 +660,27 @@ object AppState {
             resolver.update(uri, values, null, null)
         } catch (e: Exception) {
             resolver.delete(uri, null, null)
-            // 下载方失败上报（与供种方双保险）
-            val err = e.message ?: "下载失败"
-            if (isOwner()) server?.localTaskEvent(TaskEvent.Failed(taskId, err))
-            else client.sendTaskFailed(taskId, err)
+            // 本机主动取消不报 Failed——群主已置 cancelled；其它失败照常上报（与供种方双保险）
+            if (e !is com.knotyup.android.file.DownloadCancelledException) {
+                val err = e.message ?: "下载失败"
+                if (isOwner()) server?.localTaskEvent(TaskEvent.Failed(taskId, err))
+                else client.sendTaskFailed(taskId, err)
+            }
             throw e
         } finally {
             com.knotyup.android.service.DownloadProgressNotification.cancel(ctx)
         }
         // 下载即终点：不再登记/广播，文件仅落盘到 Downloads/knotShare
         uri.toString()
+    }
+
+    /** 取消传输：群内任一成员可取消 queuing/transferring 的任务。 */
+    fun cancelTask(taskId: String) {
+        // 本机正在下载该任务 → 立即 abort（关闭 socket，阻塞读退出并清理 MediaStore）
+        p2pFile.cancelDownload(taskId)
+        // 上报群主：群主置 cancelled + 广播全量
+        if (isOwner()) server?.localTaskCancel(taskId, device.id, device.name)
+        else client.sendTaskCancel(taskId)
     }
 
     private fun broadcastFileAdd(file: SharedFile) {

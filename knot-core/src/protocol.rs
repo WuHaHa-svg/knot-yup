@@ -238,7 +238,9 @@ pub enum Message {
     FileTaskFinish { task_id: String },
     /// 传输中心⑥：失败（下载方或供种方 → 群主；双方都报，幂等）
     FileTaskFailed { task_id: String, error: String, reporter: String },
-    /// 传输中心⑦：群主广播全量任务数组（群主 → 全群）
+    /// 传输中心⑦：取消（群内任一成员 → 群主；仅 queuing/transferring 可取消）
+    FileTaskCancel { task_id: String, canceller_id: String, canceller_name: String },
+    /// 传输中心⑧：群主广播全量任务数组（群主 → 全群）
     FileTasks { tasks: Vec<TransferTask> },
     /// 加密信封：data = base64(nonce || AES-256-GCM(json(内部消息)))
     Encrypted { data: String },
@@ -313,7 +315,7 @@ mod tests {
         }
     }
 
-    /// 7 条传输消息的 wire tag 冻结（与 Android 端 type 字符串一致）。
+    /// 8 条传输消息的 wire tag 冻结（与 Android 端 type 字符串一致）。
     #[test]
     fn transfer_message_wire_tags() {
         let task = sample_task();
@@ -324,6 +326,7 @@ mod tests {
             (Message::FileTaskProgress { task_id: "t".into(), progress: 1, transferred: 1 }, "file_task_progress"),
             (Message::FileTaskFinish { task_id: "t".into() }, "file_task_finish"),
             (Message::FileTaskFailed { task_id: "t".into(), error: "e".into(), reporter: "r".into() }, "file_task_failed"),
+            (Message::FileTaskCancel { task_id: "t".into(), canceller_id: "c".into(), canceller_name: "Carol".into() }, "file_task_cancel"),
             (Message::FileTasks { tasks: vec![task] }, "file_tasks"),
         ];
         for (msg, tag) in cases {

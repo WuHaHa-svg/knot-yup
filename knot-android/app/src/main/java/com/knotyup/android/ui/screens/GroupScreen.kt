@@ -32,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -55,6 +56,10 @@ import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 import kotlin.math.roundToInt
 
+/** 群页 tab 数（群信息/剪切板/文件/触摸板）；末页下标 = PAGE_COUNT - 1。 */
+private const val PAGE_COUNT = 4
+private const val LAST_PAGE = PAGE_COUNT - 1
+
 /** 群页面：左右分页（群信息 / 剪贴板）+ 悬浮 Tab 栏。 */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -72,10 +77,11 @@ internal fun GroupBody(
     onSend: () -> Unit,
     onLeave: () -> Unit,
 ) {
-    // 三页当前位置（浮点：0/1/2 及滑动中间态）。用普通 MutableState 作为权威值：
+    // 各页当前位置（浮点：0..LAST_PAGE 及滑动中间态）。用普通 MutableState 作为权威值：
     // 手势里可直接同步赋值（零调度延迟、不抖），动画用一个临时 Animatable 驱动并回写。
-    // 页面不交给 HorizontalPager——三页同时组合、永不卸载。
-    val pagePos = remember { mutableFloatStateOf(0f) }
+    // 页面不交给 HorizontalPager——各页同时组合、永不卸载。
+    // rememberSaveable：触摸板控制页强制横屏会触发 Activity 重建，须保住页码（否则回到第 1 页）
+    val pagePos = rememberSaveable { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     var pageAnimJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
@@ -106,7 +112,7 @@ internal fun GroupBody(
     ) {
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val widthPx = with(LocalDensity.current) { maxWidth.toPx() }
-            // 内容区：三页叠放同时组合（不卸载），用 translationX + alpha 做视差转场；
+            // 内容区：各页叠放同时组合（不卸载），用 translationX + alpha 做视差转场；
             // 左右滑动改 pagePos、松手吸附到最近页。
             Box(
                 Modifier
@@ -118,7 +124,7 @@ internal fun GroupBody(
                     .pointerInput(widthPx) {
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
-                            val startPage = pagePos.floatValue.roundToInt().coerceIn(0, 2)
+                            val startPage = pagePos.floatValue.roundToInt().coerceIn(0, LAST_PAGE)
                             var decided = false
                             var horizontal = false
                             var totalX = 0f
@@ -147,7 +153,7 @@ internal fun GroupBody(
                                     change.consume()
                                     sumDx += dx
                                     // 直接同步赋值（手势协程内可改 MutableState，无调度延迟、不抖）
-                                    pagePos.floatValue = (pagePos.floatValue - dx / widthPx).coerceIn(0f, 2f)
+                                    pagePos.floatValue = (pagePos.floatValue - dx / widthPx).coerceIn(0f, LAST_PAGE.toFloat())
                                 }
                             }
                             if (horizontal) {
@@ -156,12 +162,12 @@ internal fun GroupBody(
                                 val dir = if (kotlin.math.abs(sumDx) > swipePx) {
                                     if (sumDx < 0) 1 else -1
                                 } else 0
-                                goTo((startPage + dir).coerceIn(0, 2))
+                                goTo((startPage + dir).coerceIn(0, LAST_PAGE))
                             }
                         }
                     }
             ) {
-                // 三页无条件组合、永不卸载——这是本次重构的核心。
+                // 各页无条件组合、永不卸载——这是本次重构的核心。
                 // 每页相对当前位置 offset = page - pagePos，决定横向位移与淡出。
                 listOf(
                     @Composable {
@@ -172,6 +178,9 @@ internal fun GroupBody(
                     },
                     @Composable {
                         FileTab(t, members, seenFileItems)
+                    },
+                    @Composable {
+                        TouchpadTab(t, members)
                     },
                 ).forEachIndexed { page, content ->
                     Box(
@@ -227,6 +236,7 @@ internal fun GroupTabBar(
         t("group_info") to com.knotyup.android.R.drawable.ic_devices,
         t("clipboard") to com.knotyup.android.R.drawable.ic_clip,
         t("files") to com.knotyup.android.R.drawable.ic_file,
+        t("touchpad") to com.knotyup.android.R.drawable.ic_touchpad,
     )
     // tab 拖动产生的本地页偏移（单位=tab）；仅影响色块显示，不驱动页面位置。
     var dragOffset by remember { mutableFloatStateOf(0f) }
@@ -235,8 +245,8 @@ internal fun GroupTabBar(
     // pointerInput 闭包只启动一次，会捕获创建时的 page（旧值）。用 rememberUpdatedState
     // 让闭包每次读到最新 page——否则在剪切板页(page=1)拖动仍用旧的 page=0 做 clamp，色块不动。
     val pageState = rememberUpdatedState(page)
-    // 色块视觉位置：页面位置 + 拖动偏移，clamp 到 [0, 2]（3 段）
-    val visualPos = (page + dragOffset).coerceIn(0f, 2f)
+    // 色块视觉位置：页面位置 + 拖动偏移，clamp 到 [0, LAST_PAGE]（PAGE_COUNT 段）
+    val visualPos = (page + dragOffset).coerceIn(0f, LAST_PAGE.toFloat())
 
     // 松手后把色块偏移从当前值平滑归零（与页面切换动画并行）
     fun settle() {
@@ -251,12 +261,12 @@ internal fun GroupTabBar(
 
     BoxWithConstraints(modifier) {
         // 容器宽度自适应可用空间（不再写死 348dp——窄屏下固定宽度会溢出、右边被挤到贴边）。
-        // 三段等宽 + 两段间隙，色块位移直接用同一套尺寸算，保证左右内边距严格对称。
+        // PAGE_COUNT 段等宽 + (PAGE_COUNT-1) 段间隙，色块位移用同一套尺寸算，左右内边距严格对称。
         val outerPad = 4.dp
         val gap = 8.dp
         val containerW = minOf(maxWidth, 360.dp) // 上限 360dp，宽屏也不至于过宽
         val innerW = containerW - outerPad * 2
-        val segW = (innerW - gap * 2) / 3
+        val segW = (innerW - gap * (PAGE_COUNT - 1)) / PAGE_COUNT
         val stepPx = with(LocalDensity.current) { (segW + gap).toPx() }
         val segPx = with(LocalDensity.current) { segW.toPx() }
 
@@ -283,7 +293,7 @@ internal fun GroupTabBar(
                                 // 按下瞬间色块立即跳到手指底下：落点 x 换算成 tab 位置，
                                 // 以色块中心对齐落点；clamp 保证色块不出栏。页面不动，等松手再决定切换。
                                 val desiredPos = ((startOffset.x - segPx / 2f) / stepPx)
-                                    .coerceIn(0f, 2f)
+                                    .coerceIn(0f, LAST_PAGE.toFloat())
                                 dragOffset = desiredPos - pageState.value
                             },
                             onHorizontalDrag = { change, dragAmount ->
@@ -291,12 +301,12 @@ internal fun GroupTabBar(
                                 val curPage = pageState.value
                                 // dragAmount 是本次事件增量，累加；clamp 使色块停在栏内
                                 dragOffset = (dragOffset + dragAmount / stepPx)
-                                    .coerceIn(-curPage, 2f - curPage)
+                                    .coerceIn(-curPage, LAST_PAGE.toFloat() - curPage)
                             },
                             onDragEnd = {
                                 // 按色块最终位置吸附到最近 tab：只回调外部切页，自己不动页面位置
-                                val raw = (pageState.value + dragOffset).coerceIn(0f, 2f)
-                                onSelect(raw.roundToInt().coerceIn(0, 2))
+                                val raw = (pageState.value + dragOffset).coerceIn(0f, LAST_PAGE.toFloat())
+                                onSelect(raw.roundToInt().coerceIn(0, LAST_PAGE))
                                 settle()
                             },
                             onDragCancel = { settle() },

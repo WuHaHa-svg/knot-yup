@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinHandle;
 
 use crate::crypto::Cipher;
@@ -208,6 +208,7 @@ async fn serve_one(
     gate: &Arc<Semaphore>,
     on_event: &TaskEventSink,
 ) -> Result<(), String> {
+    let _ = stream.set_nodelay(true); // 关 Nagle：小帧/大块都立即发出，不攒延迟
     let req: FileRequest = read_frame(&mut stream).await.map_err(|e| format!("读请求头: {e}"))?;
     let task_id = req.task_id.clone();
     // 排队阶段：闸门被占时在这里等待（此时已知 task_id，可上报 Queued）
@@ -254,31 +255,27 @@ async fn serve_one_inner(
 
     let cipher = Cipher::from_pin(pin);
     let mut file = tokio::fs::File::open(&path).await.map_err(|e| format!("打开文件: {e}"))?;
-    let start = req.resume_from as u64 * FILE_CHUNK_SIZE as u64;
-    file.seek(io::SeekFrom::Start(start)).await.map_err(|e| format!("seek: {e}"))?;
+    file.seek(io::SeekFrom::Start(req.resume_from as u64 * FILE_CHUNK_SIZE as u64))
+        .await.map_err(|e| format!("seek: {e}"))?;
     let mut idx = req.resume_from;
+    let mut sent: u64 = req.resume_from as u64 * FILE_CHUNK_SIZE as u64;
     let mut buf = vec![0u8; FILE_CHUNK_SIZE];
+    // 纯流式：连续写块不等 ACK（TCP 自身保证可靠+按序+流控）。
+    // 三件事合一次 write_all：少两次 syscall/块，配合 TCP_NODELAY 填满带宽。
+    let mut frame = Vec::with_capacity(FILE_CHUNK_SIZE + 16);
     loop {
         let n = file.read(&mut buf).await.map_err(|e| format!("读文件: {e}"))?;
         if n == 0 {
             break;
         }
         let enc = cipher.encrypt_chunk(&buf[..n]);
-        stream.write_all(&idx.to_be_bytes()).await.map_err(|e| format!("写 idx: {e}"))?;
-        stream.write_all(&(enc.len() as u32).to_be_bytes()).await.map_err(|e| format!("写 len: {e}"))?;
-        stream.write_all(&enc).await.map_err(|e| format!("写块: {e}"))?;
-        // 停等式：等下载端 ACK 本块序号（0xFFFFFFFF 表示中止）
-        let mut ack = [0u8; 4];
-        stream.read_exact(&mut ack).await.map_err(|e| format!("等 ACK: {e}"))?;
-        let ack = u32::from_be_bytes(ack);
-        if ack == u32::MAX {
-            return Err("下载端中止".into());
-        }
-        if ack != idx {
-            return Err(format!("ACK 序号不符: 期望 {idx} 收到 {ack}"));
-        }
+        frame.clear();
+        frame.extend_from_slice(&idx.to_be_bytes());
+        frame.extend_from_slice(&(enc.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&enc);
+        stream.write_all(&frame).await.map_err(|e| format!("写块: {e}"))?;
         idx += 1;
-        let sent = idx as u64 * FILE_CHUNK_SIZE as u64;
+        sent += n as u64;
         if !task_id.is_empty() {
             on_event(TaskEvent::Progress { task_id: task_id.into(), transferred: sent.min(size), total: size });
         }
@@ -306,8 +303,12 @@ pub struct DownloadResult {
     pub mime: String,
 }
 
+/// 下载被本机取消时 fetch_file 返回的错误标记（上层据此抑制 Failed 上报）。
+pub const DOWNLOAD_CANCELLED: &str = "__DOWNLOAD_CANCELLED__";
+
 /// 从供种者下载文件到 dest 路径，校验 sha256，返回元信息（不含 file_id，由上层生成）。
 /// seed_id = 供种者设备 id，my_id = 下载者设备 id。
+/// cancel: 可选取消信号；一旦置位即在下一个 await 点中止，通知供种端并清理 partial。
 pub async fn fetch_file(
     file_addr: &str,
     pin: &str,
@@ -318,10 +319,25 @@ pub async fn fetch_file(
     mime: &str,
     dest: &Path,
     task_id: &str,
+    mut cancel: Option<watch::Receiver<bool>>,
 ) -> Result<DownloadResult, String> {
+    // 取消：直接返回（stream 在函数返回时 drop → 对端写块失败自然中止）+ 清理 partial。
+    // 纯流式下不再有 ACK 通道，关闭连接本身即是最彻底的中止通知。
+    macro_rules! abort {
+        ($partial:expr) => {{
+            let _ = tokio::fs::remove_file($partial).await;
+            return Err(DOWNLOAD_CANCELLED.to_string());
+        }};
+    }
+    // 进入即检查是否已取消
+    if cancel.as_ref().map(|r| *r.borrow()).unwrap_or(false) {
+        // 此时还没连 stream/partial，直接返回
+        return Err(DOWNLOAD_CANCELLED.to_string());
+    }
     let mut stream = TcpStream::connect(file_addr)
         .await
         .map_err(|e| format!("连接供种者失败: {e}"))?;
+    let _ = stream.set_nodelay(true);
     // token 与供种端校验一致：auth_token(pin, src_file_id, 下载者, 供种者)
     let token = auth_token(pin, src_file_id, my_id, seed_id);
     let req = FileRequest {
@@ -333,10 +349,27 @@ pub async fn fetch_file(
         task_id: task_id.into(),
     };
     write_frame(&mut stream, &req).await.map_err(|e| format!("发请求头: {e}"))?;
-    let (size, expect_sha) = match read_frame::<SeedControl>(&mut stream).await {
-        Ok(ctl) if ctl.ok => (ctl.size, ctl.sha256),
-        Ok(ctl) => return Err(format!("供种者拒绝: {}", ctl.error)),
-        Err(e) => return Err(format!("供种者响应异常: {e}")),
+    // 等首帧 ok（排队阶段可能阻塞在供种端闸门）；此处也要响应取消
+    let (size, expect_sha) = loop {
+        tokio::select! {
+            changed = async {
+                match cancel.as_mut() {
+                    Some(r) => { r.changed().await.ok(); *r.borrow() }
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed {
+                    return Err(DOWNLOAD_CANCELLED.to_string());
+                }
+            }
+            r = read_frame::<SeedControl>(&mut stream) => {
+                match r {
+                    Ok(ctl) if ctl.ok => break (ctl.size, ctl.sha256),
+                    Ok(ctl) => return Err(format!("供种者拒绝: {}", ctl.error)),
+                    Err(e) => return Err(format!("供种者响应异常: {e}")),
+                }
+            }
+        }
     };
 
     let cipher = Cipher::from_pin(pin);
@@ -349,26 +382,34 @@ pub async fn fetch_file(
         .map_err(|e| format!("创建临时文件: {e}"))?;
     let mut hasher = Sha256::new();
     let mut received: u64 = 0;
+    let mut enc: Vec<u8> = Vec::with_capacity(FILE_CHUNK_SIZE + 64);
     loop {
-        // 块头：[u32 idx][u32 len]
+        // 块头：[u32 idx][u32 len]；与取消信号二选一
         let mut head = [0u8; 8];
-        stream.read_exact(&mut head).await.map_err(|e| format!("读块头: {e}"))?;
-        let block_idx = u32::from_be_bytes(head[..4].try_into().unwrap());
+        tokio::select! {
+            changed = async {
+                match cancel.as_mut() {
+                    Some(r) => { r.changed().await.ok(); *r.borrow() }
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed { abort!(&partial); }
+            }
+            r = stream.read_exact(&mut head) => {
+                r.map_err(|e| format!("读块头: {e}"))?;
+            }
+        }
         let enc_len = u32::from_be_bytes(head[4..].try_into().unwrap()) as usize;
         if enc_len > FILE_CHUNK_SIZE + 1024 {
             return Err("块长度异常".into());
         }
-        let mut enc = vec![0u8; enc_len];
+        // idx 仍随帧传输（供进度/排障），但纯流式无需逐块校验序号——TCP 已保证按序
+        enc.resize(enc_len, 0);
         stream.read_exact(&mut enc).await.map_err(|e| format!("读块: {e}"))?;
         let plain = cipher.decrypt_chunk(&enc).map_err(|e| format!("解密块: {e}"))?;
         hasher.update(&plain);
         file.write_all(&plain).await.map_err(|e| format!("写块: {e}"))?;
         received += plain.len() as u64;
-        // 停等式 ACK：本块序号
-        stream
-            .write_all(&block_idx.to_be_bytes())
-            .await
-            .map_err(|e| format!("发 ACK: {e}"))?;
         if received >= size {
             break;
         }
@@ -478,6 +519,7 @@ mod tests {
             "application/octet-stream",
             &dest,
             "task-test-1",
+            None,
         )
         .await
         .expect("下载应成功");
@@ -498,6 +540,7 @@ mod tests {
             "application/octet-stream",
             &dest2,
             "task-test-bad",
+            None,
         )
         .await;
         assert!(bad.is_err(), "错误 PIN 的下载应失败");

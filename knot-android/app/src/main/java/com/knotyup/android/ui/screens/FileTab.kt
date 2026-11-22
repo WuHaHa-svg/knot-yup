@@ -75,6 +75,7 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileI
     val transferTasks by AppState.transferTasks.collectAsState()
     var viewDevice by remember { mutableStateOf<String?>(null) }
     var confirmRemove by remember { mutableStateOf<SharedFile?>(null) }
+    var confirmCancelTask by remember { mutableStateOf<TransferTask?>(null) }
     val scope = rememberCoroutineScope()
 
     val pickFile = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -154,7 +155,9 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileI
                     } else {
                         val ongoing = transferTasks.filter { it.status == TaskStatus.QUEUING || it.status == TaskStatus.TRANSFERRING }
                         val finished = transferTasks.filter { it.status == TaskStatus.DONE || it.status == TaskStatus.FAILED || it.status == TaskStatus.CANCELLED }
-                        (ongoing + finished).forEach { task -> TransferTaskRow(task, t) }
+                        (ongoing + finished).forEach { task ->
+                            TransferTaskRow(task, t) { confirmCancelTask = task }
+                        }
                     }
                     Spacer(Modifier.height(6.dp))
                 }
@@ -243,6 +246,21 @@ internal fun FileTab(t: (String) -> String, members: List<DeviceInfo>, seenFileI
             onCancel = { confirmRemove = null },
         )
     }
+
+    // 取消传输确认：复用统一弹窗组件（与退出群/删除文件同款）
+    confirmCancelTask?.let { task ->
+        KnotConfirm(
+            title = t("task_cancel"),
+            message = t("confirm_cancel_task").replace("{name}", task.name),
+            okText = t("task_cancel"),
+            cancelText = t("confirm_cancel"),
+            onOk = {
+                AppState.cancelTask(task.taskId)
+                confirmCancelTask = null
+            },
+            onCancel = { confirmCancelTask = null },
+        )
+    }
 }
 
 /** 一级：设备文件夹行（文件夹图标 chip + 名称 + 数量），卡片样式对齐成员行。 */
@@ -292,7 +310,7 @@ private fun DeviceFolderRow(member: DeviceInfo, count: Int, onClick: () -> Unit)
 
 /** 传输中心任务行：方向图标 + 文件名 + 对方 + 状态/进度条（只读）。 */
 @Composable
-private fun TransferTaskRow(task: TransferTask, t: (String) -> String) {
+private fun TransferTaskRow(task: TransferTask, t: (String) -> String, onCancel: (String) -> Unit) {
     val statusText = when (task.status) {
         TaskStatus.QUEUING -> t("task_queuing")
         TaskStatus.TRANSFERRING -> t("task_transferring")
@@ -342,21 +360,31 @@ private fun TransferTaskRow(task: TransferTask, t: (String) -> String) {
             }
         }
         Spacer(Modifier.width(8.dp))
-        Text(
-            if (task.status == TaskStatus.FAILED && task.error.isNotBlank()) "$statusText · ${task.error}"
-            else if (task.status == TaskStatus.QUEUING) statusText
-            else "$statusText · $pct%",
-            fontSize = 11.sp,
-            // 状态配色：排队灰 / 传输中主色 / 已完成绿 / 失败红
-            color = when (task.status) {
-                TaskStatus.QUEUING -> MaterialTheme.colorScheme.onSurfaceVariant
-                TaskStatus.TRANSFERRING -> MaterialTheme.colorScheme.primary
-                TaskStatus.DONE -> Color(0xFF34A97B)
-                TaskStatus.FAILED -> MaterialTheme.colorScheme.error
-                TaskStatus.CANCELLED -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
-            maxLines = 2,
-        )
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                if (task.status == TaskStatus.FAILED && task.error.isNotBlank()) "$statusText · ${task.error}"
+                else if (task.status == TaskStatus.QUEUING) statusText
+                else "$statusText · $pct%",
+                fontSize = 11.sp,
+                // 状态配色：排队灰 / 传输中主色 / 已完成绿 / 失败红 / 已取消灰
+                color = when (task.status) {
+                    TaskStatus.QUEUING -> MaterialTheme.colorScheme.onSurfaceVariant
+                    TaskStatus.TRANSFERRING -> MaterialTheme.colorScheme.primary
+                    TaskStatus.DONE -> Color(0xFF34A97B)
+                    TaskStatus.FAILED -> MaterialTheme.colorScheme.error
+                    TaskStatus.CANCELLED -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                maxLines = 2,
+            )
+            // 仅进行中显示取消按钮；任何成员都可取消，无归属限制
+            if (task.status == TaskStatus.QUEUING || task.status == TaskStatus.TRANSFERRING) {
+                TextButton(
+                    onClick = { onCancel(task.taskId) },
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp),
+                    modifier = Modifier.height(24.dp),
+                ) { Text(t("task_cancel"), fontSize = 10.sp, color = MaterialTheme.colorScheme.error) }
+            }
+        }
     }
 }
 

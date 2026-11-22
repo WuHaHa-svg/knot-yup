@@ -312,6 +312,15 @@ impl GroupClient {
             task_id, error, reporter: self.local_id.clone(),
         }).await
     }
+    /// ⑦ 取消（群内任一成员）：canceller_id 自动注入本机 id。
+    pub async fn send_task_cancel(&self, task_id: String, canceller_name: String) -> Result<(), String> {
+        tracing::debug!(target: "ws/client", "-> file_task_cancel id={task_id}");
+        self.send_task_msg(Message::FileTaskCancel {
+            task_id,
+            canceller_id: self.local_id.clone(),
+            canceller_name,
+        }).await
+    }
 
     /// 转让第二步：standby 服务就绪后，通过原 ws 回告群主。
     pub async fn send_transfer_ready(&self, addr: String) -> Result<(), String> {

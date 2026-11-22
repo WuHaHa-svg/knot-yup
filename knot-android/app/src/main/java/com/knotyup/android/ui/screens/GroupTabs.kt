@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -46,14 +47,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.knotyup.android.R
 import com.knotyup.android.data.AppState
 import com.knotyup.android.data.HistoryItem
+import com.knotyup.android.data.TouchpadSettings
 import com.knotyup.android.net.DeviceInfo
 import com.knotyup.android.ui.Motion
 import com.knotyup.android.ui.components.InfoRow
+import com.knotyup.android.ui.components.KnotConfirm
 
 /**
  * Tab 1：群信息卡（地址/PIN）+ 设备列表 + 退出群。
@@ -253,5 +257,115 @@ internal fun ClipboardTab(
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { onSend() }),
         )
+    }
+}
+
+/**
+ * Tab 4：触摸板。上部设备列表（可连接的桌面设备）+ 下部三个设置开关。
+ * 布局参照 [DevicesTab]（标题 + 卡片 + 同容器滚动）。
+ *
+ * T0（本期）只做 UI 骨架与本机一对一占用状态；真实 TCP 控制在 T1 接入。
+ */
+@Composable
+internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
+    val ctx = LocalContext.current
+    LaunchedEffect(Unit) { TouchpadSettings.init(ctx) }
+
+    // 设置开关本地 state（读自持久化；点击同时写回 TouchpadSettings）
+    var haptics by remember { mutableStateOf(TouchpadSettings.haptics) }
+    var oled by remember { mutableStateOf(TouchpadSettings.oled) }
+    var particles by remember { mutableStateOf(TouchpadSettings.particles) }
+
+    // 待确认连接的设备；确认后只置全局控制状态，控制页由 MainActivity 的独立全屏覆盖层渲染
+    var pendingDevice by remember { mutableStateOf<DeviceInfo?>(null) }
+
+    val desktops = members.filter { it.platform == "windows" || it.platform == "macos" }
+    val dark = androidx.compose.foundation.isSystemInDarkTheme()
+
+    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp).padding(bottom = 96.dp)) {
+        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+            // ── 设备列表 ──
+            Text(t("touchpad_devices"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Spacer(Modifier.height(6.dp))
+            if (desktops.isEmpty()) {
+                Text(t("touchpad_no_devices"), fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            desktops.forEach { m ->
+                val (iconRes, rawBg) = when (m.platform) {
+                    "macos" -> R.drawable.ic_os_mac to Color(0xFFECECF1)
+                    else -> R.drawable.ic_os_win to Color(0xFFE7F0FB)
+                }
+                val bg = if (dark) rawBg.copy(alpha = 0.22f) else rawBg
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surface)
+                        .clickable { pendingDevice = m }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(32.dp).background(bg, RoundedCornerShape(9.dp)),
+                        contentAlignment = Alignment.Center) {
+                        Image(painterResource(iconRes), null, Modifier.size(18.dp),
+                            colorFilter = if (m.platform == "macos" && dark) ColorFilter.tint(Color(0xFFE8E8ED)) else null)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(m.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
+                        Text(m.platform, fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Text(t("touchpad_connect"), fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.primary)
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            // ── 触摸板设置列表 ──
+            Text(t("touchpad_settings"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Spacer(Modifier.height(6.dp))
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surface),
+            ) {
+                SettingSwitch(t("touchpad_haptics"), haptics, onToggle = {
+                    haptics = it; TouchpadSettings.haptics = it
+                })
+                SettingSwitch(t("touchpad_oled"), oled, onToggle = {
+                    oled = it; TouchpadSettings.oled = it
+                })
+                SettingSwitch(t("touchpad_particles"), particles, onToggle = {
+                    particles = it; TouchpadSettings.particles = it
+                })
+            }
+        }
+    }
+
+    // 连接确认弹窗（复用统一组件）
+    pendingDevice?.let { dev ->
+        KnotConfirm(
+            title = t("touchpad"),
+            message = t("touchpad_confirm_connect").replace("{name}", dev.name),
+            okText = t("confirm_ok"),
+            cancelText = t("confirm_cancel"),
+            danger = false,
+            onOk = { AppState.setTouchpadControlling(dev.id); pendingDevice = null },
+            onCancel = { pendingDevice = null },
+        )
+    }
+}
+
+/** 设置列表一行：标题 + 右侧开关。 */
+@Composable
+private fun SettingSwitch(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
+        Switch(checked = checked, onCheckedChange = onToggle)
     }
 }

@@ -176,7 +176,9 @@ sealed class Msg {
     data class FileTaskFinish(val taskId: String) : Msg()
     /** 传输中心⑥：失败（双方都报，幂等） */
     data class FileTaskFailed(val taskId: String, val error: String, val reporter: String) : Msg()
-    /** 传输中心⑦：群主广播全量任务数组 */
+    /** 传输中心⑦：取消（群内任一成员 → 群主；仅 queuing/transferring 可取消） */
+    data class FileTaskCancel(val taskId: String, val cancellerId: String, val cancellerName: String) : Msg()
+    /** 传输中心⑧：群主广播全量任务数组 */
     data class FileTasks(val tasks: List<TransferTask>) : Msg()
     data class Encrypted(val data: String) : Msg()
 
@@ -213,6 +215,8 @@ sealed class Msg {
             is FileTaskFinish -> JSONObject().put("type", "file_task_finish").put("task_id", taskId)
             is FileTaskFailed -> JSONObject().put("type", "file_task_failed")
                 .put("task_id", taskId).put("error", error).put("reporter", reporter)
+            is FileTaskCancel -> JSONObject().put("type", "file_task_cancel")
+                .put("task_id", taskId).put("canceller_id", cancellerId).put("canceller_name", cancellerName)
             is FileTasks -> JSONObject().put("type", "file_tasks")
                 .put("tasks", org.json.JSONArray(tasks.map { it.toJson() }))
             is Encrypted -> JSONObject().put("type", "encrypted").put("data", data)
@@ -272,6 +276,9 @@ sealed class Msg {
                     "file_task_finish" -> FileTaskFinish(o.getString("task_id"))
                     "file_task_failed" -> FileTaskFailed(
                         o.getString("task_id"), o.optString("error"), o.getString("reporter"),
+                    )
+                    "file_task_cancel" -> FileTaskCancel(
+                        o.getString("task_id"), o.getString("canceller_id"), o.getString("canceller_name"),
                     )
                     "file_tasks" -> FileTasks(TransferTask.listFromJson(o.getJSONArray("tasks")))
                     "encrypted" -> Encrypted(o.getString("data"))

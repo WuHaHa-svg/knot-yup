@@ -61,6 +61,7 @@ pub fn run() {
                 promoted_at: std::sync::atomic::AtomicU64::new(0),
                 transferring: std::sync::atomic::AtomicBool::new(false),
                 file_map: tokio::sync::Mutex::new(knot_core::protocol::FileMap::new()),
+                task_cancels: tokio::sync::Mutex::new(std::collections::HashMap::new()),
                 files: std::sync::Arc::new(files::FileManager::load()),
             });
 
@@ -221,7 +222,8 @@ pub fn run() {
             commands::pick_save_path,
             commands::share_file,
             commands::remove_files,
-            commands::download_file
+            commands::download_file,
+            commands::cancel_task
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

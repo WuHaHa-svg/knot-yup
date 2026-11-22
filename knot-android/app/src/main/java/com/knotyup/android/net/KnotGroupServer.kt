@@ -152,10 +152,21 @@ class KnotGroupServer(
                 broadcastTasks()
             }
             is Msg.FileTaskFailed -> {
-                // 终态锁定：已 done/failed 的任务忽略后到终态
+                // 终态锁定：已 done/failed/cancelled 的任务忽略后到终态
                 applyTask(inner.taskId) { t ->
-                    if (t.status != TaskStatus.DONE && t.status != TaskStatus.FAILED) t.copy(
+                    if (t.status != TaskStatus.DONE && t.status != TaskStatus.FAILED && t.status != TaskStatus.CANCELLED) t.copy(
                         status = TaskStatus.FAILED, error = inner.error, updatedAt = System.currentTimeMillis(),
+                    ) else t
+                }
+                broadcastTasks()
+            }
+            is Msg.FileTaskCancel -> {
+                // 仅 queuing/transferring 可取消；终态幂等忽略
+                applyTask(inner.taskId) { t ->
+                    if (t.status == TaskStatus.QUEUING || t.status == TaskStatus.TRANSFERRING) t.copy(
+                        status = TaskStatus.CANCELLED,
+                        cancellerId = inner.cancellerId, cancellerName = inner.cancellerName,
+                        updatedAt = System.currentTimeMillis(),
                     ) else t
                 }
                 broadcastTasks()
@@ -195,6 +206,18 @@ class KnotGroupServer(
         broadcastTasks()
     }
 
+    /** 群主本机取消任务（取消方为群主自己时，无 ws 自连接）。 */
+    fun localTaskCancel(taskId: String, cancellerId: String, cancellerName: String) {
+        applyTask(taskId) { t ->
+            if (t.status == TaskStatus.QUEUING || t.status == TaskStatus.TRANSFERRING) t.copy(
+                status = TaskStatus.CANCELLED,
+                cancellerId = cancellerId, cancellerName = cancellerName,
+                updatedAt = System.currentTimeMillis(),
+            ) else t
+        }
+        broadcastTasks()
+    }
+
     /** 群主本机任务事件（群主自己下载/供种时无 ws 自连接，走这里）。 */
     fun localTaskEvent(ev: TaskEvent) {
         when (ev) {
@@ -212,7 +235,7 @@ class KnotGroupServer(
                 if (t.status == TaskStatus.TRANSFERRING) t.copy(status = TaskStatus.DONE, progress = 100, updatedAt = System.currentTimeMillis()) else t
             }
             is TaskEvent.Failed -> applyTask(ev.taskId) { t ->
-                if (t.status != TaskStatus.DONE && t.status != TaskStatus.FAILED) t.copy(
+                if (t.status != TaskStatus.DONE && t.status != TaskStatus.FAILED && t.status != TaskStatus.CANCELLED) t.copy(
                     status = TaskStatus.FAILED, error = ev.error, updatedAt = System.currentTimeMillis(),
                 ) else t
             }

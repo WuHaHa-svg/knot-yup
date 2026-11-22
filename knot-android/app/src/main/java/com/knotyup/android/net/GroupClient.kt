@@ -228,6 +228,11 @@ class GroupClient(
         val dev = localDevice ?: return false
         return sendTaskMsg(Msg.FileTaskFailed(taskId, error, dev.id))
     }
+    /** ⑦ 取消（群内任一成员）：canceller_id 自动注入本机 id。 */
+    fun sendTaskCancel(taskId: String): Boolean {
+        val dev = localDevice ?: return false
+        return sendTaskMsg(Msg.FileTaskCancel(taskId, dev.id, dev.name))
+    }
 
     fun leave() {
         intentionalClose = true

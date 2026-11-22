@@ -368,23 +368,31 @@ pub(crate) async fn download_file(
             }
         }
     }
+    // 本机取消信号：cancel_task command 持有 Sender，置 true 后 fetch_file 在 select 处中止
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    state.task_cancels.lock().await.insert(task_id.clone(), cancel_tx);
     let result = fetch_file(
         &seed_addr, &pin, &src_file_id, &seed_device_id, &my_id,
         &src_meta.name, &src_meta.mime, dest_path, &task_id,
+        Some(cancel_rx),
     )
     .await;
-    // 下载方失败上报（与供种方形成双保险：任一方掉线，另一方仍能把失败送达）
+    // 传输结束：移除取消句柄
+    state.task_cancels.lock().await.remove(&task_id);
+    // 下载方失败上报（与供种方形成双保险）；本机主动取消不报 Failed——群主已置 cancelled
     if let Err(e) = &result {
-        let s = state.session.lock().await;
-        if let Some(session) = s.as_ref() {
-            if let Some(server) = &session.server {
-                use knot_core::protocol::TaskEvent;
-                server.local_task_event(TaskEvent::Failed {
-                    task_id: task_id.clone(), error: e.clone(),
-                }).await;
-            } else if let Some(client) = &session.client {
-                if let Err(er) = client.send_task_failed(task_id.clone(), e.clone()).await {
-                    dlog("evt/task", format!("task_failed 上报失败: {er}"));
+        if e != knot_core::file::DOWNLOAD_CANCELLED {
+            let s = state.session.lock().await;
+            if let Some(session) = s.as_ref() {
+                if let Some(server) = &session.server {
+                    use knot_core::protocol::TaskEvent;
+                    server.local_task_event(TaskEvent::Failed {
+                        task_id: task_id.clone(), error: e.clone(),
+                    }).await;
+                } else if let Some(client) = &session.client {
+                    if let Err(er) = client.send_task_failed(task_id.clone(), e.clone()).await {
+                        dlog("evt/task", format!("task_failed 上报失败: {er}"));
+                    }
                 }
             }
         }
@@ -392,6 +400,32 @@ pub(crate) async fn download_file(
     result.map_err(|e| format!("下载失败: {e}"))?;
     // 下载即终点：不再登记/广播，前端也不消费返回值
     Ok(serde_json::Value::Null)
+}
+
+/// 取消传输：群内任一成员可取消 queuing/transferring 的任务。
+/// 本机若是该任务的下载方，先触发本地 abort；再把取消上报群主（群主置 cancelled + 广播全量）。
+#[tauri::command]
+pub(crate) async fn cancel_task(
+    state: State<'_, SharedState>,
+    task_id: String,
+) -> Result<(), String> {
+    // 本机下载中的任务：置取消信号，fetch_file 会中断并清理 partial
+    if let Some(tx) = state.task_cancels.lock().await.get(&task_id) {
+        let _ = tx.send(true);
+    }
+    let (my_id, my_name) = {
+        let d = state.device.lock().await;
+        (d.as_ref().map(|x| x.id.clone()).unwrap_or_default(),
+         d.as_ref().map(|x| x.name.clone()).unwrap_or_default())
+    };
+    let s = state.session.lock().await;
+    let session = s.as_ref().ok_or("NOT_IN_GROUP")?;
+    if let Some(server) = &session.server {
+        server.local_task_cancel(&task_id, my_id, my_name).await;
+    } else if let Some(client) = &session.client {
+        client.send_task_cancel(task_id, my_name).await?;
+    }
+    Ok(())
 }
 
 async fn send_file_add(state: &SharedState, my_id: &str, my_name: &str, file: SharedFile) -> Result<(), String> {

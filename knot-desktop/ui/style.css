@@ -604,6 +604,13 @@ body {
 .transfer-row .t-bar > i { display: block; height: 100%; background: var(--accent); }
 .transfer-row.failed .t-meta { color: var(--danger); }
 .transfer-row.cancelled .t-meta { color: var(--text-3); }
+.transfer-row .t-cancel {
+  display: block; margin: 4px 0 0 auto; padding: 2px 8px;
+  font-size: 10.5px; color: var(--danger); background: transparent;
+  border: 1px solid var(--danger); border-radius: 6px; cursor: pointer;
+}
+.transfer-row .t-cancel:hover { background: var(--danger-soft); }
+.transfer-row .t-cancel:disabled { opacity: .5; cursor: default; }
 .transfer-list .empty { padding: 30px 12px; text-align: center; color: var(--text-3); font-size: 12.5px; }
 .folder-ic, .file-ic {
   width: 26px; height: 26px; border-radius: 8px; flex-shrink: 0;

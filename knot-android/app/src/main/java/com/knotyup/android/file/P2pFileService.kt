@@ -23,8 +23,12 @@ import java.security.MessageDigest
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 import java.util.concurrent.Semaphore
+import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "KnotFile"
+
+/** 本机主动取消下载时抛出，上层据此抑制 Failed 上报（群主已置 cancelled）。 */
+class DownloadCancelledException : java.io.IOException("download cancelled by user")
 
 /** HMAC-SHA256(pin, msg) 的 hex（与 knot-core file.rs auth_token 一致）。 */
 private fun authToken(pin: String, msg: String): String {
@@ -53,6 +57,16 @@ class P2pFileService(
     private var serverSocket: ServerSocket? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = Semaphore(1)
+    /** task_id → 本机下载 socket；cancel() 关闭它让阻塞读抛异常退出。 */
+    private val downloadSockets = ConcurrentHashMap<String, Socket>()
+
+    /** 本机是否正在下载该任务（含排队等 ok 阶段）。 */
+    fun isDownloading(taskId: String): Boolean = downloadSockets.containsKey(taskId)
+
+    /** 取消本机正在进行的下载：关闭 socket，阻塞的 readFully 会抛异常。 */
+    fun cancelDownload(taskId: String) {
+        downloadSockets.remove(taskId)?.let { runCatching { it.close() } }
+    }
 
     fun updatePin(pin: String) {
         this.pin = pin
@@ -95,6 +109,7 @@ class P2pFileService(
     }
 
     private fun serveOne(socket: Socket) {
+        socket.tcpNoDelay = true // 关 Nagle：块帧立即发出，不攒延迟
         val input = DataInputStream(socket.getInputStream())
         val output = DataOutputStream(socket.getOutputStream())
         val reqLen = input.readInt()
@@ -134,20 +149,21 @@ class P2pFileService(
             val fis = openSource(path) ?: reject("NOT_FOUND")
             fis.use { inputStream ->
                 var idx = 0
+                var sent = 0L
                 val buf = ByteArray(Proto.FILE_CHUNK_SIZE)
+                // 纯流式：连续写块不等 ACK（TCP 自身保证可靠+按序+流控）。
+                // 帧 [u32 idx][u32 len][enc] 拼一次 write，少两次 syscall/块。
                 while (true) {
                     val n = inputStream.read(buf)
                     if (n <= 0) break
                     val enc = cipher.encryptChunk(buf.copyOfRange(0, n))
-                    output.writeInt(idx)
-                    output.writeInt(enc.size)
-                    output.write(enc)
-                    output.flush()
-                    val ack = input.readInt()
-                    if (ack != idx) break
+                    val frame = ByteArray(8 + enc.size)
+                    java.nio.ByteBuffer.wrap(frame).putInt(idx).putInt(enc.size)
+                    System.arraycopy(enc, 0, frame, 8, enc.size)
+                    output.write(frame)
                     idx++
+                    sent += n
                     if (taskId.isNotEmpty()) {
-                        val sent = idx.toLong() * Proto.FILE_CHUNK_SIZE
                         onEvent?.invoke(TaskEvent.Progress(taskId, sent.coerceAtMost(size), size))
                     }
                 }
@@ -183,7 +199,9 @@ class P2pFileService(
     ): P2pDownloadResult = kotlinx.coroutines.withContext(Dispatchers.IO) {
         val host = addr.substringBefore(":")
         val port = addr.substringAfter(":").toInt()
-        val socket = Socket(host, port).apply { soTimeout = 30000 }
+        val socket = Socket(host, port).apply { soTimeout = 30000; tcpNoDelay = true }
+        if (taskId.isNotEmpty()) downloadSockets[taskId] = socket
+        try {
         socket.use { s ->
             val input = DataInputStream(s.getInputStream())
             val output = DataOutputStream(s.getOutputStream())
@@ -210,6 +228,11 @@ class P2pFileService(
             var received = 0L
             var idx = 0
             while (received < size) {
+                // 本机取消兜底：downloadSockets 已被 cancelDownload 移除则中止
+                // （cancelDownload 已关闭 socket，阻塞的 readInt/readFully 会抛 IOException → 转专用异常）
+                if (taskId.isNotEmpty() && !downloadSockets.containsKey(taskId)) {
+                    throw DownloadCancelledException()
+                }
                 val blockIdx = input.readInt()
                 val encLen = input.readInt()
                 if (encLen <= 0 || encLen > Proto.FILE_CHUNK_SIZE + 1024) {
@@ -220,7 +243,7 @@ class P2pFileService(
                 sink.write(plain)
                 digest.update(plain)
                 received += plain.size
-                output.writeInt(blockIdx); output.flush()
+                // 纯流式：不再逐块回 ACK
                 onProgress?.invoke(received, size)
             }
             sink.flush()
@@ -233,6 +256,15 @@ class P2pFileService(
             val done = JSONObject().put("done", true).toString().toByteArray()
             output.writeInt(done.size); output.write(done); output.flush()
             P2pDownloadResult(size, gotSha)
+        }
+        } catch (e: DownloadCancelledException) {
+            throw e
+        } catch (e: java.io.IOException) {
+            // socket 被 cancelDownload 关闭 → 阻塞读抛 IOException；若已不在注册表说明是主动取消
+            if (taskId.isNotEmpty() && !downloadSockets.containsKey(taskId)) throw DownloadCancelledException()
+            throw e
+        } finally {
+            if (taskId.isNotEmpty()) downloadSockets.remove(taskId)
         }
     }
 

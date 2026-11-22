@@ -288,11 +288,26 @@ impl GroupServer {
                         Some(Message::FileTaskFailed { task_id, error, reporter }) => {
                             tracing::debug!(target: "ws/server", "<- file_task_failed [{peer}] id={} reporter={} error={}",
                                 task_id, reporter, error);
-                            // 终态锁定：已 done/failed 的任务忽略后到终态（防失败被延迟 done 翻回）
+                            // 终态锁定：已 done/failed/cancelled 的任务忽略后到终态（防失败被延迟 done 翻回）
                             tasks_server.update_task(&task_id, |t| {
-                                if t.status != TaskStatus::Done && t.status != TaskStatus::Failed {
+                                if t.status != TaskStatus::Done && t.status != TaskStatus::Failed
+                                    && t.status != TaskStatus::Cancelled {
                                     t.status = TaskStatus::Failed;
                                     t.error = error;
+                                    t.updated_at = protocol::now_ms();
+                                }
+                            }).await;
+                            tasks_server.broadcast_tasks().await;
+                        }
+                        Some(Message::FileTaskCancel { task_id, canceller_id, canceller_name }) => {
+                            tracing::debug!(target: "ws/server", "<- file_task_cancel [{peer}] id={} by={}",
+                                task_id, canceller_id);
+                            // 仅 queuing/transferring 可取消；终态幂等忽略
+                            tasks_server.update_task(&task_id, |t| {
+                                if t.status == TaskStatus::Queuing || t.status == TaskStatus::Transferring {
+                                    t.status = TaskStatus::Cancelled;
+                                    t.canceller_id = canceller_id;
+                                    t.canceller_name = canceller_name;
                                     t.updated_at = protocol::now_ms();
                                 }
                             }).await;
@@ -479,7 +494,8 @@ impl GroupServer {
             }
             Failed { task_id, error } => {
                 self.update_task(&task_id, |t| {
-                    if t.status != TaskStatus::Done && t.status != TaskStatus::Failed {
+                    if t.status != TaskStatus::Done && t.status != TaskStatus::Failed
+                        && t.status != TaskStatus::Cancelled {
                         t.status = TaskStatus::Failed; t.error = error;
                         t.updated_at = protocol::now_ms();
                     }
@@ -494,6 +510,19 @@ impl GroupServer {
         let mut list = self.tasks.write().await;
         if !list.iter().any(|t| t.task_id == task.task_id) { list.push(task); }
         drop(list);
+        self.broadcast_tasks().await;
+    }
+
+    /// 群主本机取消任务（取消方为群主自己时，无 ws 自连接）。
+    pub async fn local_task_cancel(&self, task_id: &str, canceller_id: String, canceller_name: String) {
+        self.update_task(task_id, |t| {
+            if t.status == TaskStatus::Queuing || t.status == TaskStatus::Transferring {
+                t.status = TaskStatus::Cancelled;
+                t.canceller_id = canceller_id;
+                t.canceller_name = canceller_name;
+                t.updated_at = protocol::now_ms();
+            }
+        }).await;
         self.broadcast_tasks().await;
     }
 

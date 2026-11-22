@@ -62,6 +62,8 @@ pub(crate) struct AppState {
     pub promoted_at: std::sync::atomic::AtomicU64,
     /// 群文件列表（按 device_id 分组；bridge 收到 file_* 事件时更新）
     pub file_map: Mutex<FileMap>,
+    /// 本机正在下载的任务 → 取消信号发送端（cancel_task 时置 true，fetch_file 的 select 监听）
+    pub task_cancels: Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>,
     /// 本地持久共享文件夹（清单 + 供种服务）
     pub files: Arc<crate::files::FileManager>,
     /// 转让进行中：转出方会看到成员陆续离开（迁移潮），期间成员差量不提示；
