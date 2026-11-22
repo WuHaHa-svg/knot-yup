@@ -27,7 +27,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -330,13 +329,13 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surface),
             ) {
-                SettingSwitch(t("touchpad_haptics"), haptics, onToggle = {
+                SettingSwitch(t("touchpad_haptics"), t("touchpad_haptics_tip"), haptics, t, onToggle = {
                     haptics = it; TouchpadSettings.haptics = it
                 })
-                SettingSwitch(t("touchpad_oled"), oled, onToggle = {
+                SettingSwitch(t("touchpad_oled"), t("touchpad_oled_tip"), oled, t, onToggle = {
                     oled = it; TouchpadSettings.oled = it
                 })
-                SettingSwitch(t("touchpad_particles"), particles, onToggle = {
+                SettingSwitch(t("touchpad_particles"), t("touchpad_particles_tip"), particles, t, onToggle = {
                     particles = it; TouchpadSettings.particles = it
                 })
             }
@@ -359,13 +358,31 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
 
 /** 设置列表一行：标题 + 右侧开关。 */
 @Composable
-private fun SettingSwitch(label: String, checked: Boolean, onToggle: (Boolean) -> Unit) {
+private fun SettingSwitch(
+    title: String,
+    tip: String,
+    checked: Boolean,
+    t: (String) -> String,
+    onToggle: (Boolean) -> Unit,
+) {
+    // 整行可点击切换；左侧文本分 title + tip 两段，右侧用状态文字替代 Switch 组件
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+        Modifier.fillMaxWidth()
+            .clickable { onToggle(!checked) }
+            .padding(horizontal = 12.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 13.sp)
+            Spacer(Modifier.height(2.dp))
+            Text(tip, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Spacer(Modifier.width(8.dp))
-        Switch(checked = checked, onCheckedChange = onToggle)
+        Text(
+            t(if (checked) "setting_on" else "setting_off"),
+            fontSize = 12.sp,
+            color = if (checked) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
