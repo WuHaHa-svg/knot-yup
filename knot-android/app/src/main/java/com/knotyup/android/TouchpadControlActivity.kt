@@ -3,6 +3,8 @@ package com.knotyup.android
 import android.content.Context
 import android.hardware.display.DisplayManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Display
 import android.view.WindowManager
 import android.widget.Toast
@@ -21,7 +23,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -32,8 +33,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import com.knotyup.android.data.AppState
 import com.knotyup.android.data.TouchpadSettings
 import com.knotyup.android.touchpad.Haptics
+import com.knotyup.android.touchpad.ParticleSystem
 import com.knotyup.android.touchpad.TouchpadClient
 import com.knotyup.android.ui.KnotYupTheme
+import com.knotyup.android.ui.components.ParticleCanvas
+import com.knotyup.android.ui.components.particlePalette
 import com.knotyup.android.ui.Strings
 import com.knotyup.android.ui.components.KnotConfirm
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -89,6 +93,9 @@ class TouchpadControlActivity : ComponentActivity() {
         lastRotation = displayManager.getDisplay(Display.DEFAULT_DISPLAY)?.rotation ?: -1
         displayManager.registerDisplayListener(displayListener, null)
 
+        // 组合期间即读触摸板设置（粒子/OLED/自然滚动），setContent 前同步初始化持久化。
+        TouchpadSettings.init(applicationContext)
+        Haptics.init(applicationContext)
         val lang = AppState.loadLang(this) ?: "zh-Hans"
         val themeId = AppState.loadTheme(this)
         val t = { key: String -> Strings.t(lang, key) }
@@ -135,16 +142,48 @@ private fun ControlScreen(
     onExit: () -> Unit,
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    LaunchedEffect(Unit) {
-        TouchpadSettings.init(ctx)
-        Haptics.init(ctx)
-    }
     val oled = TouchpadSettings.oled
     val naturalScroll = TouchpadSettings.naturalScroll
+    // 粒子配置（设置即时生效：remember 读取时取值，设置页在另一个页面，进控制页时读最新）
+    val particlesOn = TouchpadSettings.particles
+    val particlePalette = particlePalette(TouchpadSettings.particleColor)
+    val particleRandomColor = TouchpadSettings.particleColor == "random"
+    val particleSizeDp = TouchpadSettings.particleSize
+    val particleCount = TouchpadSettings.particleCount
+    val particleSpeed = TouchpadSettings.particleSpeed
+    val particleTrail = TouchpadSettings.particleTrail
+    val density = androidx.compose.ui.platform.LocalDensity.current.density
+    // 屏幕像素尺寸（横屏全屏）：涟漪据此计算铺满全屏的扩散距离
+    val dm = ctx.resources.displayMetrics
+    val screenW = dm.widthPixels.toFloat()
+    val screenH = dm.heightPixels.toFloat()
+    val particleSystem = remember { ParticleSystem() }
     var confirmExit by remember { mutableStateOf(false) }
     val client = remember { TouchpadClient() }
-    // 上次三指轻点时刻（用于三指双击判定，跨手势保留）
-    val lastThreeTap = remember { mutableLongStateOf(0L) }
+    // 粒子发射回调：只做 system.emit，纯视觉、不阻塞采集
+    val emitParticle: (Float, Float) -> Unit = { x, y ->
+        if (particlesOn) particleSystem.emit(
+            x, y, particleSizeDp * density, particleCount,
+            particlePalette, particleRandomColor, particleSpeed, screenW, screenH,
+        )
+    }
+    // 单指长按计时器：到点震动+按下（进入拖动）
+    val singleHold = remember {
+        HoldTracker(Handler(Looper.getMainLooper()), LONG_PRESS_MS) {
+            client.down("left")
+            Haptics.tick()
+        }
+    }
+    // 双指长按计时器：到点震动+触发调度中心开关
+    val doubleHold = remember {
+        HoldTracker(Handler(Looper.getMainLooper()), DOUBLE_HOLD_MS) {
+            Haptics.tick()
+            client.shortcut("mission_control")
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { singleHold.cancel(); doubleHold.cancel() }
+    }
 
     // 建立触控板专用 TCP：从成员表取目标设备的 touchpad_addr，PIN 作握手令牌
     val controllingId by AppState.touchpadControllingId.collectAsState()
@@ -197,7 +236,7 @@ private fun ControlScreen(
         )
     }
 
-    // 全屏触摸采集：由 handleGesture 识别单指/双指/三指手势。
+    // 全屏触摸采集：由 handleGesture 识别单指/双指手势。
     // 独立 Activity 的 window 与群页隔离，触摸不会触发切 tab。
     Box(
         Modifier
@@ -205,10 +244,13 @@ private fun ControlScreen(
             .background(if (oled) Color(0xFF000000) else Color(0xFF212121))
             .pointerInput(Unit) {
                 awaitEachGesture {
-                    handleGesture(client, naturalScroll, lastThreeTap)
+                    handleGesture(client, naturalScroll, singleHold, doubleHold, emitParticle)
                 }
             }
-    )
+    ) {
+        // 粒子渲染层：独立协程 60fps，只读取 system 状态；与上方采集完全解耦
+        ParticleCanvas(particleSystem, enabled = particlesOn, trail = particleTrail)
+    }
 }
 
 /**
@@ -216,91 +258,101 @@ private fun ControlScreen(
  *
  * 手势分类：
  * - 单指轻点 → 左键 click
- * - 单指滑动 → move（光标）；按住 280ms 再移动 → 拖动（down+move+up，触发时震动）
- * - 双指轻点 → 右键 click（震动）；双指滑动 → scroll（按 naturalScroll 决定方向）
- * - 三指双击（300ms 内两次三指轻点）→ 调度中心开关 shortcut（震动）
+ * - 单指滑动 → move（光标）；单指按住满 800ms（位移不超阈值）→ 立即震动+进入拖动
+ * - 双指轻点 → 右键 click（不震动）；双指滑动 → scroll（按 naturalScroll 决定方向）
+ * - 双指长按（按住 800ms 不移动）→ 调度中心开关 shortcut（震动）
  *
- * 长按判定用时间戳：在第一个 move 事件到来时检查按下时长，避免 withTimeout 取消 await 的风险。
+ * 长按用独立 Handler 定时器（HoldTracker，不取消 awaitPointerEvent）：
+ * - 单指按住满 800ms 且未移动 → 震动+按下进入拖动
+ * - 双指按住满 800ms 且未移动 → 震动+触发调度中心
+ * 双指轻点(<800ms) → 右键；双指滑动(超阈值) → 滚动，都会取消长按计时。
+ * 绝不能用 withTimeout 包 awaitPointerEvent——超时会取消事件等待、破坏 AwaitPointerEventScope
+ * 的事件流，导致手势事件丢失。
+ * 移动阈值 MOVE_SLOP=12px：累计位移低于它的轻微抖动不识别为移动，会取消长按计时。
  */
 private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.handleGesture(
     client: TouchpadClient,
     naturalScroll: Boolean,
-    lastThreeTap: androidx.compose.runtime.MutableState<Long>,
+    singleHold: HoldTracker,
+    doubleHold: HoldTracker,
+    emitParticle: (Float, Float) -> Unit,
 ) {
     val down = awaitFirstDown(requireUnconsumed = false)
     down.consume()
-    val startTime = System.currentTimeMillis()
+    emitParticle(down.position.x, down.position.y) // 按下瞬间发一簇
+    // 每个新手势先清掉上一段手势残留的 fired——否则上次双指长按后 fired 恒为 true，
+    // 后续手势第一帧就被判成 "double"（该模式不发送任何事件），表现为触摸板失效。
+    singleHold.reset()
+    doubleHold.reset()
+    singleHold.schedule() // 单指按下即开始长按计时
     var maxPointers = 1
     var totalDx = 0f
     var totalDy = 0f
-    // 手势模式："" 未定 / move / scroll / drag / three
+    // 手势模式："" 未定 / move / scroll / drag / double
     var mode = ""
     var dragging = false
+    var doubleFired = false // 双指长按是否已触发（避免同一手势重复触发）
+    var lastX = down.position.x // 最后触点坐标（抬起时在此处触发涟漪）
+    var lastY = down.position.y
 
     while (true) {
         val event = awaitPointerEvent(PointerEventPass.Main)
         var dx = 0f
         var dy = 0f
         val pressedCount = event.changes.count { it.pressed }
-        if (pressedCount > maxPointers) maxPointers = pressedCount
+        if (event.changes.size > maxPointers) maxPointers = event.changes.size
+        // 指针数：恰好 2 指才启动双指长按计时；单指/3指以上都取消
+        // （双指轻点/滑动时靠位移阈值或松手来取消计时，见下方 mode 判定）
+        when (pressedCount) {
+            2 -> { singleHold.cancel(); if (!doubleFired && !doubleHold.fired) doubleHold.schedule() }
+            else -> { doubleHold.cancel() } // 单指靠 singleHold；3指以上不触发任何长按
+        }
         for (c in event.changes) {
             if (c.pressed) {
                 dx += c.position.x - c.previousPosition.x
                 dy += c.position.y - c.previousPosition.y
+                lastX = c.position.x
+                lastY = c.position.y
                 c.consume()
             }
         }
         totalDx += dx
         totalDy += dy
-        val elapsed = System.currentTimeMillis() - startTime
-        val moved = kotlin.math.abs(dx) > 0.5f || kotlin.math.abs(dy) > 0.5f
+        val movedEnough = kotlin.math.abs(totalDx) >= MOVE_SLOP ||
+            kotlin.math.abs(totalDy) >= MOVE_SLOP
+        val step = kotlin.math.abs(dx) > 0.5f || kotlin.math.abs(dy) > 0.5f
 
-        // 未定模式时，根据指针数+位移+时长判定手势类型
         if (mode.isEmpty()) {
             when {
-                maxPointers >= 3 -> mode = "three" // 三指手势中途不发送，松手判定双击
-                moved && maxPointers == 2 -> mode = "scroll"
-                moved && maxPointers == 1 -> {
-                    // 单指长按 280ms 后移动 → 拖动，达标时震动一下
-                    if (elapsed >= 280L) {
-                        client.down("left")
-                        Haptics.tick()
-                        dragging = true
-                        mode = "drag"
-                    } else {
-                        mode = "move"
-                    }
-                }
+                singleHold.fired -> { mode = "drag"; dragging = true; doubleHold.cancel() }
+                doubleHold.fired -> { mode = "double"; doubleFired = true; singleHold.cancel() }
+                maxPointers >= 2 && movedEnough -> { mode = "scroll"; singleHold.cancel(); doubleHold.cancel() }
+                maxPointers == 1 && movedEnough -> { mode = "move"; singleHold.cancel() }
             }
         }
+        // 双指滑动（超阈值）取消长按计时，不当作长按
+        if (mode == "scroll" && movedEnough) doubleHold.cancel()
 
         when (mode) {
-            "move", "drag" -> if (moved) client.move(dx.toInt(), dy.toInt())
-            "scroll" -> if (moved) {
+            "move", "drag" -> if (step) client.move(dx.toInt(), dy.toInt())
+            "scroll" -> if (step) {
                 val scrollY = if (naturalScroll) dy else -dy
                 client.scroll(dx.toInt(), scrollY.toInt())
             }
         }
-        if (event.changes.all { !it.pressed }) break
+        if (event.changes.all { !it.pressed }) {
+            emitParticle(lastX, lastY) // 抬起瞬间在最后触点位置触发一次涟漪
+            break
+        }
     }
 
-    // 手势结束：按最终模式结算
+    singleHold.cancel()
+    doubleHold.cancel()
+
+    // 手势结束：按最终模式结算（注：长按动作已在计时器到点时执行）
     when {
         dragging -> client.up("left") // 拖动结束，抬起
-        mode == "three" -> {
-            // 三指轻点（位移极小）参与双击判定；滑动不参与
-            if (kotlin.math.abs(totalDx) < 24f && kotlin.math.abs(totalDy) < 24f) {
-                val now = System.currentTimeMillis()
-                if (now - lastThreeTap.value < 300L) {
-                    // 300ms 内第二次三指轻点 → 调度中心开关
-                    Haptics.tick()
-                    client.shortcut("mission_control")
-                    lastThreeTap.value = 0L
-                } else {
-                    lastThreeTap.value = now // 记录第一次
-                }
-            }
-        }
+        mode == "double" -> Unit // 调度中心已由双指长按触发，此处不重复
         mode.isEmpty() -> {
             if (maxPointers >= 2) {
                 client.click("right") // 双指轻点 → 右键（不震动）
@@ -308,5 +360,36 @@ private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.han
                 client.click("left")
             }
         }
+    }
+}
+
+private const val LONG_PRESS_MS = 800L  // 单指长按进入拖动的时长
+private const val DOUBLE_HOLD_MS = 800L  // 双指长按触发调度中心的时长
+private const val MOVE_SLOP = 12f       // 累计位移阈值(px)：低于此的抖动不识别为移动
+
+/** 长按计时器：独立 Handler 定时，到点置 fired 并执行回调；不干扰 Compose 的事件接收。 */
+private class HoldTracker(
+    private val handler: Handler,
+    private val delayMs: Long,
+    private val onFire: () -> Unit,
+) {
+    @Volatile var fired = false
+        private set
+    private val runnable = Runnable {
+        fired = true
+        onFire()
+    }
+    fun schedule() {
+        handler.removeCallbacks(runnable) // 先清旧的，避免同一手势多次 schedule 累积
+        fired = false
+        handler.postDelayed(runnable, delayMs)
+    }
+    fun cancel() {
+        handler.removeCallbacks(runnable)
+    }
+    /** 新手势开始时清掉上一段手势残留的 fired，避免污染本次判定。 */
+    fun reset() {
+        handler.removeCallbacks(runnable)
+        fired = false
     }
 }

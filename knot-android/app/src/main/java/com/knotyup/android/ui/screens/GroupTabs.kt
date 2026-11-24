@@ -27,12 +27,16 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -49,14 +53,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.knotyup.android.R
 import com.knotyup.android.data.AppState
 import com.knotyup.android.data.HistoryItem
 import com.knotyup.android.data.TouchpadSettings
 import com.knotyup.android.net.DeviceInfo
 import com.knotyup.android.ui.Motion
+import com.knotyup.android.ui.components.DialogCard
 import com.knotyup.android.ui.components.InfoRow
 import com.knotyup.android.ui.components.KnotConfirm
+import com.knotyup.android.ui.components.ParticlePreview
+import com.knotyup.android.ui.components.particlePalette
 
 /**
  * Tab 1：群信息卡（地址/PIN）+ 设备列表 + 退出群。
@@ -268,12 +277,19 @@ internal fun ClipboardTab(
 @Composable
 internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
     val ctx = LocalContext.current
-    LaunchedEffect(Unit) { TouchpadSettings.init(ctx) }
-
     // 设置开关本地 state（读自持久化；点击同时写回 TouchpadSettings）
     var oled by remember { mutableStateOf(TouchpadSettings.oled) }
     var particles by remember { mutableStateOf(TouchpadSettings.particles) }
     var naturalScroll by remember { mutableStateOf(TouchpadSettings.naturalScroll) }
+    // 粒子配置 state（风格固定涟漪，无 style 设置）
+    var particleColor by remember { mutableStateOf(TouchpadSettings.particleColor) }
+    var particleSize by remember { mutableFloatStateOf(TouchpadSettings.particleSize) }
+    var particleCount by remember { mutableIntStateOf(TouchpadSettings.particleCount) }
+    var particleSpeed by remember { mutableFloatStateOf(TouchpadSettings.particleSpeed) }
+    var particleTrail by remember { mutableStateOf(TouchpadSettings.particleTrail) }
+    // 粒子设置弹窗：当前打开的类型 + 预览重播计数
+    var particleDialog by remember { mutableStateOf<String?>(null) }
+    var previewReplayKey by remember { mutableIntStateOf(0) }
 
     // 待确认连接的设备；确认后启动独立控制 Activity（自己一个 window，与群页完全隔离）
     var pendingDevice by remember { mutableStateOf<DeviceInfo?>(null) }
@@ -335,6 +351,28 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
                 SettingSwitch(t("touchpad_particles"), t("touchpad_particles_tip"), particles, t, onToggle = {
                     particles = it; TouchpadSettings.particles = it
                 })
+                if (particles) {
+                    // 四项点击打开弹窗，弹窗内操作 + 预览（避开 tab 横滑手势冲突）
+                    SettingClick(t("touchpad_particle_color"), t("touchpad_particle_color_tip"),
+                        when (particleColor) {
+                            "white" -> t("pc_white"); "primary" -> t("pc_primary")
+                            "red" -> t("pc_red"); "blue" -> t("pc_blue"); "gold" -> t("pc_gold")
+                            else -> t("pc_random")
+                        }
+                    ) { particleDialog = "color" }
+                    SettingClick(t("touchpad_particle_size"), t("touchpad_particle_size_tip"),
+                        "${String.format("%.2f", particleSize)}dp"
+                    ) { particleDialog = "size" }
+                    SettingClick(t("touchpad_particle_count"), t("touchpad_particle_count_tip"),
+                        particleCount.toString()
+                    ) { particleDialog = "count" }
+                    SettingClick(t("touchpad_particle_speed"), t("touchpad_particle_speed_tip"),
+                        particleSpeed.toInt().toString()
+                    ) { particleDialog = "speed" }
+                    SettingSwitch(t("touchpad_particle_trail"), t("touchpad_particle_trail_tip"), particleTrail, t, onToggle = {
+                        particleTrail = it; TouchpadSettings.particleTrail = it; previewReplayKey++
+                    })
+                }
                 SettingSwitch(t("touchpad_natural_scroll"), t("touchpad_natural_scroll_tip"), naturalScroll, t, onToggle = {
                     naturalScroll = it; TouchpadSettings.naturalScroll = it
                 })
@@ -358,6 +396,28 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
                 )
             },
             onCancel = { pendingDevice = null },
+        )
+    }
+
+    // 粒子设置弹窗（含预览）
+    particleDialog?.let { type ->
+        ParticleSettingDialog(
+            type = type,
+            t = t,
+            color = particleColor,
+            size = particleSize,
+            count = particleCount,
+            speed = particleSpeed,
+            trail = particleTrail,
+            replayKey = previewReplayKey,
+            onColor = { particleColor = it; TouchpadSettings.particleColor = it; previewReplayKey++ },
+            onSize = { particleSize = it; TouchpadSettings.particleSize = it },
+            onSizeCommit = { previewReplayKey++ },
+            onCount = { particleCount = it; TouchpadSettings.particleCount = it },
+            onCountCommit = { previewReplayKey++ },
+            onSpeed = { particleSpeed = it; TouchpadSettings.particleSpeed = it },
+            onSpeedCommit = { previewReplayKey++ },
+            onClose = { particleDialog = null },
         )
     }
 }
@@ -390,5 +450,145 @@ private fun SettingSwitch(
             color = if (checked) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant,
         )
+    }
+}
+
+
+/** 设置列表一行：标题 + 简述 + 右侧当前值；整行点击（用于打开弹窗）。 */
+@Composable
+private fun SettingClick(
+    title: String,
+    tip: String,
+    value: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, fontSize = 13.sp)
+            Spacer(Modifier.height(2.dp))
+            Text(tip, fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Spacer(Modifier.width(8.dp))
+        Text(value, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+/** 粒子设置弹窗：上部控件 + 下部预览；值应用后预览播放一次。 */
+@Composable
+private fun ParticleSettingDialog(
+    type: String,
+    t: (String) -> String,
+    color: String,
+    size: Float,
+    count: Int,
+    speed: Float,
+    trail: Boolean,
+    replayKey: Int,
+    onColor: (String) -> Unit,
+    onSize: (Float) -> Unit,
+    onSizeCommit: () -> Unit,
+    onCount: (Int) -> Unit,
+    onCountCommit: () -> Unit,
+    onSpeed: (Float) -> Unit,
+    onSpeedCommit: () -> Unit,
+    onClose: () -> Unit,
+) {
+    val title = when (type) {
+        "color" -> t("touchpad_particle_color")
+        "size" -> t("touchpad_particle_size")
+        "count" -> t("touchpad_particle_count")
+        else -> t("touchpad_particle_speed")
+    }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        DialogCard(Modifier.padding(horizontal = 36.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 0.dp,
+            ) {
+                Column(Modifier.padding(20.dp)) {
+                    Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(14.dp))
+
+                    when (type) {
+                        "color" -> {
+                            val colors = listOf(
+                                "random" to t("pc_random"), "white" to t("pc_white"),
+                                "primary" to t("pc_primary"), "red" to t("pc_red"),
+                                "blue" to t("pc_blue"), "gold" to t("pc_gold"),
+                            )
+                            Column {
+                                for (row in colors.chunked(3)) {
+                                    Row {
+                                        for ((key, label) in row) {
+                                            TextButton(
+                                                modifier = Modifier.weight(1f),
+                                                onClick = { onColor(key) },
+                                            ) {
+                                                Text(
+                                                    label,
+                                                    color = if (key == color) MaterialTheme.colorScheme.primary
+                                                            else MaterialTheme.colorScheme.onSurface,
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        "size" -> {
+                            Text("${String.format("%.2f", size)}dp", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                            Slider(
+                                value = size, onValueChange = onSize,
+                                onValueChangeFinished = onSizeCommit,
+                                valueRange = 0.25f..1.5f, // 无级调节
+                            )
+                        }
+                        "count" -> {
+                            Text(count.toString(), fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                            Slider(
+                                value = count.toFloat(),
+                                onValueChange = { onCount(it.toInt()) },
+                                onValueChangeFinished = onCountCommit,
+                                valueRange = 75f..225f, // 无级调节
+                            )
+                        }
+                        else -> {
+                            Text(speed.toInt().toString(), fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                            Slider(
+                                value = speed, onValueChange = onSpeed,
+                                onValueChangeFinished = onSpeedCommit,
+                                valueRange = 120f..250f, // 无级调节
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(14.dp))
+                    Text(t("touchpad_particle_preview"), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(6.dp))
+                    ParticlePreview(
+                        replayKey = replayKey,
+                        sizeDp = size,
+                        count = count,
+                        speedPx = speed,
+                        palette = particlePalette(color),
+                        randomColor = color == "random",
+                        trail = trail,
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                        Text(t("confirm_ok"))
+                    }
+                }
+            }
+        }
     }
 }

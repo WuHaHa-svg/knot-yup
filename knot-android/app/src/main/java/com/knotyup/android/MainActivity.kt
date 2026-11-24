@@ -95,6 +95,9 @@ class MainActivity : ComponentActivity() {
         // 群地址解析需要系统 ConnectivityManager 兜底（见 Discovery.localIpAddress(context)）
         AppState.appContext = applicationContext
         AppState.initFiles(applicationContext)
+        // 触摸板设置：组合期间即读取（remember），必须在 setContent 前同步初始化，
+        // 否则冷启动时 prefs 为 null，读到默认值而非持久化值。
+        com.knotyup.android.data.TouchpadSettings.init(applicationContext)
         // 进程级运行时（事件处理/成员会话/剪贴板监听）：幂等，Activity 重建不影响消息链路
         AppState.startRuntime()
         val sharedText = intent?.takeIf { it.action == android.content.Intent.ACTION_SEND }

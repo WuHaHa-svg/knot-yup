@@ -5,6 +5,7 @@
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[repr(C)]
     #[derive(Copy, Clone)]
@@ -25,6 +26,7 @@ mod macos {
     const EVENT_MOUSE_MOVED: u32 = 5;
     const EVENT_LEFT_DOWN: u32 = 1;
     const EVENT_LEFT_UP: u32 = 2;
+    const EVENT_LEFT_DRAGGED: u32 = 6; // 左键按住时的移动：WindowServer 据此实时驱动窗口拖动
     const EVENT_RIGHT_DOWN: u32 = 3;
     const EVENT_RIGHT_UP: u32 = 4;
     const EVENT_OTHER_DOWN: u32 = 25;
@@ -34,6 +36,10 @@ mod macos {
     const BTN_LEFT: u32 = 0;
     const BTN_RIGHT: u32 = 1;
     const BTN_CENTER: u32 = 2;
+
+    /// 左键是否处于按下状态（拖拽移动要用 leftMouseDragged 而非 mouseMoved，
+    /// 否则系统不驱动窗口拖动，只在 up 时瞬移到最终位置）。
+    static LEFT_HELD: AtomicBool = AtomicBool::new(false);
 
     /// 当前光标位置：CGEventCreate(NULL) 取当前事件快照，再读 location。
     fn cursor_pos() -> CGPoint {
@@ -55,7 +61,13 @@ mod macos {
     pub fn move_relative(dx: i32, dy: i32) {
         let p = cursor_pos();
         let np = CGPoint { x: p.x + dx as f64, y: p.y + dy as f64 };
-        unsafe { post(CGEventCreateMouseEvent(std::ptr::null(), EVENT_MOUSE_MOVED, np, BTN_LEFT)); }
+        // 左键按住期间必须用 leftMouseDragged，系统才会实时驱动窗口拖动
+        let event_type = if LEFT_HELD.load(Ordering::Relaxed) {
+            EVENT_LEFT_DRAGGED
+        } else {
+            EVENT_MOUSE_MOVED
+        };
+        unsafe { post(CGEventCreateMouseEvent(std::ptr::null(), event_type, np, BTN_LEFT)); }
     }
 
     fn btn_codes(button: &str) -> (u32, u32, u32) {
@@ -78,12 +90,14 @@ mod macos {
     pub fn button_down(button: &str) {
         let (dt, _, btn) = btn_codes(button);
         let p = cursor_pos();
+        if button == "left" { LEFT_HELD.store(true, Ordering::Relaxed); }
         unsafe { post(CGEventCreateMouseEvent(std::ptr::null(), dt, p, btn)); }
     }
 
     pub fn button_up(button: &str) {
         let (_, ut, btn) = btn_codes(button);
         let p = cursor_pos();
+        if button == "left" { LEFT_HELD.store(false, Ordering::Relaxed); }
         unsafe { post(CGEventCreateMouseEvent(std::ptr::null(), ut, p, btn)); }
     }
 
@@ -91,7 +105,7 @@ mod macos {
         unsafe { post(CGEventCreateScrollWheelEvent(std::ptr::null(), SCROLL_UNIT_PIXEL, 2, -dy, dx, 0)); }
     }
 
-    /// 触发调度中心（Control+Up）——三指双击的固定动作。
+    /// 触发调度中心（Control+Up）——双指长按的固定动作。
     ///
     /// 系统级全局快捷键由 WindowServer 拦截，CGEventPost 注入的事件到不了这层
     /// （改 source / 改按键序列都无效，实测确认）。改走 System Events 的 AppleScript

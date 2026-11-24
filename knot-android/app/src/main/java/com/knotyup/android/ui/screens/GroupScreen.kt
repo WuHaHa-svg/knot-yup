@@ -130,14 +130,23 @@ internal fun GroupBody(
                             var totalX = 0f
                             var totalY = 0f
                             var sumDx = 0f // 全程累计横向位移（判定后仍累加），用于松手时判定是否切页
+                            var selfConsumed = false // 父已判定切页并 consume，区别于子控件 consume
                             val thresholdPx = 4f
                             val swipePx = widthPx * 0.12f // 稍划即切：超过页宽 12%（约 130px）就算一次翻页
                             while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                // Main pass：子控件（如设置页 Slider）先处理，若它 consume 了横向拖动，
+                                // 父在这里看到 isConsumed 就整段让行——解决 Slider 与切页手势冲突。
+                                val event = awaitPointerEvent(PointerEventPass.Main)
                                 // 某帧没有本 pointer（系统事件/多指）时跳过该帧，绝不能 break——
                                 // break 会让手势偶发中断，表现为「难以触发」。
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: continue
                                 if (!change.pressed) break
+                                // 子控件消费了本次拖动（Slider/列表等）→ 放弃切页判定，整段跟随
+                                if (!selfConsumed && change.isConsumed) {
+                                    horizontal = false
+                                    decided = true
+                                    continue
+                                }
                                 // 用系统 previousPosition：比手动记账精确，且每帧 delta 稳定
                                 val dx = change.position.x - change.previousPosition.x
                                 val dy = change.position.y - change.previousPosition.y
@@ -151,6 +160,7 @@ internal fun GroupBody(
                                 }
                                 if (decided && horizontal) {
                                     change.consume()
+                                    selfConsumed = true
                                     sumDx += dx
                                     // 直接同步赋值（手势协程内可改 MutableState，无调度延迟、不抖）
                                     pagePos.floatValue = (pagePos.floatValue - dx / widthPx).coerceIn(0f, LAST_PAGE.toFloat())

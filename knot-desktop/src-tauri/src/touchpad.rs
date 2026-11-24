@@ -27,24 +27,44 @@ impl TouchpadServer {
         let listener = TcpListener::bind(("0.0.0.0", TOUCHPAD_PORT)).await?;
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let token_for_loop = token.clone();
+        // 一对一：当前活跃连接的踢出信号 + 任务句柄。新连接接入时先踢掉旧的。
+        let mut current: Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::task::JoinHandle<()>,
+        )> = None;
         tokio::spawn(async move {
             loop {
                 tokio::select! {
-                    _ = shutdown_rx.changed() => break,
+                    _ = shutdown_rx.changed() => {
+                        // 服务关闭：踢掉当前连接，让它的 release_all 兜底执行
+                        if let Some((kick, handle)) = current.take() {
+                            let _ = kick.send(());
+                            let _ = handle.await;
+                        }
+                        break;
+                    }
                     accepted = listener.accept() => {
                         let (stream, peer) = match accepted {
                             Ok(v) => v,
                             Err(e) => { crate::dlog("touchpad", format!("accept 失败: {e}")); continue; }
                         };
+                        // 一对一：踢掉旧连接并等它清理完（release_all），避免与新房按键串扰
+                        if let Some((kick, handle)) = current.take() {
+                            let _ = kick.send(());
+                            let _ = handle.await;
+                            crate::dlog("touchpad", "旧控制端已被新连接替换");
+                        }
                         crate::dlog("touchpad", format!("控制端接入 [{peer}]"));
                         let token = token_for_loop.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = serve_connection(stream, &token).await {
+                        let (kick_tx, kick_rx) = tokio::sync::oneshot::channel::<()>();
+                        let handle = tokio::spawn(async move {
+                            if let Err(e) = serve_connection(stream, &token, kick_rx).await {
                                 crate::dlog("touchpad", format!("会话结束 [{peer}]: {e}"));
-                                // 松开兜底：连接断开时注入全局抬起，避免按键卡住
-                                injector::release_all();
                             }
+                            // 连接结束（正常/异常/被踢）：注入全局抬起，避免按键卡住
+                            injector::release_all();
                         });
+                        current = Some((kick_tx, handle));
                     }
                 }
             }
@@ -53,18 +73,24 @@ impl TouchpadServer {
     }
 }
 
-/// 单个控制连接：读帧 → 校验 → 分发注入。
-async fn serve_connection(stream: TcpStream, token: &str) -> Result<(), String> {
+/// 单个控制连接：读帧 → 校验 → 分发注入。kick 用于被新连接替换时主动结束。
+async fn serve_connection(
+    stream: TcpStream,
+    token: &str,
+    mut kick: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), String> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let mut last_seq: u64 = 0;
     let mut handshaken = false;
-    // 已按下未抬起的按键（连接断开时兜底）
-    let mut held: Vec<String> = Vec::new();
 
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await.map_err(|e| format!("读帧: {e}"))?;
+        // 读帧与被踢出二选一：被踢时立即结束，让外层做 release_all
+        let n = tokio::select! {
+            n = reader.read_line(&mut line) => n.map_err(|e| format!("读帧: {e}"))?,
+            _ = &mut kick => return Err("被新控制端替换".into()),
+        };
         if n == 0 { break; } // 对端关闭
         let msg: Value = serde_json::from_str(line.trim()).map_err(|e| format!("JSON 解析: {e}"))?;
         let kind = msg.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -104,12 +130,10 @@ async fn serve_connection(stream: TcpStream, token: &str) -> Result<(), String> 
             "down" => {
                 let btn = msg.get("button").and_then(|v| v.as_str()).unwrap_or("left");
                 injector::button_down(btn);
-                held.push(btn.to_string());
             }
             "up" => {
                 let btn = msg.get("button").and_then(|v| v.as_str()).unwrap_or("left");
                 injector::button_up(btn);
-                held.retain(|b| b != btn);
             }
             "click" => {
                 let btn = msg.get("button").and_then(|v| v.as_str()).unwrap_or("left");
@@ -124,8 +148,6 @@ async fn serve_connection(stream: TcpStream, token: &str) -> Result<(), String> 
             _ => {}
         }
     }
-    // 正常结束也释放可能按住的键
-    for b in &held { injector::button_up(b); }
     Ok(())
 }
 

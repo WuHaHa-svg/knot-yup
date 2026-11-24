@@ -22,7 +22,7 @@ object Haptics {
         }
     }
 
-    /** 短促清脆的一下（用于长按达标/双指点击右键/三指双击）。 */
+    /** 短促清脆的一下（用于单指长按进入拖动、双指长按触发调度中心）。 */
     fun tick() {
         vibrator?.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
     }
