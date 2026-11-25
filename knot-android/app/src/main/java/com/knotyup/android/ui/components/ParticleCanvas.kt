@@ -80,11 +80,14 @@ fun particlePalette(colorKey: String): IntArray = when (colorKey) {
     "red" -> intArrayOf(0xFFFF5252.toInt())     // 亮红
     "blue" -> intArrayOf(0xFF40C4FF.toInt())    // 亮青蓝
     "gold" -> intArrayOf(0xFFFFD740.toInt())    // 亮金黄
-    else -> intArrayOf( // random：18 色高饱和霓虹盘
+    else -> intArrayOf( // random：30 色高饱和霓虹盘（粒子与触摸轨迹共用）
         0xFFFFFFFF.toInt(), 0xFFB388FF.toInt(), 0xFFFF5252.toInt(), 0xFF40C4FF.toInt(),
         0xFFFFD740.toInt(), 0xFF00E676.toInt(), 0xFFFF4081.toInt(), 0xFF00B0FF.toInt(),
         0xFFFF9100.toInt(), 0xFFE040FB.toInt(), 0xFF64FFDA.toInt(), 0xFFFFFF00.toInt(),
         0xFFFF6E40.toInt(), 0xFF7C4DFF.toInt(), 0xFF1DE9B6.toInt(), 0xFFFF1744.toInt(),
-        0xFF18FFFF.toInt(), 0xFFD500F9.toInt(),
+        0xFF18FFFF.toInt(), 0xFFD500F9.toInt(), 0xFF76FF03.toInt(), 0xFF00E5FF.toInt(),
+        0xFFF50057.toInt(), 0xFFFFAB00.toInt(), 0xFF00C853.toInt(), 0xFFE1BEE7.toInt(),
+        0xFF82B1FF.toInt(), 0xFFFF8A65.toInt(), 0xFFA7FFEB.toInt(), 0xFFD1C4E9.toInt(),
+        0xFFFFF59D.toInt(), 0xFFB2FF59.toInt(),
     )
 }

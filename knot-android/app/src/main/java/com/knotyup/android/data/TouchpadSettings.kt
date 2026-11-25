@@ -13,6 +13,9 @@ object TouchpadSettings {
     private const val KEY_PARTICLE_SPEED = "particle_speed"
     private const val KEY_PARTICLE_TRAIL = "particle_trail"
     private const val KEY_NATURAL_SCROLL = "natural_scroll"
+    private const val KEY_TOUCH_TRAIL = "touch_trail"
+    private const val KEY_TRAIL_COLOR = "trail_color"
+    private const val KEY_TRAIL_WIDTH = "trail_width_v2"
 
     private var prefs: android.content.SharedPreferences? = null
 
@@ -59,4 +62,19 @@ object TouchpadSettings {
     var naturalScroll: Boolean
         get() = prefs?.getBoolean(KEY_NATURAL_SCROLL, true) ?: true
         set(v) = prefs?.edit()?.putBoolean(KEY_NATURAL_SCROLL, v)?.apply() ?: Unit
+
+    /** 显示触摸轨迹（默认关）：单指/双指滑动时画出轨迹，纯视觉辅助。 */
+    var touchTrail: Boolean
+        get() = prefs?.getBoolean(KEY_TOUCH_TRAIL, false) ?: false
+        set(v) = prefs?.edit()?.putBoolean(KEY_TOUCH_TRAIL, v)?.apply() ?: Unit
+
+    /** 触摸轨迹颜色（默认主色），可 random；色板与粒子随机色共用。 */
+    var trailColor: String
+        get() = prefs?.getString(KEY_TRAIL_COLOR, "primary") ?: "primary"
+        set(v) = prefs?.edit()?.putString(KEY_TRAIL_COLOR, v)?.apply() ?: Unit
+
+    /** 触摸轨迹粗细（px），范围 10~50，默认 20。 */
+    var trailWidth: Float
+        get() = prefs?.getFloat(KEY_TRAIL_WIDTH, 20f) ?: 20f
+        set(v) = prefs?.edit()?.putFloat(KEY_TRAIL_WIDTH, v)?.apply() ?: Unit
 }

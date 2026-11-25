@@ -34,9 +34,11 @@ import com.knotyup.android.data.AppState
 import com.knotyup.android.data.TouchpadSettings
 import com.knotyup.android.touchpad.Haptics
 import com.knotyup.android.touchpad.ParticleSystem
+import com.knotyup.android.touchpad.TouchTrail
 import com.knotyup.android.touchpad.TouchpadClient
 import com.knotyup.android.ui.KnotYupTheme
 import com.knotyup.android.ui.components.ParticleCanvas
+import com.knotyup.android.ui.components.TouchTrailCanvas
 import com.knotyup.android.ui.components.particlePalette
 import com.knotyup.android.ui.Strings
 import com.knotyup.android.ui.components.KnotConfirm
@@ -152,12 +154,17 @@ private fun ControlScreen(
     val particleCount = TouchpadSettings.particleCount
     val particleSpeed = TouchpadSettings.particleSpeed
     val particleTrail = TouchpadSettings.particleTrail
+    val showTouchTrail = TouchpadSettings.touchTrail
+    val trailPalette = particlePalette(TouchpadSettings.trailColor)
+    val trailRandomColor = TouchpadSettings.trailColor == "random"
+    val trailWidth = TouchpadSettings.trailWidth
     val density = androidx.compose.ui.platform.LocalDensity.current.density
     // 屏幕像素尺寸（横屏全屏）：涟漪据此计算铺满全屏的扩散距离
     val dm = ctx.resources.displayMetrics
     val screenW = dm.widthPixels.toFloat()
     val screenH = dm.heightPixels.toFloat()
     val particleSystem = remember { ParticleSystem() }
+    val touchTrail = remember { TouchTrail() }
     var confirmExit by remember { mutableStateOf(false) }
     val client = remember { TouchpadClient() }
     // 粒子发射回调：只做 system.emit，纯视觉、不阻塞采集
@@ -166,6 +173,10 @@ private fun ControlScreen(
             x, y, particleSizeDp * density, particleCount,
             particlePalette, particleRandomColor, particleSpeed, screenW, screenH,
         )
+    }
+    // 轨迹采集回调：每帧把触点坐标喂给轨迹引擎（单指/双指按 pressedCount 着色）
+    val feedTrail: (List<Triple<Long, Float, Float>>) -> Unit = { changes ->
+        if (showTouchTrail) touchTrail.feed(changes, trailPalette, trailRandomColor)
     }
     // 单指长按计时器：到点震动+按下（进入拖动）
     val singleHold = remember {
@@ -244,12 +255,18 @@ private fun ControlScreen(
             .background(if (oled) Color(0xFF000000) else Color(0xFF212121))
             .pointerInput(Unit) {
                 awaitEachGesture {
-                    handleGesture(client, naturalScroll, singleHold, doubleHold, emitParticle)
+                    handleGesture(client, naturalScroll, singleHold, doubleHold, emitParticle, feedTrail)
                 }
             }
     ) {
         // 粒子渲染层：独立协程 60fps，只读取 system 状态；与上方采集完全解耦
         ParticleCanvas(particleSystem, enabled = particlesOn, trail = particleTrail)
+        // 触摸轨迹渲染层：单指紫 / 双指青绿，与粒子层独立叠加
+        TouchTrailCanvas(
+            trail = touchTrail,
+            enabled = showTouchTrail,
+            width = trailWidth,
+        )
     }
 }
 
@@ -276,6 +293,7 @@ private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.han
     singleHold: HoldTracker,
     doubleHold: HoldTracker,
     emitParticle: (Float, Float) -> Unit,
+    feedTrail: (List<Triple<Long, Float, Float>>) -> Unit,
 ) {
     val down = awaitFirstDown(requireUnconsumed = false)
     down.consume()
@@ -307,15 +325,19 @@ private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.han
             2 -> { singleHold.cancel(); if (!doubleFired && !doubleHold.fired) doubleHold.schedule() }
             else -> { doubleHold.cancel() } // 单指靠 singleHold；3指以上不触发任何长按
         }
+        val touchPoints = ArrayList<Triple<Long, Float, Float>>()
         for (c in event.changes) {
             if (c.pressed) {
                 dx += c.position.x - c.previousPosition.x
                 dy += c.position.y - c.previousPosition.y
                 lastX = c.position.x
                 lastY = c.position.y
+                touchPoints.add(Triple(c.id.value, c.position.x, c.position.y))
                 c.consume()
             }
         }
+        // 轨迹：单指/双指按当前按下指数着色
+        feedTrail(touchPoints)
         totalDx += dx
         totalDy += dy
         val movedEnough = kotlin.math.abs(totalDx) >= MOVE_SLOP ||

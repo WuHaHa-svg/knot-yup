@@ -287,6 +287,10 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
     var particleCount by remember { mutableIntStateOf(TouchpadSettings.particleCount) }
     var particleSpeed by remember { mutableFloatStateOf(TouchpadSettings.particleSpeed) }
     var particleTrail by remember { mutableStateOf(TouchpadSettings.particleTrail) }
+    var touchTrail by remember { mutableStateOf(TouchpadSettings.touchTrail) }
+    var trailColor by remember { mutableStateOf(TouchpadSettings.trailColor) }
+    var trailWidth by remember { mutableFloatStateOf(TouchpadSettings.trailWidth) }
+    var trailDialog by remember { mutableStateOf<String?>(null) }
     // 粒子设置弹窗：当前打开的类型 + 预览重播计数
     var particleDialog by remember { mutableStateOf<String?>(null) }
     var previewReplayKey by remember { mutableIntStateOf(0) }
@@ -338,8 +342,8 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
             }
 
             Spacer(Modifier.height(12.dp))
-            // ── 触摸板设置列表 ──
-            Text(t("touchpad_settings"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            // ── 设置分三组：触摸板 / 触摸粒子 / 触摸轨迹 ──
+            Text(t("tp_group_touchpad"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
             Spacer(Modifier.height(6.dp))
             Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
@@ -348,11 +352,22 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
                 SettingSwitch(t("touchpad_oled"), t("touchpad_oled_tip"), oled, t, onToggle = {
                     oled = it; TouchpadSettings.oled = it
                 })
+                SettingSwitch(t("touchpad_natural_scroll"), t("touchpad_natural_scroll_tip"), naturalScroll, t, onToggle = {
+                    naturalScroll = it; TouchpadSettings.naturalScroll = it
+                })
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Text(t("tp_group_particle"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Spacer(Modifier.height(6.dp))
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surface),
+            ) {
                 SettingSwitch(t("touchpad_particles"), t("touchpad_particles_tip"), particles, t, onToggle = {
                     particles = it; TouchpadSettings.particles = it
                 })
                 if (particles) {
-                    // 四项点击打开弹窗，弹窗内操作 + 预览（避开 tab 横滑手势冲突）
                     SettingClick(t("touchpad_particle_color"), t("touchpad_particle_color_tip"),
                         when (particleColor) {
                             "white" -> t("pc_white"); "primary" -> t("pc_primary")
@@ -373,9 +388,30 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
                         particleTrail = it; TouchpadSettings.particleTrail = it; previewReplayKey++
                     })
                 }
-                SettingSwitch(t("touchpad_natural_scroll"), t("touchpad_natural_scroll_tip"), naturalScroll, t, onToggle = {
-                    naturalScroll = it; TouchpadSettings.naturalScroll = it
+            }
+
+            Spacer(Modifier.height(14.dp))
+            Text(t("tp_group_trail"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Spacer(Modifier.height(6.dp))
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surface),
+            ) {
+                SettingSwitch(t("touchpad_touch_trail"), t("touchpad_touch_trail_tip"), touchTrail, t, onToggle = {
+                    touchTrail = it; TouchpadSettings.touchTrail = it
                 })
+                if (touchTrail) {
+                    SettingClick(t("trail_color"), t("trail_color_tip"),
+                        when (trailColor) {
+                            "white" -> t("pc_white"); "primary" -> t("pc_primary")
+                            "red" -> t("pc_red"); "blue" -> t("pc_blue"); "gold" -> t("pc_gold")
+                            else -> t("pc_random")
+                        }
+                    ) { trailDialog = "color" }
+                    SettingClick(t("trail_width"), t("trail_width_tip"),
+                        "${String.format("%.1f", trailWidth)}px"
+                    ) { trailDialog = "width" }
+                }
             }
         }
     }
@@ -409,6 +445,11 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
             count = particleCount,
             speed = particleSpeed,
             trail = particleTrail,
+            trailPalette = particlePalette(trailColor),
+            trailRandomColor = trailColor == "random",
+            trailWidth = trailWidth,
+            particlesEnabled = particles,
+            touchTrailEnabled = touchTrail,
             replayKey = previewReplayKey,
             onColor = { particleColor = it; TouchpadSettings.particleColor = it; previewReplayKey++ },
             onSize = { particleSize = it; TouchpadSettings.particleSize = it },
@@ -418,6 +459,26 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
             onSpeed = { particleSpeed = it; TouchpadSettings.particleSpeed = it },
             onSpeedCommit = { previewReplayKey++ },
             onClose = { particleDialog = null },
+        )
+    }
+
+    // 触摸轨迹设置弹窗（颜色/粗细）
+    trailDialog?.let { type ->
+        TrailSettingDialog(
+            type = type,
+            t = t,
+            color = trailColor,
+            width = trailWidth,
+            particleColor = particleColor,
+            particleSize = particleSize,
+            particleCount = particleCount,
+            particleSpeed = particleSpeed,
+            particleTrail = particleTrail,
+            particlesEnabled = particles,
+            touchTrailEnabled = touchTrail,
+            onColor = { trailColor = it; TouchpadSettings.trailColor = it },
+            onWidth = { trailWidth = it; TouchpadSettings.trailWidth = it },
+            onClose = { trailDialog = null },
         )
     }
 }
@@ -478,6 +539,40 @@ private fun SettingClick(
     }
 }
 
+/** 设置弹窗统一预览组件：粒子 + 触摸拖尾，全部使用真实配置；两个弹窗共用，效果一致。 */
+@Composable
+private fun SettingsEffectPreview(
+    t: (String) -> String,
+    replayKey: Int,
+    particleColor: String,
+    particleSize: Float,
+    particleCount: Int,
+    particleSpeed: Float,
+    particleTrail: Boolean,
+    particlesEnabled: Boolean,
+    trailPalette: IntArray,
+    trailRandomColor: Boolean,
+    trailWidth: Float,
+    touchTrailEnabled: Boolean,
+) {
+    Text(t("touchpad_particle_preview"), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Spacer(Modifier.height(6.dp))
+    ParticlePreview(
+        replayKey = replayKey,
+        sizeDp = particleSize,
+        count = particleCount,
+        speedPx = particleSpeed,
+        palette = particlePalette(particleColor),
+        randomColor = particleColor == "random",
+        trail = particleTrail,
+        trailPalette = trailPalette,
+        trailRandomColor = trailRandomColor,
+        trailWidth = trailWidth,
+        particlesEnabled = particlesEnabled,
+        touchTrailEnabled = touchTrailEnabled,
+    )
+}
+
 /** 粒子设置弹窗：上部控件 + 下部预览；值应用后预览播放一次。 */
 @Composable
 private fun ParticleSettingDialog(
@@ -488,6 +583,11 @@ private fun ParticleSettingDialog(
     count: Int,
     speed: Float,
     trail: Boolean,
+    trailPalette: IntArray,
+    trailRandomColor: Boolean,
+    trailWidth: Float,
+    particlesEnabled: Boolean,
+    touchTrailEnabled: Boolean,
     replayKey: Int,
     onColor: (String) -> Unit,
     onSize: (Float) -> Unit,
@@ -572,18 +672,112 @@ private fun ParticleSettingDialog(
                     }
 
                     Spacer(Modifier.height(14.dp))
-                    Text(t("touchpad_particle_preview"), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Spacer(Modifier.height(6.dp))
-                    ParticlePreview(
+                    SettingsEffectPreview(
+                        t = t,
                         replayKey = replayKey,
-                        sizeDp = size,
-                        count = count,
-                        speedPx = speed,
-                        palette = particlePalette(color),
-                        randomColor = color == "random",
-                        trail = trail,
+                        particleColor = color,
+                        particleSize = size,
+                        particleCount = count,
+                        particleSpeed = speed,
+                        particleTrail = trail,
+                        particlesEnabled = particlesEnabled,
+                        trailPalette = trailPalette,
+                        trailRandomColor = trailRandomColor,
+                        trailWidth = trailWidth,
+                        touchTrailEnabled = touchTrailEnabled,
                     )
                     Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                        Text(t("confirm_ok"))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 触摸轨迹设置弹窗：颜色（复用粒子色选项）/ 粗细（无级滑块）。 */
+@Composable
+private fun TrailSettingDialog(
+    type: String,
+    t: (String) -> String,
+    color: String,
+    width: Float,
+    particleColor: String,
+    particleSize: Float,
+    particleCount: Int,
+    particleSpeed: Float,
+    particleTrail: Boolean,
+    particlesEnabled: Boolean,
+    touchTrailEnabled: Boolean,
+    onColor: (String) -> Unit,
+    onWidth: (Float) -> Unit,
+    onClose: () -> Unit,
+) {
+    val title = if (type == "color") t("trail_color") else t("trail_width")
+    var trailReplayKey by remember { mutableIntStateOf(0) }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        DialogCard(Modifier.padding(horizontal = 36.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 0.dp,
+            ) {
+                Column(Modifier.padding(20.dp)) {
+                    Text(title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(16.dp))
+                    if (type == "color") {
+                        val colors = listOf(
+                            "random" to t("pc_random"), "white" to t("pc_white"),
+                            "primary" to t("pc_primary"), "red" to t("pc_red"),
+                            "blue" to t("pc_blue"), "gold" to t("pc_gold"),
+                        )
+                        Column {
+                            for (row in colors.chunked(3)) {
+                                Row {
+                                    for ((key, label) in row) {
+                                        TextButton(
+                                            modifier = Modifier.weight(1f),
+                                            onClick = { onColor(key); trailReplayKey++ },
+                                        ) {
+                                            Text(
+                                                label,
+                                                color = if (key == color) MaterialTheme.colorScheme.primary
+                                                        else MaterialTheme.colorScheme.onSurface,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        Text("${String.format("%.1f", width)}px", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                        Slider(
+                            value = width,
+                            onValueChange = { onWidth(it); trailReplayKey++ },
+                            valueRange = 10f..50f, // 无级调节
+                        )
+                    }
+                    // 同一预览组件：真实粒子配置 + 当前编辑中的轨迹配置
+                    Spacer(Modifier.height(14.dp))
+                    SettingsEffectPreview(
+                        t = t,
+                        replayKey = trailReplayKey,
+                        particleColor = particleColor,
+                        particleSize = particleSize,
+                        particleCount = particleCount,
+                        particleSpeed = particleSpeed,
+                        particleTrail = particleTrail,
+                        particlesEnabled = particlesEnabled,
+                        trailPalette = particlePalette(color),
+                        trailRandomColor = color == "random",
+                        trailWidth = width,
+                        touchTrailEnabled = touchTrailEnabled,
+                    )
+                    Spacer(Modifier.height(14.dp))
                     TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
                         Text(t("confirm_ok"))
                     }

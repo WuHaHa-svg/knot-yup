@@ -14,6 +14,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 后台保活：引导页申请忽略电池优化，保证后台剪贴板同步/悬浮通知及时送达 -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- 附近设备（API 33+ 归入运行时权限组）：局域网发现扫描需要；声明不用于定位 -->
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"

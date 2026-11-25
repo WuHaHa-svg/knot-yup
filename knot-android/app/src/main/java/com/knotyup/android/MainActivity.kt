@@ -175,6 +175,8 @@ private fun App(
         if (showOnboarding) {
             OnboardingScreen(
                 t = t,
+                lang = lang,
+                onLang = onLang,
                 onStart = {
                     AppState.saveOnboarded(context)
                     showOnboarding = false
