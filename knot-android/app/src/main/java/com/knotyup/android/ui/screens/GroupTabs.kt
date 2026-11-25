@@ -666,7 +666,7 @@ private fun ParticleSettingDialog(
                             Slider(
                                 value = speed, onValueChange = onSpeed,
                                 onValueChangeFinished = onSpeedCommit,
-                                valueRange = 120f..250f, // 无级调节
+                                valueRange = 150f..2500f, // 无级调节
                             )
                         }
                     }

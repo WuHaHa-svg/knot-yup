@@ -52,9 +52,9 @@ internal fun ParticleCanvas(
                 if (len > 1f) {
                     val ux = vx / len
                     val uy = vy / len
-                    val step = (radius * 1.2f).coerceAtLeast(1f)
-                    for (k in 1..6) {
-                        val f = k / 7f
+                    val step = (radius * 0.8f).coerceAtLeast(0.7f)
+                    for (k in 1..9) {
+                        val f = k / 10f
                         drawCircle(
                             color = col.copy(alpha = alpha * (1f - f) * 0.85f),
                             radius = radius * density * 0.9f,

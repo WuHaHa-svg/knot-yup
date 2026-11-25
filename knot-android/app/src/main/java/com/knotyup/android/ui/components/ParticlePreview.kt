@@ -47,6 +47,7 @@ internal fun ParticlePreview(
     trailWidth: Float = 20f,
     particlesEnabled: Boolean = true,
     touchTrailEnabled: Boolean = true,
+    previewScale: Float = 0.6f, // 预览容器远小于真机屏幕，按比例收敛粒子/轨迹视觉
     modifier: Modifier = Modifier,
     height: Dp = 120.dp,
 ) {
@@ -89,7 +90,7 @@ internal fun ParticlePreview(
             val f = i / frames.toFloat()
             val x = xStart + (xEnd - xStart) * f
             val y = yBase + kotlin.math.sin(f * 3.14159f) * arc
-            touchTrail.feed(listOf(Triple(99L, x, y)), trailPalette, trailRandomColor)
+            touchTrail.feed(listOf(Triple(99L, x, y)), trailPalette, trailRandomColor, trailWidth * previewScale)
             delay(60)
         }
         // 终点粒子
@@ -97,7 +98,7 @@ internal fun ParticlePreview(
             system.emit(xEnd, yBase, sizeDp * density, count, palette, randomColor, speedPx, wPx, hPx)
         }
         // 抬手
-        touchTrail.feed(emptyList(), trailPalette, trailRandomColor)
+        touchTrail.feed(emptyList(), trailPalette, trailRandomColor, trailWidth * previewScale)
     }
 
     LaunchedEffect(Unit) {
@@ -126,19 +127,9 @@ internal fun ParticlePreview(
             // 触摸拖尾演示：逐点随机色线
             if (trailPalette != null && touchTrailEnabled) {
                 touchTrail.forEachStroke { pts, argb ->
-                    val base = Color(argb)
-                    for (i in 1 until pts.size) {
-                        val p1 = pts[i - 1]
-                        val p2 = pts[i]
-                        val a = ((p1.alpha + p2.alpha) / 2f) * 0.9f
-                        drawLine(
-                            color = base.copy(alpha = a),
-                            start = Offset(p1.x, p1.y),
-                            end = Offset(p2.x, p2.y),
-                            strokeWidth = trailWidth * a + 0.5f,
-                        )
-                    }
+                    drawTrailStroke(pts, argb, trailWidth * previewScale)
                 }
+                drawTrailSparks(touchTrail)
             }
             system.forEachAlive { x, y, vx, vy, radius, alpha, argb ->
                 val col = Color(argb)
@@ -147,12 +138,12 @@ internal fun ParticlePreview(
                     if (len > 1f) {
                         val ux = vx / len
                         val uy = vy / len
-                        val step = (radius * 1.2f).coerceAtLeast(1f)
-                        for (k in 1..6) {
-                            val f = k / 7f
+                        val step = (radius * 0.8f).coerceAtLeast(0.7f)
+                        for (k in 1..9) {
+                            val f = k / 10f
                             drawCircle(
                                 color = col.copy(alpha = alpha * (1f - f) * 0.85f),
-                                radius = radius * density * 0.9f,
+                                radius = radius * density * previewScale * 0.9f,
                                 center = Offset(x - ux * step * k, y - uy * step * k),
                             )
                         }
@@ -160,7 +151,7 @@ internal fun ParticlePreview(
                 }
                 drawCircle(
                     color = col.copy(alpha = alpha.coerceIn(0f, 1f)),
-                    radius = radius * density,
+                    radius = radius * density * previewScale,
                     center = Offset(x, y),
                 )
             }

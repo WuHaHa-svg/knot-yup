@@ -48,7 +48,7 @@ object TouchpadSettings {
         get() = prefs?.getInt(KEY_PARTICLE_COUNT, 150) ?: 150
         set(v) = prefs?.edit()?.putInt(KEY_PARTICLE_COUNT, v)?.apply() ?: Unit
 
-    /** 粒子扩散速度（px/s），范围 120~250，默认 180；ripple 据此算铺满全屏的时长。 */
+    /** 粒子扩散速度（px/s），范围 150~2500，默认 180；ripple 据此算铺满全屏的时长。 */
     var particleSpeed: Float
         get() = prefs?.getFloat(KEY_PARTICLE_SPEED, 180f) ?: 180f
         set(v) = prefs?.edit()?.putFloat(KEY_PARTICLE_SPEED, v)?.apply() ?: Unit

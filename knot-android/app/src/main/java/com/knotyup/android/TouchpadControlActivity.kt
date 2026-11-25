@@ -176,7 +176,7 @@ private fun ControlScreen(
     }
     // 轨迹采集回调：每帧把触点坐标喂给轨迹引擎（单指/双指按 pressedCount 着色）
     val feedTrail: (List<Triple<Long, Float, Float>>) -> Unit = { changes ->
-        if (showTouchTrail) touchTrail.feed(changes, trailPalette, trailRandomColor)
+        if (showTouchTrail) touchTrail.feed(changes, trailPalette, trailRandomColor, trailWidth)
     }
     // 单指长按计时器：到点震动+按下（进入拖动）
     val singleHold = remember {
