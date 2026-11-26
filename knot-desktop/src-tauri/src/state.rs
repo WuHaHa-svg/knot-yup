@@ -66,7 +66,7 @@ pub(crate) struct AppState {
     pub task_cancels: Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>,
     /// 本地持久共享文件夹（清单 + 供种服务）
     pub files: Arc<crate::files::FileManager>,
-    /// 触控板专用 TCP 服务（被控端）；入群时启动，PIN 即握手令牌
+    /// 触控板专用 UDP 服务（被控端）；入群时启动，PIN 即握手令牌
     pub touchpad: Mutex<Option<crate::touchpad::TouchpadServer>>,
     /// 转让进行中：转出方会看到成员陆续离开（迁移潮），期间成员差量不提示；
     /// TransferFailed/TransferCompleted 时清除

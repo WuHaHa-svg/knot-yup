@@ -9,7 +9,7 @@ use knot_core::net::{GroupClient, GroupServer};
 use knot_core::protocol::{device_id, now_ms, ClipboardKind, ClipboardPayload, SharedFile, TaskStatus, TransferTask};
 use tauri::{AppHandle, Emitter, State};
 
-/// 启动触控板 TCP 服务并填 device.touchpad_addr。入群/建群共用。
+/// 启动触控板 UDP 服务并填 device.touchpad_addr。入群/建群共用。
 /// 入新群时 PIN 变化 → 重建服务更新握手令牌（固定端口，旧服务先 drop）。
 async fn ensure_touchpad_server(state: &SharedState, device: &mut knot_core::protocol::DeviceInfo, pin: &str) {
     *state.touchpad.lock().await = None; // drop 旧监听（固定端口需释放）
@@ -63,7 +63,7 @@ pub(crate) async fn create_group(
         device.file_addr = Some(addr);
         *state.device.lock().await = Some(device.clone());
     }
-    // 起触控板 TCP 服务，填 touchpad_addr 随成员表下发
+    // 起触控板 UDP 服务，填 touchpad_addr 随成员表下发
     ensure_touchpad_server(&state, &mut device, &pin).await;
     *state.device.lock().await = Some(device.clone());
     // 群主本地文件列表写入本机 device.file_list（成员表即文件列表真相源）
@@ -132,7 +132,7 @@ pub(crate) async fn join_group(
     if let Some(addr) = state.files.ensure_seeder(&pin, &device.id, &local_ip()).await {
         device.file_addr = Some(addr);
     }
-    // 起触控板 TCP 服务，填 touchpad_addr 随 join 上报
+    // 起触控板 UDP 服务，填 touchpad_addr 随 join 上报
     ensure_touchpad_server(&state, &mut device, &pin).await;
     // 入群携带自己的 fileList（成员表即文件列表真相源）
     {

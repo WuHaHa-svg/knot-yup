@@ -272,7 +272,7 @@ internal fun ClipboardTab(
  * Tab 4：触摸板。上部设备列表（可连接的桌面设备）+ 下部三个设置开关。
  * 布局参照 [DevicesTab]（标题 + 卡片 + 同容器滚动）。
  *
- * T0（本期）只做 UI 骨架与本机一对一占用状态；真实 TCP 控制在 T1 接入。
+ * T0（本期）只做 UI 骨架与本机一对一占用状态；真实 UDP 控制在 T1 接入。
  */
 @Composable
 internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {

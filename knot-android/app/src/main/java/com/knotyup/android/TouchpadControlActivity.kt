@@ -259,7 +259,7 @@ private fun ControlScreen(
         onDispose { singleHold.cancel(); missionHold.cancel(); tapTracker.cancel() }
     }
 
-    // 建立触控板专用 TCP：从成员表取目标设备的 touchpad_addr，PIN 作握手令牌
+    // 建立触控板专用 UDP：从成员表取目标设备的 touchpad_addr，PIN 作握手令牌
     val controllingId by AppState.touchpadControllingId.collectAsState()
     val session by AppState.session.collectAsState()
     // 群连接断开时直接退出控制页：本页是独立 window，看不到 MainActivity 的"已退出群"提示
@@ -289,7 +289,7 @@ private fun ControlScreen(
     // 进入提示
     LaunchedEffect(Unit) { Toast.makeText(ctx, t("touchpad_started"), Toast.LENGTH_SHORT).show() }
 
-    // 旋转提示：监听 Activity 的配置变化事件（跳过初始值 0），TCP 连接不受影响
+    // 旋转提示：监听 Activity 的配置变化事件（跳过初始值 0），UDP 连接不受影响
     val rotationCount by rotationEvents.collectAsState()
     LaunchedEffect(rotationCount) {
         if (rotationCount > 0) {
@@ -366,7 +366,11 @@ private fun ControlScreen(
                 Modifier.fillMaxHeight().fillMaxWidth(1f / 3f)
                     .offset { IntOffset(animX.toInt(), 0) }
             ) {
-                NumericKeypad(client, oled, onSwipe = { keypadOnLeft = !keypadOnLeft })
+                NumericKeypad(
+                    client, oled,
+                    swipeThresholdPx = kbW * 2f / 3f, // 至少滑动两格键盘宽度才触发横滑
+                    onSwipe = { keypadOnLeft = !keypadOnLeft },
+                )
             }
         }
     }
@@ -434,7 +438,12 @@ private fun CornerActionPad(
  * - 面板内横滑 → 交换键盘左右位置；背景透明透出触摸板特效。
  */
 @Composable
-private fun NumericKeypad(client: TouchpadClient, oled: Boolean, onSwipe: () -> Unit) {
+private fun NumericKeypad(
+    client: TouchpadClient,
+    oled: Boolean,
+    swipeThresholdPx: Float,
+    onSwipe: () -> Unit,
+) {
     val kbColor = remember { TouchpadSettings.kbColor }
     val particlesOn = remember { TouchpadSettings.kbClickParticles }
     val macroOn = remember { TouchpadSettings.kbMacroEnabled }
@@ -485,7 +494,7 @@ private fun NumericKeypad(client: TouchpadClient, oled: Boolean, onSwipe: () -> 
                         }
                         if (event.changes.all { !it.pressed }) break
                     }
-                    if (kotlin.math.abs(totalDx) >= ZONE_SWIPE_SLOP) onSwipe()
+                    if (kotlin.math.abs(totalDx) >= swipeThresholdPx) onSwipe()
                 }
             }
     ) {
@@ -740,7 +749,6 @@ private const val HOLD_MS = 800L           // 统一长按时长：普通区拖�
 private const val MOVE_SLOP = 12f          // 累计位移阈值(px)：低于此的抖动不识别为移动
 private const val CORNER_ZONE_W = 300f     // 右下角区域宽(px)
 private const val CORNER_ZONE_H = 150f     // 右下角区域高(px)
-private const val ZONE_SWIPE_SLOP = 60f    // 键盘面板内横滑触发阈值(px)
 private const val DOUBLE_TAP_MS = 450L     // 右下角双击间隔(ms)：无单击延迟代价，放宽
 private const val TAP_CLICK_DELAY_MS = 250L // 触摸板单击延迟(ms)：等双击窗口，兼顾单击手感
 private const val DOUBLE_TAP_SLOP = 80f    // 统一双击容差(px)：两处共用，手机触摸偏差大放宽
