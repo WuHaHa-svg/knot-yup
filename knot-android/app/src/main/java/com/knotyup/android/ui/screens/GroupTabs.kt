@@ -291,6 +291,12 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
     var trailColor by remember { mutableStateOf(TouchpadSettings.trailColor) }
     var trailWidth by remember { mutableFloatStateOf(TouchpadSettings.trailWidth) }
     var trailDialog by remember { mutableStateOf<String?>(null) }
+    // 数字键盘设置 state
+    var kbColor by remember { mutableStateOf(TouchpadSettings.kbColor) }
+    var kbClickParticles by remember { mutableStateOf(TouchpadSettings.kbClickParticles) }
+    var kbMacroEnabled by remember { mutableStateOf(TouchpadSettings.kbMacroEnabled) }
+    var kbBreathing by remember { mutableStateOf(TouchpadSettings.kbBreathing) }
+    var kbDialog by remember { mutableStateOf<String?>(null) }
     // 粒子设置弹窗：当前打开的类型 + 预览重播计数
     var particleDialog by remember { mutableStateOf<String?>(null) }
     var previewReplayKey by remember { mutableIntStateOf(0) }
@@ -413,6 +419,32 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
                     ) { trailDialog = "width" }
                 }
             }
+
+            // ── 第四组：数字键盘设置 ──
+            Spacer(Modifier.height(14.dp))
+            Text(t("tp_group_keyboard"), fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Spacer(Modifier.height(6.dp))
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                    .background(MaterialTheme.colorScheme.surface),
+            ) {
+                SettingClick(t("kb_color"), t("kb_color_tip"),
+                    when (kbColor) {
+                        "white" -> t("pc_white"); "primary" -> t("pc_primary")
+                        "red" -> t("pc_red"); "blue" -> t("pc_blue"); "gold" -> t("pc_gold")
+                        else -> t("pc_random")
+                    }
+                ) { kbDialog = "color" }
+                SettingSwitch(t("kb_breathing"), t("kb_breathing_tip"), kbBreathing, t, onToggle = {
+                    kbBreathing = it; TouchpadSettings.kbBreathing = it
+                })
+                SettingSwitch(t("kb_click_particles"), t("kb_click_particles_tip"), kbClickParticles, t, onToggle = {
+                    kbClickParticles = it; TouchpadSettings.kbClickParticles = it
+                })
+                SettingSwitch(t("kb_macro"), t("kb_macro_tip"), kbMacroEnabled, t, onToggle = {
+                    kbMacroEnabled = it; TouchpadSettings.kbMacroEnabled = it
+                })
+            }
         }
     }
 
@@ -425,11 +457,16 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
             cancelText = t("confirm_cancel"),
             danger = false,
             onOk = {
-                AppState.setTouchpadControlling(dev.id)
                 pendingDevice = null
-                ctx.startActivity(
+                // 首次连接先进触摸板引导（带设备 id），完成后引导页负责进控制页；否则直接进
+                val target = if (!AppState.isTouchpadGuideDone(ctx)) {
+                    android.content.Intent(ctx, com.knotyup.android.TouchpadGuideActivity::class.java)
+                        .putExtra(com.knotyup.android.TouchpadGuideActivity.EXTRA_DEVICE_ID, dev.id)
+                } else {
+                    AppState.setTouchpadControlling(dev.id)
                     android.content.Intent(ctx, com.knotyup.android.TouchpadControlActivity::class.java)
-                )
+                }
+                ctx.startActivity(target)
             },
             onCancel = { pendingDevice = null },
         )
@@ -479,6 +516,16 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
             onColor = { trailColor = it; TouchpadSettings.trailColor = it },
             onWidth = { trailWidth = it; TouchpadSettings.trailWidth = it },
             onClose = { trailDialog = null },
+        )
+    }
+
+    // 数字键盘颜色弹窗
+    if (kbDialog != null) {
+        KeyboardColorDialog(
+            t = t,
+            color = kbColor,
+            onColor = { kbColor = it; TouchpadSettings.kbColor = it },
+            onClose = { kbDialog = null },
         )
     }
 }
@@ -687,7 +734,7 @@ private fun ParticleSettingDialog(
                         touchTrailEnabled = touchTrailEnabled,
                     )
                     Spacer(Modifier.height(12.dp))
-                    TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
                         Text(t("confirm_ok"))
                     }
                 }
@@ -778,7 +825,56 @@ private fun TrailSettingDialog(
                         touchTrailEnabled = touchTrailEnabled,
                     )
                     Spacer(Modifier.height(14.dp))
-                    TextButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
+                        Text(t("confirm_ok"))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 数字键盘颜色选择弹窗（复用 pc_* 颜色文案）。 */
+@Composable
+private fun KeyboardColorDialog(t: (String) -> String, color: String, onColor: (String) -> Unit, onClose: () -> Unit) {
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        DialogCard(Modifier.padding(horizontal = 36.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 0.dp,
+            ) {
+                Column(Modifier.padding(20.dp)) {
+                    Text(t("kb_color"), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(16.dp))
+                    val colors = listOf(
+                        "random" to t("pc_random"), "white" to t("pc_white"),
+                        "primary" to t("pc_primary"), "red" to t("pc_red"),
+                        "blue" to t("pc_blue"), "gold" to t("pc_gold"),
+                    )
+                    Column {
+                        for (row in colors.chunked(3)) {
+                            Row {
+                                for ((key, label) in row) {
+                                    TextButton(
+                                        modifier = Modifier.weight(1f),
+                                        onClick = { onColor(key) },
+                                    ) {
+                                        Text(
+                                            label,
+                                            color = if (key == color) MaterialTheme.colorScheme.primary
+                                                    else MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
                         Text(t("confirm_ok"))
                     }
                 }

@@ -891,6 +891,7 @@ object AppState {
     private const val KEY_THEME = "theme"
     private const val KEY_LANG = "lang"
     private const val KEY_ONBOARDED = "onboarded"
+    private const val KEY_TP_GUIDE_DONE = "tp_guide_done"
 
     /** 首次启动引导是否已完成（完成/开始使用后置位，永不再现）。 */
     fun isOnboarded(context: Context): Boolean =
@@ -899,6 +900,14 @@ object AppState {
     fun saveOnboarded(context: Context) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_ONBOARDED, true).apply()
+
+    /** 触摸板引导是否已完成（首次点击连接设备时展示一次）。 */
+    fun isTouchpadGuideDone(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_TP_GUIDE_DONE, false)
+
+    fun saveTouchpadGuideDone(context: Context) =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_TP_GUIDE_DONE, true).apply()
 
     fun saveTheme(context: Context, id: String) =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_THEME, id).apply()

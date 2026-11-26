@@ -16,6 +16,8 @@ mod macos {
         fn CGEventCreate(source: *const c_void) -> *mut c_void;
         fn CGEventCreateMouseEvent(source: *const c_void, mouse_type: u32, location: CGPoint, mouse_button: u32) -> *mut c_void;
         fn CGEventCreateScrollWheelEvent(source: *const c_void, units: u32, wheel_count: u32, w1: i32, w2: i32, w3: i32) -> *mut c_void;
+        fn CGEventCreateKeyboardEvent(source: *const c_void, virtual_key: u16, key_down: bool) -> *mut c_void;
+        fn CGEventSetIntegerValueField(event: *mut c_void, field: u32, value: i64);
         fn CGEventPost(tap: u32, event: *mut c_void);
         fn CGEventGetLocation(event: *const c_void) -> CGPoint;
         fn CFRelease(cf: *const c_void);
@@ -36,6 +38,7 @@ mod macos {
     const BTN_LEFT: u32 = 0;
     const BTN_RIGHT: u32 = 1;
     const BTN_CENTER: u32 = 2;
+    const K_CG_MOUSE_EVENT_CLICK_STATE: u32 = 1; // CGEventField：鼠标点击次数（2=双击语义）
 
     /// 左键是否处于按下状态（拖拽移动要用 leftMouseDragged 而非 mouseMoved，
     /// 否则系统不驱动窗口拖动，只在 up 时瞬移到最终位置）。
@@ -87,6 +90,19 @@ mod macos {
         }
     }
 
+    /// 系统级左键双击：用 kCGMouseEventClickState=2 标记两次点击，系统识别为双击（选中词/打开文件）。
+    pub fn double_click() {
+        let p = cursor_pos();
+        unsafe {
+            for down in [true, false] {
+                let t = if down { EVENT_LEFT_DOWN } else { EVENT_LEFT_UP };
+                let ev = CGEventCreateMouseEvent(std::ptr::null(), t, p, BTN_LEFT);
+                CGEventSetIntegerValueField(ev, K_CG_MOUSE_EVENT_CLICK_STATE, 2);
+                post(ev);
+            }
+        }
+    }
+
     pub fn button_down(button: &str) {
         let (dt, _, btn) = btn_codes(button);
         let p = cursor_pos();
@@ -103,6 +119,22 @@ mod macos {
 
     pub fn scroll(dx: i32, dy: i32) {
         unsafe { post(CGEventCreateScrollWheelEvent(std::ptr::null(), SCROLL_UNIT_PIXEL, 2, -dy, dx, 0)); }
+    }
+
+    /// 注入单个数字键盘字符（0-9 / 小数点）。用主键盘键位的虚拟键码，作用于当前焦点窗口。
+    /// macOS 虚拟键码：1=18 2=19 3=20 4=21 5=23 6=22 7=26 8=28 9=25 0=29 句点=47。
+    pub fn key_char(ch: &str) {
+        let keycode: u16 = match ch {
+            "1" => 18, "2" => 19, "3" => 20, "4" => 21, "5" => 23,
+            "6" => 22, "7" => 26, "8" => 28, "9" => 25, "0" => 29,
+            "." => 47,
+            "backspace" => 51, // kVK_Delete（主键盘退格键）
+            _ => return,
+        };
+        unsafe {
+            post(CGEventCreateKeyboardEvent(std::ptr::null(), keycode, true));
+            post(CGEventCreateKeyboardEvent(std::ptr::null(), keycode, false));
+        }
     }
 
     /// 触发调度中心（Control+Up）——双指长按的固定动作。
@@ -145,3 +177,7 @@ pub fn scroll(_dx: i32, _dy: i32) {}
 pub fn release_all() {}
 #[cfg(not(target_os = "macos"))]
 pub fn mission_control() {}
+#[cfg(not(target_os = "macos"))]
+pub fn key_char(_ch: &str) {}
+#[cfg(not(target_os = "macos"))]
+pub fn double_click() {}

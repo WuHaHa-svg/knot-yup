@@ -139,7 +139,12 @@ async fn serve_connection(
                 let btn = msg.get("button").and_then(|v| v.as_str()).unwrap_or("left");
                 injector::click(btn);
             }
+            "double_click" => injector::double_click(),
             "shortcut" => injector::mission_control(),
+            "key" => {
+                let ch = msg.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                injector::key_char(ch);
+            }
             "ping" => {
                 let ts = msg.get("ts_ms").and_then(|v| v.as_u64()).unwrap_or(0);
                 let pong = serde_json::json!({"type":"pong","ts_ms":ts});

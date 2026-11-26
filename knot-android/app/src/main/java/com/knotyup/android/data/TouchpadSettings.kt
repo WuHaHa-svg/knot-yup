@@ -16,6 +16,10 @@ object TouchpadSettings {
     private const val KEY_TOUCH_TRAIL = "touch_trail"
     private const val KEY_TRAIL_COLOR = "trail_color"
     private const val KEY_TRAIL_WIDTH = "trail_width_v2"
+    private const val KEY_KB_COLOR = "kb_color"
+    private const val KEY_KB_CLICK_PARTICLES = "kb_click_particles"
+    private const val KEY_KB_MACRO_ENABLED = "kb_macro_enabled"
+    private const val KEY_KB_BREATHING = "kb_breathing"
 
     private var prefs: android.content.SharedPreferences? = null
 
@@ -77,4 +81,24 @@ object TouchpadSettings {
     var trailWidth: Float
         get() = prefs?.getFloat(KEY_TRAIL_WIDTH, 20f) ?: 20f
         set(v) = prefs?.edit()?.putFloat(KEY_TRAIL_WIDTH, v)?.apply() ?: Unit
+
+    /** 数字键盘颜色：random(炫彩渐变) / white / primary / red / blue / gold，默认 primary。 */
+    var kbColor: String
+        get() = prefs?.getString(KEY_KB_COLOR, "primary") ?: "primary"
+        set(v) = prefs?.edit()?.putString(KEY_KB_COLOR, v)?.apply() ?: Unit
+
+    /** 键盘点击溅射粒子（默认关）：点击位置溅射 8~12 个跟随键色的微小粒子。 */
+    var kbClickParticles: Boolean
+        get() = prefs?.getBoolean(KEY_KB_CLICK_PARTICLES, false) ?: false
+        set(v) = prefs?.edit()?.putBoolean(KEY_KB_CLICK_PARTICLES, v)?.apply() ?: Unit
+
+    /** 数字宏（默认关）：长按数字键触发预定义动作（框架，动作留空回调）。 */
+    var kbMacroEnabled: Boolean
+        get() = prefs?.getBoolean(KEY_KB_MACRO_ENABLED, false) ?: false
+        set(v) = prefs?.edit()?.putBoolean(KEY_KB_MACRO_ENABLED, v)?.apply() ?: Unit
+
+    /** 键盘呼吸灯（默认开）：颜色明暗周期性呼吸；关闭则常亮。 */
+    var kbBreathing: Boolean
+        get() = prefs?.getBoolean(KEY_KB_BREATHING, true) ?: true
+        set(v) = prefs?.edit()?.putBoolean(KEY_KB_BREATHING, v)?.apply() ?: Unit
 }

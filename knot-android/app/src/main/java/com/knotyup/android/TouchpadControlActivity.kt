@@ -13,22 +13,58 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.PointerId
 import androidx.compose.ui.input.pointer.pointerInput
 import com.knotyup.android.data.AppState
 import com.knotyup.android.data.TouchpadSettings
@@ -43,6 +79,8 @@ import com.knotyup.android.ui.components.particlePalette
 import com.knotyup.android.ui.Strings
 import com.knotyup.android.ui.components.KnotConfirm
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
@@ -166,6 +204,12 @@ private fun ControlScreen(
     val particleSystem = remember { ParticleSystem() }
     val touchTrail = remember { TouchTrail() }
     var confirmExit by remember { mutableStateOf(false) }
+    // 数字键盘：默认关闭（全屏触摸区）；三指轻点开关，三指左右滑交换位置
+    var keypadOpen by remember { mutableStateOf(false) }
+    var keypadOnLeft by remember { mutableStateOf(false) }
+    var zoneW by remember { mutableFloatStateOf(0f) } // 触摸区像素尺寸（区域判定用）
+    var zoneH by remember { mutableFloatStateOf(0f) }
+    var netMove by remember { mutableFloatStateOf(0f) } // 当前手势净位移（长按到点校验拖拽用）
     val client = remember { TouchpadClient() }
     // 粒子发射回调：只做 system.emit，纯视觉、不阻塞采集
     val emitParticle: (Float, Float) -> Unit = { x, y ->
@@ -178,22 +222,41 @@ private fun ControlScreen(
     val feedTrail: (List<Triple<Long, Float, Float>>) -> Unit = { changes ->
         if (showTouchTrail) touchTrail.feed(changes, trailPalette, trailRandomColor, trailWidth)
     }
-    // 单指长按计时器：到点震动+按下（进入拖动）
+    // 长按计时器（普通区拖拽 / 右下角调度，统一 800ms=HOLD_MS）：
+    // 到点先震动提示"已进入拖拽选中"，再按下左键；持续滑动中(净位移大)不触发。
     val singleHold = remember {
-        HoldTracker(Handler(Looper.getMainLooper()), LONG_PRESS_MS) {
-            client.down("left")
-            Haptics.tick()
-        }
+        HoldTracker(
+            Handler(Looper.getMainLooper()), HOLD_MS,
+            onFire = {
+                Haptics.tick() // 先震动：提示已进入拖拽选中模式
+                client.down("left")
+            },
+            canFire = { netMove < HOLD_JITTER_SLOP },
+        )
     }
-    // 双指长按计时器：到点震动+触发调度中心开关
-    val doubleHold = remember {
-        HoldTracker(Handler(Looper.getMainLooper()), DOUBLE_HOLD_MS) {
-            Haptics.tick()
-            client.shortcut("mission_control")
-        }
+    // 右下角单指长按 → 调度中心
+    val missionHold = remember {
+        HoldTracker(
+            Handler(Looper.getMainLooper()), HOLD_MS,
+            onFire = { Haptics.tick(); client.shortcut("mission_control") },
+            canFire = { netMove < HOLD_JITTER_SLOP },
+        )
+    }
+    // 右下角双击 → 开/关数字键盘（双击判定在 CornerActionPad 内部，这里只做开关动作）
+    val onCornerTap: () -> Unit = {
+        keypadOpen = !keypadOpen
+        client.up("left")
+    }
+    // 单指轻点双击检测：第一次延迟 250ms 发单击，窗口内第二次(位置差<30px)改发系统双击
+    val tapTracker = remember {
+        DoubleTapTracker(
+            Handler(Looper.getMainLooper()),
+            onClick = { client.click("left") },
+            onDoubleClick = { client.doubleClick() },
+        )
     }
     DisposableEffect(Unit) {
-        onDispose { singleHold.cancel(); doubleHold.cancel() }
+        onDispose { singleHold.cancel(); missionHold.cancel(); tapTracker.cancel() }
     }
 
     // 建立触控板专用 TCP：从成员表取目标设备的 touchpad_addr，PIN 作握手令牌
@@ -247,29 +310,329 @@ private fun ControlScreen(
         )
     }
 
-    // 全屏触摸采集：由 handleGesture 识别单指/双指手势。
-    // 独立 Activity 的 window 与群页隔离，触摸不会触发切 tab。
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(if (oled) Color(0xFF000000) else Color(0xFF212121))
-            .pointerInput(Unit) {
-                awaitEachGesture {
-                    handleGesture(client, naturalScroll, singleHold, doubleHold, emitParticle, feedTrail)
+    // ── 悬浮叠加布局：触摸板铺满全屏，键盘/右下角方块作为独立悬浮层盖在其上 ──
+    // 三层各自 pointerInput 并 consume 自身事件 → 互不干扰；透过半透明键盘可见触摸板特效。
+    Box(Modifier.fillMaxSize().background(if (oled) Color(0xFF000000) else Color(0xFF212121))) {
+        // ① 触摸板层：铺满全屏，只处理纯触摸板手势（requireUnconsumed=true 不吃上层悬浮区的事件）
+        Box(
+            Modifier.fillMaxSize()
+                .pointerInput(Unit) {
+                    awaitEachGesture {
+                        handleTouchpad(
+                            client, naturalScroll, singleHold, emitParticle, feedTrail,
+                            onNetMove = { netMove = it },
+                            onSingleTap = { x, y -> tapTracker.tap(x, y) },
+                        )
+                    }
                 }
-            }
-    ) {
-        // 粒子渲染层：独立协程 60fps，只读取 system 状态；与上方采集完全解耦
-        ParticleCanvas(particleSystem, enabled = particlesOn, trail = particleTrail)
-        // 触摸轨迹渲染层：单指紫 / 双指青绿，与粒子层独立叠加
-        TouchTrailCanvas(
-            trail = touchTrail,
-            enabled = showTouchTrail,
-            width = trailWidth,
+        ) {
+            ParticleCanvas(particleSystem, enabled = particlesOn, trail = particleTrail)
+            TouchTrailCanvas(trail = touchTrail, enabled = showTouchTrail, width = trailWidth)
+        }
+
+        // ② 右下角悬浮方块（300×150）：独立处理长按调度 + 双击开关键盘；位置随键盘悬浮侧实时变化
+        CornerActionPad(
+            client = client,
+            missionHold = missionHold,
+            onDoubleTap = onCornerTap,
+            onNetMove = { netMove = it },
+            // 键盘在右时方块左移 1/3 屏宽（贴在触摸板可见区右下角）；否则贴屏幕右下
+            offsetXPx = if (keypadOpen && !keypadOnLeft) -screenW / 3f else 0f,
+            modifier = Modifier.align(Alignment.BottomEnd),
         )
+
+        // ③ 数字键盘悬浮层（宽 1/3）：挂载滑入淡入，左右移动平滑动画
+        androidx.compose.animation.AnimatedVisibility(
+            visible = keypadOpen,
+            enter = androidx.compose.animation.slideInHorizontally(
+                initialOffsetX = { full -> if (keypadOnLeft) -full else full }
+            ) + androidx.compose.animation.fadeIn(),
+            exit = androidx.compose.animation.slideOutHorizontally(
+                targetOffsetX = { full -> if (keypadOnLeft) -full else full }
+            ) + androidx.compose.animation.fadeOut(),
+            modifier = Modifier.align(Alignment.TopStart),
+        ) {
+            // 键盘宽度 = 屏宽 1/3；左→offset 0，右→offset (屏宽-键盘宽)
+            val kbW = screenW / 3f
+            val targetX = if (keypadOnLeft) 0f else screenW - kbW
+            val animX by animateFloatAsState(
+                targetValue = targetX,
+                animationSpec = androidx.compose.animation.core.spring(
+                    dampingRatio = 0.75f, stiffness = 260f,
+                ),
+                label = "kbMove",
+            )
+            Box(
+                Modifier.fillMaxHeight().fillMaxWidth(1f / 3f)
+                    .offset { IntOffset(animX.toInt(), 0) }
+            ) {
+                NumericKeypad(client, oled, onSwipe = { keypadOnLeft = !keypadOnLeft })
+            }
+        }
     }
 }
 
+/** 右下角悬浮方块：长按→调度中心，双击→开关键盘；自身消费事件，不影响触摸板层。 */
+@Composable
+private fun CornerActionPad(
+    client: TouchpadClient,
+    missionHold: HoldTracker,
+    onDoubleTap: () -> Unit,
+    onNetMove: (Float) -> Unit,
+    offsetXPx: Float,
+    modifier: Modifier,
+) {
+    val density = androidx.compose.ui.platform.LocalDensity.current.density
+    val wDp = (CORNER_ZONE_W / density).dp
+    val hDp = (CORNER_ZONE_H / density).dp
+    var lastTapMs by remember { mutableLongStateOf(0L) }
+    Box(
+        modifier
+            .size(wDp, hDp)
+            .offset { IntOffset(offsetXPx.toInt(), 0) }
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    missionHold.reset()
+                    missionHold.schedule()
+                    var net = 0f // 净位移（离按下点直线距离），抖动不累积
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Main)
+                        for (c in event.changes) {
+                            if (c.pressed) {
+                                net = kotlin.math.hypot(
+                                    c.position.x - down.position.x,
+                                    c.position.y - down.position.y,
+                                )
+                                c.consume()
+                            }
+                        }
+                        onNetMove(net)
+                        if (net >= MOVE_SLOP) missionHold.cancel() // 明显移动 → 取消长按
+                        if (event.changes.all { !it.pressed }) break
+                    }
+                    missionHold.cancel()
+                    // 长按已在计时器到点执行调度；此处只处理轻点双击（容差放宽到 DOUBLE_TAP_SLOP）
+                    if (!missionHold.fired && net < DOUBLE_TAP_SLOP) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastTapMs <= DOUBLE_TAP_MS) {
+                            onDoubleTap(); lastTapMs = 0L
+                        } else {
+                            lastTapMs = now
+                        }
+                    }
+                }
+            }
+    )
+}
+/**
+ * 数字键盘面板：从上至下 789/456/123/0.(0占两格)。
+ * - 颜色跟随设置：random=炫彩渐变RGB跑马灯(按键逐个流转)，固定色=色板色；
+ * - 点击溅射 8~12 个跟随键色的微小粒子（键盘区内渲染）；
+ * - 数字宏：长按数字键触发预定义动作（框架，动作回调留空）；
+ * - 面板内横滑 → 交换键盘左右位置；背景透明透出触摸板特效。
+ */
+@Composable
+private fun NumericKeypad(client: TouchpadClient, oled: Boolean, onSwipe: () -> Unit) {
+    val kbColor = remember { TouchpadSettings.kbColor }
+    val particlesOn = remember { TouchpadSettings.kbClickParticles }
+    val macroOn = remember { TouchpadSettings.kbMacroEnabled }
+    val breathing = remember { TouchpadSettings.kbBreathing }
+    val palette = particlePalette(kbColor)
+    val rainbow = kbColor == "random"
+
+    // RGB 跑马灯相位：0→1 循环，每个键按索引偏移取色相
+    val inf = rememberInfiniteTransition(label = "kbRainbow")
+    val phase by inf.animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(3000, easing = LinearEasing), RepeatMode.Restart),
+        label = "phase",
+    )
+    // 呼吸系数：0.45~1.0 周期明暗；关闭呼吸则常亮 1.0
+    val breath = if (breathing) 0.45f + 0.55f * (0.5f + 0.5f * kotlin.math.sin(phase * 6.28318f)) else 1f
+    fun keyColor(index: Int): Color {
+        val base = if (!rainbow) Color(palette[0]) else {
+            val frac = phase + index * 0.08f
+            val hue = (frac - kotlin.math.floor(frac)) * 360f
+            Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, 0.85f, 1f)))
+        }
+        // 呼吸只改亮度(RGB 乘系数)，保持色相
+        return Color(base.red * breath, base.green * breath, base.blue * breath, base.alpha)
+    }
+
+    val rows = listOf(
+        listOf("7" to 1, "8" to 1, "9" to 1),
+        listOf("4" to 1, "5" to 1, "6" to 1),
+        listOf("1" to 1, "2" to 1, "3" to 1),
+        listOf("0" to 1, "." to 1, "⌫" to 1),
+    )
+    Box(
+        Modifier.fillMaxHeight()
+            .background(Color.Transparent)
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    down.consume()
+                    var totalDx = 0f
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Main)
+                        for (c in event.changes) {
+                            if (c.pressed) {
+                                totalDx += c.position.x - c.previousPosition.x
+                                c.consume()
+                            }
+                        }
+                        if (event.changes.all { !it.pressed }) break
+                    }
+                    if (kotlin.math.abs(totalDx) >= ZONE_SWIPE_SLOP) onSwipe()
+                }
+            }
+    ) {
+        Column(Modifier.fillMaxHeight().padding(horizontal = 8.dp, vertical = 12.dp)) {
+            rows.forEachIndexed { rowIdx, row ->
+                Row(Modifier.fillMaxWidth().weight(1f)) {
+                    row.forEachIndexed { colIdx, (key, span) ->
+                        val color = keyColor(rowIdx * 3 + colIdx)
+                        // 每个键独立粒子列表（坐标=按键内，天然对应点击位置），范围限制在本格子内
+                        val keySparks = remember(key) { androidx.compose.runtime.mutableStateListOf<KbSpark>() }
+                        var keyPressed by remember { mutableStateOf(false) }
+                        LaunchedEffect(key) {
+                            while (true) {
+                                val now = System.nanoTime()
+                                val it = keySparks.iterator()
+                                while (it.hasNext()) {
+                                    val sp = it.next()
+                                    val dt = ((now - sp.lastNs) / 1_000_000_000f).coerceAtMost(0.05f)
+                                    sp.lastNs = now
+                                    sp.x += sp.vx * dt; sp.y += sp.vy * dt
+                                    sp.vx *= 0.965f; sp.vy *= 0.965f
+                                    sp.age += dt
+                                    if (sp.age >= sp.life) it.remove()
+                                }
+                                delay(16)
+                            }
+                        }
+                        val keyDensity = androidx.compose.ui.platform.LocalDensity.current.density
+                        Box(
+                            Modifier
+                                .weight(span.toFloat())
+                                .fillMaxHeight()
+                                // 井字形：只画内部网格线(非首行上边/非首列左边)，不画四周外框
+                                .drawInnerBorders(color, top = rowIdx > 0, left = colIdx > 0)
+                                .pointerInput(key) {
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        down.consume()
+                                        var moved = false
+                                        var longFired = false
+                                        var repeatJob: kotlinx.coroutines.Job? = null
+                                        // 长按：退格键=连续高频删除；其它键=数字宏框架。独立协程不阻塞事件接收
+                                        val holdJob = kotlinx.coroutines.GlobalScope.launch {
+                                            delay(KB_MACRO_HOLD_MS)
+                                            if (!moved) {
+                                                longFired = true
+                                                if (key == "⌫") {
+                                                    // 退格长按：每 60ms 发一次 backspace，直到抬手取消
+                                                    repeatJob = launch {
+                                                        while (true) {
+                                                            client.key("backspace")
+                                                            Haptics.tick() // 每次连续退格都震动一下
+                                                            delay(KB_REPEAT_INTERVAL_MS)
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        while (true) {
+                                            val ev = awaitPointerEvent(PointerEventPass.Main)
+                                            for (c in ev.changes) {
+                                                if (c.pressed) {
+                                                    if (kotlin.math.abs(c.position.x - c.previousPosition.x) > MOVE_SLOP ||
+                                                        kotlin.math.abs(c.position.y - c.previousPosition.y) > MOVE_SLOP) moved = true
+                                                    c.consume()
+                                                }
+                                            }
+                                            if (ev.changes.all { !it.pressed }) break
+                                        }
+                                        holdJob.cancel()
+                                        repeatJob?.cancel()
+                                        if (longFired && macroOn && key != "⌫") {
+                                            Haptics.tick() // 数字宏动作框架：具体功能待接入
+                                        } else if (!moved && !longFired) {
+                                            client.key(if (key == "⌫") "backspace" else key)
+                                            Haptics.tick()
+                                            keyPressed = true
+                                            kotlinx.coroutines.GlobalScope.launch {
+                                                delay(110); keyPressed = false
+                                            }
+                                            if (particlesOn) {
+                                                // 直接用按键内坐标，溅射范围限制在一个格子内（低速+短命）
+                                                val cx = down.position.x
+                                                val cy = down.position.y
+                                                repeat(10 + kotlin.random.Random.nextInt(5)) {
+                                                    val angle = kotlin.random.Random.nextFloat() * 6.28318f
+                                                    val speed = 80f + kotlin.random.Random.nextFloat() * 100f
+                                                    keySparks.add(KbSpark(
+                                                        x = cx, y = cy,
+                                                        vx = kotlin.math.cos(angle) * speed,
+                                                        vy = kotlin.math.sin(angle) * speed,
+                                                        color = color.copy(alpha = 1f),
+                                                    ))
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            val textScale by animateFloatAsState(
+                                targetValue = if (keyPressed) 1.18f else 1f,
+                                animationSpec = androidx.compose.animation.core.spring(
+                                    dampingRatio = 0.4f, stiffness = 600f,
+                                ),
+                                label = "keyText",
+                            )
+                            Text(
+                                key, color = color, fontSize = 28.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.scale(textScale),
+                            )
+                            if (particlesOn) {
+                                Canvas(Modifier.matchParentSize()) {
+                                    keySparks.forEach { sp ->
+                                        drawCircle(
+                                            color = sp.color.copy(alpha = (1f - sp.age / sp.life).coerceIn(0f, 1f)),
+                                            radius = 0.6f * keyDensity, // 微小粒子
+                                            center = Offset(sp.x, sp.y),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 键盘点击溅射粒子。 */
+private class KbSpark(
+    var x: Float, var y: Float,
+    var vx: Float, var vy: Float,
+    val color: Color,
+    var age: Float = 0f,
+    val life: Float = 0.7f,
+    var lastNs: Long = System.nanoTime(),
+)
+
+/** 井字形边框：只画内部网格线（非首行的上边、非首列的左边），四周无外框。 */
+private fun Modifier.drawInnerBorders(color: Color, top: Boolean, left: Boolean): Modifier = this.drawBehind {
+    val w = 0.5.dp.toPx()
+    if (top) drawLine(color, Offset(0f, 0f), Offset(size.width, 0f), w)
+    if (left) drawLine(color, Offset(0f, 0f), Offset(0f, size.height), w)
+}
 /**
  * 单个手势的完整识别状态机（运行在 AwaitPointerEventScope 内）。
  *
@@ -278,6 +641,7 @@ private fun ControlScreen(
  * - 单指滑动 → move（光标）；单指按住满 800ms（位移不超阈值）→ 立即震动+进入拖动
  * - 双指轻点 → 右键 click（不震动）；双指滑动 → scroll（按 naturalScroll 决定方向）
  * - 双指长按（按住 800ms 不移动）→ 调度中心开关 shortcut（震动）
+ * - 三指轻点 → 开/关数字键盘；三指左右滑 → 交换键盘左右位置
  *
  * 长按用独立 Handler 定时器（HoldTracker，不取消 awaitPointerEvent）：
  * - 单指按住满 800ms 且未移动 → 震动+按下进入拖动
@@ -287,73 +651,68 @@ private fun ControlScreen(
  * 的事件流，导致手势事件丢失。
  * 移动阈值 MOVE_SLOP=12px：累计位移低于它的轻微抖动不识别为移动，会取消长按计时。
  */
-private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.handleGesture(
+private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.handleTouchpad(
     client: TouchpadClient,
     naturalScroll: Boolean,
     singleHold: HoldTracker,
-    doubleHold: HoldTracker,
     emitParticle: (Float, Float) -> Unit,
     feedTrail: (List<Triple<Long, Float, Float>>) -> Unit,
+    onNetMove: (Float) -> Unit,
+    onSingleTap: (Float, Float) -> Unit,
 ) {
-    val down = awaitFirstDown(requireUnconsumed = false)
+    val down = awaitFirstDown(requireUnconsumed = true)
     down.consume()
-    emitParticle(down.position.x, down.position.y) // 按下瞬间发一簇
-    // 每个新手势先清掉上一段手势残留的 fired——否则上次双指长按后 fired 恒为 true，
-    // 后续手势第一帧就被判成 "double"（该模式不发送任何事件），表现为触摸板失效。
+    emitParticle(down.position.x, down.position.y)
     singleHold.reset()
-    doubleHold.reset()
-    singleHold.schedule() // 单指按下即开始长按计时
+    singleHold.schedule()
+
     var maxPointers = 1
     var totalDx = 0f
     var totalDy = 0f
-    // 手势模式："" 未定 / move / scroll / drag / double
     var mode = ""
     var dragging = false
-    var doubleFired = false // 双指长按是否已触发（避免同一手势重复触发）
-    var lastX = down.position.x // 最后触点坐标（抬起时在此处触发涟漪）
+    var lastX = down.position.x
     var lastY = down.position.y
 
     while (true) {
         val event = awaitPointerEvent(PointerEventPass.Main)
-        var dx = 0f
-        var dy = 0f
         val pressedCount = event.changes.count { it.pressed }
         if (event.changes.size > maxPointers) maxPointers = event.changes.size
-        // 指针数：恰好 2 指才启动双指长按计时；单指/3指以上都取消
-        // （双指轻点/滑动时靠位移阈值或松手来取消计时，见下方 mode 判定）
-        when (pressedCount) {
-            2 -> { singleHold.cancel(); if (!doubleFired && !doubleHold.fired) doubleHold.schedule() }
-            else -> { doubleHold.cancel() } // 单指靠 singleHold；3指以上不触发任何长按
-        }
+        var dx = 0f
+        var dy = 0f
         val touchPoints = ArrayList<Triple<Long, Float, Float>>()
+        var mainX = down.position.x
+        var mainY = down.position.y
         for (c in event.changes) {
             if (c.pressed) {
                 dx += c.position.x - c.previousPosition.x
                 dy += c.position.y - c.previousPosition.y
                 lastX = c.position.x
                 lastY = c.position.y
+                if (c.id == down.id) { mainX = c.position.x; mainY = c.position.y }
                 touchPoints.add(Triple(c.id.value, c.position.x, c.position.y))
                 c.consume()
             }
         }
-        // 轨迹：单指/双指按当前按下指数着色
         feedTrail(touchPoints)
         totalDx += dx
         totalDy += dy
+        // 净位移用「当前触点离按下点的直线距离」，长按期间的小幅来回抖动不会累积放大
+        onNetMove(kotlin.math.hypot(mainX - down.position.x, mainY - down.position.y))
         val movedEnough = kotlin.math.abs(totalDx) >= MOVE_SLOP ||
             kotlin.math.abs(totalDy) >= MOVE_SLOP
         val step = kotlin.math.abs(dx) > 0.5f || kotlin.math.abs(dy) > 0.5f
 
+        // 多指出现：取消单指长按
+        if (pressedCount >= 2) singleHold.cancel()
+
         if (mode.isEmpty()) {
             when {
-                singleHold.fired -> { mode = "drag"; dragging = true; doubleHold.cancel() }
-                doubleHold.fired -> { mode = "double"; doubleFired = true; singleHold.cancel() }
-                maxPointers >= 2 && movedEnough -> { mode = "scroll"; singleHold.cancel(); doubleHold.cancel() }
-                maxPointers == 1 && movedEnough -> { mode = "move"; singleHold.cancel() }
+                singleHold.fired -> { mode = "drag"; dragging = true }
+                maxPointers >= 2 && movedEnough -> { mode = "scroll" }
+                maxPointers == 1 && movedEnough -> { mode = "move" }
             }
         }
-        // 双指滑动（超阈值）取消长按计时，不当作长按
-        if (mode == "scroll" && movedEnough) doubleHold.cancel()
 
         when (mode) {
             "move", "drag" -> if (step) client.move(dx.toInt(), dy.toInt())
@@ -363,43 +722,46 @@ private suspend fun androidx.compose.ui.input.pointer.AwaitPointerEventScope.han
             }
         }
         if (event.changes.all { !it.pressed }) {
-            emitParticle(lastX, lastY) // 抬起瞬间在最后触点位置触发一次涟漪
+            emitParticle(lastX, lastY)
             break
         }
     }
 
     singleHold.cancel()
-    doubleHold.cancel()
-
-    // 手势结束：按最终模式结算（注：长按动作已在计时器到点时执行）
     when {
-        dragging -> client.up("left") // 拖动结束，抬起
-        mode == "double" -> Unit // 调度中心已由双指长按触发，此处不重复
-        mode.isEmpty() -> {
-            if (maxPointers >= 2) {
-                client.click("right") // 双指轻点 → 右键（不震动）
-            } else {
-                client.click("left")
-            }
-        }
+        dragging -> client.up("left")
+        mode.isEmpty() && maxPointers == 2 -> client.click("right")
+        mode.isEmpty() && maxPointers == 1 -> onSingleTap(lastX, lastY)
     }
 }
 
-private const val LONG_PRESS_MS = 800L  // 单指长按进入拖动的时长
-private const val DOUBLE_HOLD_MS = 800L  // 双指长按触发调度中心的时长
-private const val MOVE_SLOP = 12f       // 累计位移阈值(px)：低于此的抖动不识别为移动
+
+private const val HOLD_MS = 800L           // 统一长按时长：普通区拖拽 / 右下角调度 共用
+private const val MOVE_SLOP = 12f          // 累计位移阈值(px)：低于此的抖动不识别为移动
+private const val CORNER_ZONE_W = 300f     // 右下角区域宽(px)
+private const val CORNER_ZONE_H = 150f     // 右下角区域高(px)
+private const val ZONE_SWIPE_SLOP = 60f    // 键盘面板内横滑触发阈值(px)
+private const val DOUBLE_TAP_MS = 450L     // 右下角双击间隔(ms)：无单击延迟代价，放宽
+private const val TAP_CLICK_DELAY_MS = 250L // 触摸板单击延迟(ms)：等双击窗口，兼顾单击手感
+private const val DOUBLE_TAP_SLOP = 80f    // 统一双击容差(px)：两处共用，手机触摸偏差大放宽
+private const val KB_MACRO_HOLD_MS = 500L    // 按键长按时长(ms)：退格连续删除 / 数字宏
+private const val KB_REPEAT_INTERVAL_MS = 60L // 退格长按连续触发间隔(ms)
+private const val HOLD_JITTER_SLOP = 30f   // 统一长按抖动阈值：净位移超过此值(滑动中)则不触发长按
 
 /** 长按计时器：独立 Handler 定时，到点置 fired 并执行回调；不干扰 Compose 的事件接收。 */
 private class HoldTracker(
     private val handler: Handler,
     private val delayMs: Long,
     private val onFire: () -> Unit,
+    private val canFire: () -> Boolean = { true }, // 到点时校验（如手指持续移动则不触发拖拽）
 ) {
     @Volatile var fired = false
         private set
     private val runnable = Runnable {
-        fired = true
-        onFire()
+        if (canFire()) {
+            fired = true
+            onFire()
+        }
     }
     fun schedule() {
         handler.removeCallbacks(runnable) // 先清旧的，避免同一手势多次 schedule 累积
@@ -413,5 +775,41 @@ private class HoldTracker(
     fun reset() {
         handler.removeCallbacks(runnable)
         fired = false
+    }
+}
+
+/**
+ * 双击检测器：单指轻点先延迟 [TAP_CLICK_DELAY_MS] 发单击；窗口内第二次轻点
+ * （位置差 < [DOUBLE_TAP_SLOP]）则取消单击、改发系统双击。
+ */
+private class DoubleTapTracker(
+    private val handler: Handler,
+    private val onClick: () -> Unit,
+    private val onDoubleClick: () -> Unit,
+) {
+    private var lastX = 0f
+    private var lastY = 0f
+    private var pending = false
+    private val runnable = Runnable {
+        pending = false
+        onClick()
+    }
+
+    fun tap(x: Float, y: Float) {
+        if (pending && kotlin.math.hypot(x - lastX, y - lastY) < DOUBLE_TAP_SLOP) {
+            handler.removeCallbacks(runnable)
+            pending = false
+            onDoubleClick()
+        } else {
+            handler.removeCallbacks(runnable)
+            lastX = x; lastY = y
+            pending = true
+            handler.postDelayed(runnable, TAP_CLICK_DELAY_MS)
+        }
+    }
+
+    fun cancel() {
+        handler.removeCallbacks(runnable)
+        pending = false
     }
 }

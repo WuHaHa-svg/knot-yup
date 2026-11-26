@@ -109,7 +109,11 @@ class TouchpadClient {
     fun down(button: String = "left") = enqueue("down") { put("button", button) }
     fun up(button: String = "left") = enqueue("up") { put("button", button) }
     fun click(button: String = "left") = enqueue("click") { put("button", button) }
+    /** 系统级左键双击（选中词/打开文件）。 */
+    fun doubleClick() = enqueue("double_click") { }
     fun shortcut(code: String) = enqueue("shortcut") { put("code", code) }
+    /** 数字键盘：向桌面注入单个字符（0-9 / .）。 */
+    fun key(ch: String) = enqueue("key") { put("key", ch) }
 
     fun disconnect() {
         connected = false

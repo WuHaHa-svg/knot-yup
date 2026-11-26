@@ -56,6 +56,14 @@
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
             android:theme="@style/Theme.KnotYup" />
 
+        <!-- 触摸板首次使用引导：全屏横屏，动画演示手势后进入控制页 -->
+        <activity
+            android:name=".TouchpadGuideActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout"
+            android:theme="@style/Theme.KnotYup" />
+
         <!-- 群组前台服务：入群期间常驻，保 ws 连接（后台剪贴板改由悬浮通知告知） -->
         <service
             android:name=".service.KnotForegroundService"

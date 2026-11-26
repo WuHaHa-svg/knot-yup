@@ -40,16 +40,19 @@ class TouchTrail {
     private val sparks = ArrayList<Spark>()
     private val random = Random.Default
     private val SPARK_LIFE = 0.42f
+    private var rainbowMode = false  // 当前是否为随机色(跑马灯)模式
+    private var rainbowPhase = 0f    // 跑马灯相位，随 update 推进
 
     /** 每帧写入触点。changes: (pointerId, x, y)；palette/random 决定新轨迹颜色；width 为轨迹粗细（决定溅射距离）。 */
     @Synchronized
     fun feed(changes: List<Triple<Long, Float, Float>>, palette: IntArray, randomColor: Boolean, width: Float) {
+        rainbowMode = randomColor
         val ids = HashSet<Long>()
         for ((id, x, y) in changes) {
             ids.add(id)
             val s = strokes.getOrPut(id) {
                 val stroke = Stroke()
-                stroke.argb = if (randomColor) palette[random.nextInt(palette.size)] else palette[0]
+                stroke.argb = if (randomColor) palette[random.nextInt(palette.size)] else palette[0] // rainbow 时渲染期覆盖
                 stroke
             }
             // 位移太小的点不追加，避免原地堆积
@@ -80,6 +83,7 @@ class TouchTrail {
     @Synchronized
     fun update(dtSec: Float) {
         val dt = dtSec.coerceAtMost(0.05f)
+        if (rainbowMode) rainbowPhase = (rainbowPhase + dt / 2.4f) % 1f
         val it = strokes.entries.iterator()
         while (it.hasNext()) {
             val s = it.next().value
@@ -128,21 +132,29 @@ class TouchTrail {
     /** 遍历溅射粒子供 Canvas 绘制：x,y,radius,alpha,argb。 */
     @Synchronized
     fun forEachSpark(action: (x: Float, y: Float, radius: Float, alpha: Float, argb: Int) -> Unit) {
+        val rainbowColor = if (rainbowMode)
+            android.graphics.Color.HSVToColor(floatArrayOf(rainbowPhase * 360f, 0.85f, 1f)) else 0
         for (sp in sparks) {
             val a = (1f - sp.age / sp.life).coerceIn(0f, 1f)
-            action(sp.x, sp.y, sp.radius, a, sp.argb)
+            action(sp.x, sp.y, sp.radius, a, if (rainbowMode) rainbowColor else sp.argb)
         }
     }
 
     /** 遍历每条轨迹供 Canvas 画线：points 为 (x, y, alpha)，argb 为该轨迹颜色。 */
     @Synchronized
     fun forEachStroke(action: (points: List<TrailPoint>, argb: Int) -> Unit) {
+        var idx = 0
         for (s in strokes.values) {
             if (s.points.size < 2) continue
             val snapshot = s.points.map {
                 TrailPoint(it.x, it.y, (1f - it.age / TTL).coerceIn(0f, 1f))
             }
-            action(snapshot, s.argb)
+            val color = if (rainbowMode) {
+                val frac = (rainbowPhase + idx * 0.13f) % 1f
+                android.graphics.Color.HSVToColor(floatArrayOf(frac * 360f, 0.85f, 1f))
+            } else s.argb
+            action(snapshot, color)
+            idx++
         }
     }
 
