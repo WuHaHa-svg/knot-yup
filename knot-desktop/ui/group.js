@@ -34,12 +34,10 @@ function renderSharePop() {
   pop.innerHTML = `
     <div class="share-qr"><canvas id="qrCanvas" width="196" height="196"></canvas></div>
     <div class="share-row">
-      <span class="share-label">${t('group_addr')}</span>
       <span class="share-value">${escapeHtml(s.addr)}</span>
       <button class="share-copy" data-copy="${escapeHtml(s.addr)}" title="${t('copy')}"><svg class="icon sm"><use href="#i-copy"/></svg></button>
     </div>
     <div class="share-row">
-      <span class="share-label">${t('group_pin')}</span>
       <span class="share-value">${escapeHtml(s.pin)}</span>
       <button class="share-copy" data-copy="${escapeHtml(s.pin)}" title="${t('copy')}"><svg class="icon sm"><use href="#i-copy"/></svg></button>
     </div>
@@ -53,14 +51,20 @@ function renderSharePop() {
     const canvas = $('qrCanvas');
     const ctx = canvas.getContext('2d');
     const n = qr.getModuleCount();
-    const cell = Math.floor(canvas.width / (n + 4)); // 含 2 模块静区
-    const offset = Math.floor((canvas.width - cell * n) / 2);
+    const size = canvas.width;
+    // 白边最小：只留半模块静区，二维码图案尽量铺满 canvas
+    const quiet = 0.5;
+    const cell = size / (n + quiet * 2);
+    const offset = quiet * cell;
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillRect(0, 0, size, size);
     ctx.fillStyle = '#1d2129';
     for (let y = 0; y < n; y++) {
       for (let x = 0; x < n; x++) {
-        if (qr.isDark(y, x)) ctx.fillRect(offset + x * cell, offset + y * cell, cell, cell);
+        if (qr.isDark(y, x)) ctx.fillRect(
+          Math.round(offset + x * cell), Math.round(offset + y * cell),
+          Math.ceil(cell), Math.ceil(cell),
+        );
       }
     }
   } catch (e) {

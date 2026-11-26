@@ -197,10 +197,8 @@ private fun ControlScreen(
     val trailRandomColor = TouchpadSettings.trailColor == "random"
     val trailWidth = TouchpadSettings.trailWidth
     val density = androidx.compose.ui.platform.LocalDensity.current.density
-    // 屏幕像素尺寸（横屏全屏）：涟漪据此计算铺满全屏的扩散距离
-    val dm = ctx.resources.displayMetrics
-    val screenW = dm.widthPixels.toFloat()
-    val screenH = dm.heightPixels.toFloat()
+    // 屏幕像素尺寸：用 Compose 实际布局尺寸(zoneW/zoneH，由 onSizeChanged 写入)，
+    // 不用 displayMetrics/Configuration——横屏下它们的宽高与真实渲染区域不一致(安全区/刘海)。
     val particleSystem = remember { ParticleSystem() }
     val touchTrail = remember { TouchTrail() }
     var confirmExit by remember { mutableStateOf(false) }
@@ -215,7 +213,7 @@ private fun ControlScreen(
     val emitParticle: (Float, Float) -> Unit = { x, y ->
         if (particlesOn) particleSystem.emit(
             x, y, particleSizeDp * density, particleCount,
-            particlePalette, particleRandomColor, particleSpeed, screenW, screenH,
+            particlePalette, particleRandomColor, particleSpeed, zoneW, zoneH,
         )
     }
     // 轨迹采集回调：每帧把触点坐标喂给轨迹引擎（单指/双指按 pressedCount 着色）
@@ -312,7 +310,9 @@ private fun ControlScreen(
 
     // ── 悬浮叠加布局：触摸板铺满全屏，键盘/右下角方块作为独立悬浮层盖在其上 ──
     // 三层各自 pointerInput 并 consume 自身事件 → 互不干扰；透过半透明键盘可见触摸板特效。
-    Box(Modifier.fillMaxSize().background(if (oled) Color(0xFF000000) else Color(0xFF212121))) {
+    Box(Modifier.fillMaxSize()
+        .onSizeChanged { size -> zoneW = size.width.toFloat(); zoneH = size.height.toFloat() }
+        .background(if (oled) Color(0xFF000000) else Color(0xFF212121))) {
         // ① 触摸板层：铺满全屏，只处理纯触摸板手势（requireUnconsumed=true 不吃上层悬浮区的事件）
         Box(
             Modifier.fillMaxSize()
@@ -337,30 +337,24 @@ private fun ControlScreen(
             onDoubleTap = onCornerTap,
             onNetMove = { netMove = it },
             // 键盘在右时方块左移 1/3 屏宽（贴在触摸板可见区右下角）；否则贴屏幕右下
-            offsetXPx = if (keypadOpen && !keypadOnLeft) -screenW / 3f else 0f,
+            offsetXPx = if (keypadOpen && !keypadOnLeft) -zoneW / 3f else 0f,
             modifier = Modifier.align(Alignment.BottomEnd),
         )
 
-        // ③ 数字键盘悬浮层（宽 1/3）：挂载滑入淡入，左右移动平滑动画
-        androidx.compose.animation.AnimatedVisibility(
-            visible = keypadOpen,
-            enter = androidx.compose.animation.slideInHorizontally(
-                initialOffsetX = { full -> if (keypadOnLeft) -full else full }
-            ) + androidx.compose.animation.fadeIn(),
-            exit = androidx.compose.animation.slideOutHorizontally(
-                targetOffsetX = { full -> if (keypadOnLeft) -full else full }
-            ) + androidx.compose.animation.fadeOut(),
-            modifier = Modifier.align(Alignment.TopStart),
-        ) {
-            // 键盘宽度 = 屏宽 1/3；左→offset 0，右→offset (屏宽-键盘宽)
-            val kbW = screenW / 3f
-            val targetX = if (keypadOnLeft) 0f else screenW - kbW
+        // ③ 数字键盘悬浮层（宽 1/3）：单一位置动画统一控制滑入/滑出与左右切换，无淡化。
+        // zoneW>0 守卫：布局尺寸就绪前不组合键盘，避免首帧 closedX=0 导致键盘闪现。
+        if (zoneW > 0f) {
+            // 键盘在右→打开滑到右侧到位、关闭向右滑出屏幕；键盘在左→打开滑到左侧、关闭向左滑出
+            val kbW = zoneW / 3f
+            val openX = if (keypadOnLeft) 0f else zoneW - kbW
+            val closedX = if (keypadOnLeft) -kbW else zoneW
+            val targetX = if (keypadOpen) openX else closedX
             val animX by animateFloatAsState(
                 targetValue = targetX,
                 animationSpec = androidx.compose.animation.core.spring(
-                    dampingRatio = 0.75f, stiffness = 260f,
+                    dampingRatio = 0.82f, stiffness = 240f,
                 ),
-                label = "kbMove",
+                label = "kbSlide",
             )
             Box(
                 Modifier.fillMaxHeight().fillMaxWidth(1f / 3f)
