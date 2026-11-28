@@ -159,8 +159,8 @@ Android 侧闸门为双层：`clipGuard`（内容哈希）+ `lastSyncText`（文
 | transfer 三方握手 | 双端消息语义逐字段一致；超时常量 3s 双端统一 |
 | UI 错误码 | WRONG_PIN / ALREADY_IN_GROUP / OWNER_ONLY / NO_LAN / GROUP_LOST / PROMOTED / KICKED / DISSOLVED / TRANSFERRED / TRANSFER_FAILED / MIGRATED（桌面迁移完成）—— 双端 i18n 映射 |
 
-## 8. 遗留问题（不在本次范围）
+## 8. 遗留问题（TODO）
 
-- PIN 明文传输 + 10⁶ 密钥空间（规划 ECDH + QR 配对）
-- `try_send` 无背压：小信令仍走 try_send；文件本体改走 P2P 直连 + TCP 背压（见 file-sharing.md）
-- 剪贴板无分块上限：文本量大时仍需分片（文件共享通道就绪后可复用其分块能力）
+- **TODO**：PIN 明文传输 + 10⁶ 密钥空间（ECDH + QR 配对未实现；当前 PIN 派生 AES-GCM 密钥）
+- **TODO**：`try_send` 无背压（失败即丢弃）；文件本体走 P2P 直连 + TCP 背压（见 file-sharing.md）
+- **TODO**：剪贴板无分块上限（大文本未分片；ClipboardPayload 无分片字段）

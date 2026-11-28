@@ -2,17 +2,17 @@
 
 > 把设备打成一个结 —— 局域网内的 Win / macOS / Android 剪贴板共享 + 文件共享 + Android 触控板 + 自由组群
 
-在同一 Wi-Fi 下，任意多台设备组成一个「**群**」：任何设备可以创建群或加入群（PIN 码），群主可以移出成员、转让群主。群内实时同步剪贴板；手机可以作为电脑的无线触控板（开发中）。文件共享进入设计阶段，见 [docs/file-sharing.md](docs/file-sharing.md)。
+在同一 Wi-Fi 下，任意多台设备组成一个「**群**」：任何设备可以创建群或加入群（PIN 码），群主可以移出成员、转让群主。群内实时同步剪贴板；手机可以作为电脑的无线触控板（macOS/Windows 均已支持注入）。文件共享已实现，见 [docs/file-sharing.md](docs/file-sharing.md)。
 
 ## 功能
 
-- **剪贴板同步**：Windows、macOS、Android 之间实时共享文本（已完结）
-- **文件共享**：每台设备一个持久共享文件夹（群内一级按设备名分组、二级是文件）；入群即上报文件夹清单，文件从所属设备 P2P 直取。下载为纯本地行为（只落盘，不自动共享、不成为供种者）；想让文件对群可见须主动再次共享（见 [docs/file-sharing.md](docs/file-sharing.md)）
+- **剪贴板同步**：Windows、macOS、Android 之间实时共享文本（已完成）
+- **文件共享**：每台设备一个持久共享文件夹（群内一级按设备名分组、二级是文件）；入群即上报文件夹清单，文件从所属设备 P2P 直取。下载为纯本地行为（只落盘，不自动共享、不成为供种者）；想让文件对群可见须主动再次共享。传输中心支持进度/取消（见 [docs/file-sharing.md](docs/file-sharing.md)）
 - **局域网发现**：扫描端广播请求、群主应答（UDP 拉取式），附近设备可见，输入 PIN 即加入
 - **群管理**：创建/加入/退出、群主移出成员、群主三方握手转让、解散
 - **通信加密**：入群后业务消息以 AES-256-GCM 加密（PIN 派生密钥）
 - **国际化**：简体中文 / 繁體中文 / English
-- **Android 触控板**：规划中（M3）
+- **Android 触控板**：单指移动/双击/拖拽/双指滚动/数字键盘/调度中心手势；macOS 用 CGEvent、Windows 用 SendInput 注入（见 [docs/touchpad.md](docs/touchpad.md)）
 
 ## 快速开始（桌面端）
 
@@ -44,8 +44,8 @@ cargo run        # 或 cargo install tauri-cli && cargo tauri dev
 | 层 | 选型 |
 |---|---|
 | 协议核心 | Rust crate（协议、群管理、加密、发现、剪贴板），桌面端直接使用 |
-| Windows / macOS | Tauri 2（Rust + 无构建静态前端） |
-| Android | Kotlin + Jetpack Compose，Kotlin 镜像实现协议（迁移 UniFFI 复用规划中） |
+| Windows / macOS | Tauri 2（Rust + 无构建静态前端）；触控板注入 Win=SendInput / macOS=CGEvent |
+| Android | Kotlin + Jetpack Compose，Kotlin 镜像实现协议（UniFFI 复用为 TODO） |
 | 通信 | WebSocket(TCP) + JSON 消息 + AES-256-GCM；UDP 拉取式发现 |
 
 ## 平台约束（Android 剪贴板）
@@ -55,7 +55,7 @@ Android 10+ 禁止后台应用读取剪贴板，KnotYup 因此按前后台分层
 - **前台**：系统剪贴板变化回调自动同步（写入/读取均可用），另可从任意 App 分享文本到群
 - **后台**：不读不写剪贴板；收到群内新剪贴板时发**悬浮通知**（含来源与内容预览），点通知里的「复制」按钮才写入剪贴板
 
-内置 IME（后台读的正解）与悬浮窗/快捷磁贴仍在规划中。
+内置 IME（后台读的正解）与悬浮窗/快捷磁贴为 TODO（见路线图 M2.2b）。
 
 ## 路线图
 
@@ -64,10 +64,14 @@ Android 10+ 禁止后台应用读取剪贴板，KnotYup 因此按前后台分层
 - [x] **v2 群事件**：拉取式发现、30s 心跳/看门狗、群主三方握手转让、解散缓冲、断连弹窗
 - [x] **M2.1 Android**：加入群（发现列表/手动地址）、加密同步、前台剪贴板模式、分享发送、主题色/语言
 - [x] **M2.2a Android**：群组前台服务 + 后台新剪贴板悬浮通知（一键复制）
-- [ ] **M2.2b Android**：悬浮窗/快捷磁贴、内置 IME（14+ 后台读正解）、评估迁移 UniFFI 复用 knot-core
-- [ ] **M3 触控板**：触摸采集 → 鼠标注入、手势、延迟调优
-- [x] **M4 文件共享**：设备级持久共享文件夹（fileList 内嵌成员表）+ P2P 分块直传 + 下载进度通知，桌面/安卓群页面文件 tab，设计见 [docs/file-sharing.md](docs/file-sharing.md)
-- [ ] **M5 打磨**：图片预览、防休眠、打包分发
+- [x] **M3 触控板**：触摸采集 → 鼠标注入（macOS CGEvent / Windows SendInput）、手势、数字键盘、调度中心；首次使用引导页
+- [x] **M4 文件共享**：设备级持久共享文件夹（fileList 内嵌成员表）+ P2P 分块直传 + 下载进度通知 + 传输中心（进度/取消），桌面/安卓群页面文件 tab
+- [x] **打包脚本**：`scripts/build.sh <a|m> <dev|版本号>`，正式版自动同步双端 6 处版本号，产物入 dist/
+- [ ] **M2.2b Android（TODO）**：悬浮窗/快捷磁贴、内置 IME（14+ 后台读正解）、评估迁移 UniFFI 复用 knot-core
+- [ ] **M5 打磨（TODO）**：图片预览、防休眠、Windows 桌面打包
+- [ ] **其它 TODO**：ECDH+QR 配对（现为 PIN 派生密钥）、震动调教体系、触控板一对一占用状态、ping/pong 延迟测量、ws 信令背压、剪贴板大文本分片
+
+> 已废弃/不做：数字键盘运算符键（+-*/Enter）、三指手势、底部上滑唤出键盘、断点续传、多选上传、防休眠 WakeLock 按需唤醒。
 
 ## 仓库结构
 

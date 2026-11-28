@@ -5,11 +5,11 @@
 ```
                     ┌──────────── knot-core (Rust) ────────────┐
                     │  discovery(UDP 拉取式发现) │ net(群主/成员) │
-                    │  protocol(JSON;仅剪贴板加密信封) │ crypto(AES-GCM)│
+                    │  protocol(JSON;业务消息加密信封) │ crypto(AES-GCM)│
                     │  clipboard(轮询+指纹去重)                │
-                    │  file(规划：offer 信令 + P2P 分块直传)    │
+                    │  file(P2P 分块直传 + sha256/AES-GCM)      │
                     └──────┬──────────────┬─────────────┬─────┘
-                  UniFFI(规划)↙        直接使用↙        (未来 Linux/iOS)
+                  UniFFI(TODO)↙       直接使用↙        (未来 Linux/iOS: TODO)
         ┌──────────────┐   ┌──────────────┐
         │ knot-android │   │ knot-desktop │
         │ Kotlin/Compose│  │ Tauri 2      │
@@ -26,7 +26,7 @@
 - 断连策略：**无自动重连/承接**。成员与群主的 ws 断开（含心跳失联）→ 双端统一弹
   「连接已断开」弹窗（显示群主名称），用户决策「重新加入」（5s 超时判失败、弹窗重现）
   或「退出群」。
-- 文件共享（设计阶段）：**设备级持久共享文件夹 + fileList 内嵌成员表**——每台设备有一个
+- 文件共享（已实现）：**设备级持久共享文件夹 + fileList 内嵌成员表**——每台设备有一个
   跨群复用的共享文件夹（清单持久化本地），文件夹即 `DeviceInfo.file_list`，入群时随
   成员表同步（成员表即文件列表唯一真相源）；文件本体走成员 P2P 直连（`DeviceInfo.file_addr`），
   分块 + AES-GCM + sha256，群主零字节中转；下载是纯本地行为（落盘即止，不自动共享/不成为供种者）；
@@ -52,13 +52,15 @@
 - **悬浮通知**：独立渠道 `knotyup_clipboard`（IMPORTANCE_HIGH）支持 heads-up；复用单一
   通知 ID（新消息覆盖旧的），避免后台刷屏；内容点击回 App。
 - **通知权限**：`POST_NOTIFICATIONS` 已在清单声明，入群时请求；引导页清单项说明用途。
-- **内置 IME**（规划）：默认 IME 全版本恒可读，是 Android 14+ 后台读的正解。
+- **内置 IME**（TODO）：默认 IME 全版本恒可读，是 Android 14+ 后台读的正解。
 
-## 触控板（M3）
+## 触控板（M3，已完成）
 
-Android 前台 Activity 采集 MotionEvent → 增量(dx/dy/按键/滚轮) → 专用 TCP 连接
-→ PC 注入（Windows `SendInput` / macOS `CGEvent`）。目标端到端 < 20ms。
-手势：单指移动、双指滚动、点按、双击拖拽。
+Android 前台 Activity 采集 MotionEvent → 增量(dx/dy/按键/滚轮) → 专用 UDP 通道
+→ PC 注入（macOS `CGEvent` FFI / Windows `SendInput` FFI，见 `injector.rs`）。
+手势：单指移动、双指滚动、点按、双击拖拽、数字键盘、调度中心。
+首次使用有 7 页引导页（`TouchpadGuideActivity`）。
+TODO：震动调教体系、一对一占用状态、ping/pong 延迟测量。
 
 ## 桌面端数据流
 
@@ -84,7 +86,11 @@ ws 断开(成员) ──bridge take 会话──> knot://conn-lost {addr,pin,own
 - [x] 断连弹窗机制：废除全部自动重连与群主承接，双端统一「重新加入 / 退出群」弹窗
 - [x] 体验细节：剪贴板列表挂载动画、深色模式全量适配（图标/卡片/toast/液态背景）、
       液态流动背景（开屏 + 首页）、扫描入群、群二维码、多主题色板
-- [ ] M2.2b Android：悬浮窗/磁贴、IME（14+ 后台读的正解）、评估迁移 UniFFI 复用 knot-core
-- [ ] M3 触控板
-- [ ] M4 文件共享：控制面信令 + P2P 分块直传（设计已定稿，见 file-sharing.md）
-- [ ] M5 打磨：图片预览 / ECDH+QR 配对 / 打包分发
+- [x] M3 触控板：采集 → 注入（macOS/Windows 双平台）、手势、数字键盘、引导页
+- [x] M4 文件共享：控制面信令 + P2P 分块直传 + 传输中心（进度/取消），见 file-sharing.md
+- [x] 打包脚本：`scripts/build.sh <a|m> <dev|版本号>`（正式版同步双端 6 处版本号，产物入 dist/）
+- [ ] M2.2b Android（TODO）：悬浮窗/磁贴、IME（14+ 后台读的正解）、评估迁移 UniFFI 复用 knot-core
+- [ ] M5 打磨（TODO）：图片预览 / 防休眠 / Windows 桌面打包
+- [ ] 其它 TODO：ECDH+QR 配对（现为 PIN 派生密钥）、震动调教、一对一占用状态、ping/pong 延迟、ws 信令背压、剪贴板大文本分片
+
+> 已废弃/不做：数字键盘运算符键（+-*/Enter）、三指手势、底部上滑唤出键盘、断点续传、多选上传。
