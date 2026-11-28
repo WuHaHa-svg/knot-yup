@@ -4,12 +4,20 @@
 
 ## 0. 打包脚本
 
+统一脚本 `scripts/build.sh`，两个参数：
+
 ```bash
-./scripts/build-debug.sh             # 双端测试版一键打包（macOS --debug + Android debug）
-./scripts/build-desktop-debug.sh     # 单独：macOS 测试版（含调试日志页）
-./scripts/build-android-debug.sh     # 单独：Android 测试版 APK
-./scripts/build-desktop-release.sh   # 单独：macOS 正式版（调试能力编译期剔除）
-./scripts/build-android-release.sh   # 单独：Android 正式版 APK（keystore 签名）
+./scripts/build.sh <a|m> <dev|版本号>
+```
+
+- 参数一：打包平台（`a` = Android / `m` = macOS）
+- 参数二：`dev` → 测试版（debug，不改版本号）；其他（如 `0.8.6`）→ 正式版（release，**自动把版本号同步写入双端真相源**，见 §8）
+
+```bash
+./scripts/build.sh a dev       # Android 测试版
+./scripts/build.sh a 0.6.2     # Android 正式版 0.6.2
+./scripts/build.sh m dev           # macOS 测试版（含调试日志页）
+./scripts/build.sh m 0.6.2         # macOS 正式版 0.6.2（调试能力编译期剔除）
 # 产物统一带时间戳放入 dist/
 ```
 
@@ -108,18 +116,8 @@ cd knot-android
   `KnotGroupServer`（成员连接/转让）、`ClipboardNotification`（后台通知触发）。
 - 级别约定：`Log.d` 常规流程（心跳 ping、本机复制广播），`Log.i` 阶段启动，
   `Log.w` 降级/异常可恢复，`Log.e` 保留给致命错误。
-- **release 构建未做日志剔除**：`isMinifyEnabled = true` + `proguard-android-optimize.txt`
-  不会自动移除 `Log.d/v` 调用（tag 字符串会留在产物里）。若要正式版零日志，需在
-  `proguard-rules.pro` 追加：
-
-  ```proguard
-  -assumenosideeffects class android.util.Log {
-      public static int v(...);
-      public static int d(...);
-  }
-  ```
-
-  （`Log.w/e` 建议保留，线上问题可 `adb logcat` 取证。）
+- **release 日志剔除已配置**：`proguard-rules.pro` 已含 `-assumenosideeffects class android.util.Log`
+  的 `v/d/i` 规则，正式版会移除这些调用；`Log.w/e` 保留，线上问题可 `adb logcat` 取证。
 
 ## 7. 多设备安装
 
@@ -134,12 +132,19 @@ adb -s <serial> shell monkey -p com.knotyup.android -c android.intent.category.L
 
 ## 8. 版本号管理
 
-版本号只需改一处，其余自动派生：
+正式版打包时由 `scripts/build.sh` 把传入版本号**一次性同步写入以下 6 处**（无论本次打哪一端，所有版本文件始终一致）：
 
-| 端 | 改哪里（唯一真相源） | 自动派生的部分 |
+| # | 文件 | 位置 |
 |---|---|---|
-| 桌面 | `knot-desktop/src-tauri/Cargo.toml` 的 `package.version` | `tauri.conf.json` 已设 `version: null` 自动继承；UI 版号角标运行时用 `window.__TAURI__.app.getVersion()` 动态读取 |
-| Android | `knot-android/app/build.gradle.kts` 顶部的 `appVersion = "x.y.z"` | `versionName` 直接取它；`versionCode` 按 `major*10000 + minor*100 + patch` 自动算（0.6.2 → 602） |
+| 1 | `knot-android/app/build.gradle.kts` | `appVersion = "x.y.z"`（versionName / versionCode 由此派生） |
+| 2 | `knot-desktop/src-tauri/Cargo.toml` | `package.version` |
+| 3 | `knot-core/Cargo.toml` | `package.version` |
+| 4 | `knot-desktop/src-tauri/Cargo.lock` | `[[package]] name = "knot-desktop"` 的 version |
+| 5 | `knot-desktop/src-tauri/Cargo.lock` | `[[package]] name = "knot-core"` 的 version |
+| 6 | `knot-core/Cargo.lock` | `[[package]] name = "knot-core"` 的 version |
 
-`knot-core` 是内部库（path 依赖，不带版本号），不参与应用版本发布，无需随应用升级。
-发现协议靠报文前缀 `KNOTYUP2` 区分版本，无独立版本字段，也与应用版本无关。
+说明：
+- `tauri.conf.json` 已设 `version: null` 自动继承 Cargo.toml；UI 版号角标用 `window.__TAURI__.app.getVersion()` 动态读取。
+- Android `versionCode` 按 `major*10000 + minor*100 + patch` 自动算（0.8.6 → 806）。
+- Cargo.lock 只改本地包段的 version，不动 lock 文件格式版本（如 `version = 4`）。
+- 发现协议靠报文前缀 `KNOTYUP2` 区分版本，无独立版本字段，也与应用版本无关。

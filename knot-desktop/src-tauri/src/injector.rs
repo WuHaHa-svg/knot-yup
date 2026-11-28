@@ -1,12 +1,11 @@
-//! macOS 系统输入注入（CGEvent FFI）。
+//! 系统输入注入：macOS 用 CGEvent FFI，Windows 用 SendInput FFI。
 //! 把触摸板事件注入为系统级光标移动/点击/滚动，作用于当前焦点窗口。
-//! 只在 macOS 编译；其它平台提供 no-op 实现保证编译通过。
+//! 其它平台提供 no-op 实现保证编译通过。
 
 #[cfg(target_os = "macos")]
 mod macos {
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
-
     #[repr(C)]
     #[derive(Copy, Clone)]
     pub struct CGPoint { pub x: f64, pub y: f64 }
@@ -162,22 +161,167 @@ mod macos {
 #[cfg(target_os = "macos")]
 pub use macos::*;
 
-// 非 macOS：no-op（Windows SendInput 留 T2）
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+mod windows_impl {
+    // ── Win32 SendInput 结构（按 MSDN 定义，repr(C) 保证布局）──
+    #[repr(C)] #[derive(Copy, Clone)]
+    struct MouseInput { dx: i32, dy: i32, mouse_data: u32, dw_flags: u32, time: u32, extra: usize }
+    #[repr(C)] #[derive(Copy, Clone)]
+    struct KeybdInput { w_vk: u16, w_scan: u16, dw_flags: u32, time: u32, extra: usize }
+    #[repr(C)] #[derive(Copy, Clone)]
+    struct HardwareInput { u_msg: u32, w_param_l: u16, w_param_h: u16 }
+    #[repr(C)]
+    union InputUnion { mi: MouseInput, ki: KeybdInput, hi: HardwareInput }
+    #[repr(C)]
+    struct Input { r#type: u32, u: InputUnion }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn SendInput(n_inputs: u32, p_inputs: *const Input, cb_size: i32) -> u32;
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+
+    const INPUT_MOUSE: u32 = 0;
+    const INPUT_KEYBOARD: u32 = 1;
+    const MOUSEEVENTF_MOVE: u32 = 0x0001;
+    const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+    const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
+    const MOUSEEVENTF_RIGHTUP: u32 = 0x0010;
+    const MOUSEEVENTF_MIDDLEDOWN: u32 = 0x0020;
+    const MOUSEEVENTF_MIDDLEUP: u32 = 0x0040;
+    const MOUSEEVENTF_WHEEL: u32 = 0x0800;
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    const VK_LWIN: u16 = 0x5B;
+    const VK_TAB: u16 = 0x09;
+    const VK_BACK: u16 = 0x08;
+    const VK_OEM_PERIOD: u16 = 0xBE; // 小数点 '.'
+    const SM_SWAPBUTTON: i32 = 23;
+
+    fn mouse_input(dx: i32, dy: i32, mouse_data: u32, flags: u32) -> Input {
+        Input { r#type: INPUT_MOUSE, u: InputUnion { mi: MouseInput {
+            dx, dy, mouse_data, dw_flags: flags, time: 0, extra: 0,
+        } } }
+    }
+
+    fn key_input(vk: u16, up: bool) -> Input {
+        Input { r#type: INPUT_KEYBOARD, u: InputUnion { ki: KeybdInput {
+            w_vk: vk, w_scan: 0,
+            dw_flags: if up { KEYEVENTF_KEYUP } else { 0 },
+            time: 0, extra: 0,
+        } } }
+    }
+
+    fn send(inputs: &[Input]) {
+        let size = std::mem::size_of::<Input>() as i32;
+        unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), size); }
+    }
+
+    /// 左右键因系统"交换鼠标按钮"设置可能对调，这里按设置映射物理按键。
+    fn swap(btn: &str) -> &str {
+        let swapped = unsafe { GetSystemMetrics(SM_SWAPBUTTON) != 0 };
+        if !swapped { return btn; }
+        match btn { "left" => "right", "right" => "left", other => other }
+    }
+
+    fn btn_flags(button: &str) -> (u32, u32) {
+        match swap(button) {
+            "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+            "middle" => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+            _ => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        }
+    }
+
+    pub fn move_relative(dx: i32, dy: i32) {
+        // 相对移动；左键按住时 Windows 自动按拖拽处理，无需特殊标志
+        send(&[mouse_input(dx, dy, 0, MOUSEEVENTF_MOVE)]);
+    }
+
+    pub fn click(button: &str) {
+        let (down, up) = btn_flags(button);
+        send(&[mouse_input(0, 0, 0, down), mouse_input(0, 0, 0, up)]);
+    }
+
+    pub fn double_click() {
+        let (down, up) = btn_flags("left");
+        // 两次快速 down/up：系统按时间间隔识别为双击
+        send(&[
+            mouse_input(0, 0, 0, down), mouse_input(0, 0, 0, up),
+            mouse_input(0, 0, 0, down), mouse_input(0, 0, 0, up),
+        ]);
+    }
+
+    pub fn button_down(button: &str) {
+        let (down, _) = btn_flags(button);
+        send(&[mouse_input(0, 0, 0, down)]);
+    }
+
+    pub fn button_up(button: &str) {
+        let (_, up) = btn_flags(button);
+        send(&[mouse_input(0, 0, 0, up)]);
+    }
+
+    pub fn scroll(dx: i32, dy: i32) {
+        // dy 取反：触摸板向上滑 dy<0 → 向上滚动 mouse_data>0
+        let mut inputs = Vec::with_capacity(2);
+        if dy != 0 {
+            inputs.push(mouse_input(0, 0, (-dy) as u32, MOUSEEVENTF_WHEEL));
+        }
+        if dx != 0 {
+            // 水平滚动：MOUSEEVENTF_HWHEEL = 0x1000
+            const MOUSEEVENTF_HWHEEL: u32 = 0x1000;
+            inputs.push(mouse_input(0, 0, dx as u32, MOUSEEVENTF_HWHEEL));
+        }
+        if !inputs.is_empty() { send(&inputs); }
+    }
+
+    pub fn key_char(ch: &str) {
+        let vk: u16 = if ch.len() == 1 {
+            let b = ch.as_bytes()[0];
+            if b >= b'0' && b <= b'9' { (b - b'0') as u16 + 0x30 } // VK_0..VK_9
+            else if b == b'.' { VK_OEM_PERIOD }
+            else { return }
+        } else if ch == "backspace" { VK_BACK }
+        else { return };
+        send(&[key_input(vk, false), key_input(vk, true)]);
+    }
+
+    /// 任务视图（Win+Tab）——Windows 上对应 macOS 调度中心。
+    pub fn mission_control() {
+        send(&[
+            key_input(VK_LWIN, false), key_input(VK_TAB, false),
+            key_input(VK_TAB, true), key_input(VK_LWIN, true),
+        ]);
+    }
+
+    pub fn release_all() {
+        send(&[
+            mouse_input(0, 0, 0, MOUSEEVENTF_LEFTUP),
+            mouse_input(0, 0, 0, MOUSEEVENTF_RIGHTUP),
+            mouse_input(0, 0, 0, MOUSEEVENTF_MIDDLEUP),
+        ]);
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use windows_impl::*;
+
+// 其它平台：no-op 保证编译通过
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn move_relative(_dx: i32, _dy: i32) {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn click(_button: &str) {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn button_down(_button: &str) {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn button_up(_button: &str) {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn scroll(_dx: i32, _dy: i32) {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn release_all() {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn mission_control() {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn key_char(_ch: &str) {}
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub fn double_click() {}
