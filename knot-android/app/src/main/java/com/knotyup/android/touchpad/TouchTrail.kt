@@ -6,7 +6,7 @@ import kotlin.random.Random
  * 触摸轨迹引擎（纯 Kotlin，无 Compose 依赖）。
  *
  * - 手势采集层每帧 [feed] 触点坐标（按 pointerId 分轨迹）；
- * - 渲染层 60fps 调 [update] 让旧点淡出/过期，再经 [forEachStroke] 画线；
+ * - 渲染层跟随设备刷新率调 [update] 让旧点淡出/过期，再经 [forEachStroke] 画线；
  * - 颜色由设置决定：固定色或随机（随机时每条新轨迹取一色，全程一致）；
  * - 不再区分单指/双指；粗细由渲染层的 width 参数控制；
  * - 与手势识别完全解耦：纯视觉，不影响采集与控制。

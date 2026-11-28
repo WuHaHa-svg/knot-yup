@@ -48,6 +48,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -70,10 +71,12 @@ import com.knotyup.android.data.AppState
 import com.knotyup.android.data.TouchpadSettings
 import com.knotyup.android.touchpad.Haptics
 import com.knotyup.android.touchpad.ParticleSystem
+import com.knotyup.android.touchpad.FireworkSystem
 import com.knotyup.android.touchpad.TouchTrail
 import com.knotyup.android.touchpad.TouchpadClient
 import com.knotyup.android.ui.KnotYupTheme
 import com.knotyup.android.ui.components.ParticleCanvas
+import com.knotyup.android.ui.components.FireworkCanvas
 import com.knotyup.android.ui.components.TouchTrailCanvas
 import com.knotyup.android.ui.components.particlePalette
 import com.knotyup.android.ui.Strings
@@ -185,13 +188,15 @@ private fun ControlScreen(
     val oled = TouchpadSettings.oled
     val naturalScroll = TouchpadSettings.naturalScroll
     // 粒子配置（设置即时生效：remember 读取时取值，设置页在另一个页面，进控制页时读最新）
-    val particlesOn = TouchpadSettings.particles
+    val particleStyle = TouchpadSettings.particleStyle
+    val rippleOn = particleStyle == "ripple"
+    val fireworkOn = particleStyle == "firework"
     val particlePalette = particlePalette(TouchpadSettings.particleColor)
     val particleRandomColor = TouchpadSettings.particleColor == "random"
+    val particleTrail = TouchpadSettings.particleTrail
     val particleSizeDp = TouchpadSettings.particleSize
     val particleCount = TouchpadSettings.particleCount
     val particleSpeed = TouchpadSettings.particleSpeed
-    val particleTrail = TouchpadSettings.particleTrail
     val showTouchTrail = TouchpadSettings.touchTrail
     val trailPalette = particlePalette(TouchpadSettings.trailColor)
     val trailRandomColor = TouchpadSettings.trailColor == "random"
@@ -200,6 +205,7 @@ private fun ControlScreen(
     // 屏幕像素尺寸：用 Compose 实际布局尺寸(zoneW/zoneH，由 onSizeChanged 写入)，
     // 不用 displayMetrics/Configuration——横屏下它们的宽高与真实渲染区域不一致(安全区/刘海)。
     val particleSystem = remember { ParticleSystem() }
+    val fireworkSystem = remember { FireworkSystem() }
     val touchTrail = remember { TouchTrail() }
     var confirmExit by remember { mutableStateOf(false) }
     // 数字键盘：默认关闭（全屏触摸区）；三指轻点开关，三指左右滑交换位置
@@ -209,12 +215,16 @@ private fun ControlScreen(
     var zoneH by remember { mutableFloatStateOf(0f) }
     var netMove by remember { mutableFloatStateOf(0f) } // 当前手势净位移（长按到点校验拖拽用）
     val client = remember { TouchpadClient() }
-    // 粒子发射回调：只做 system.emit，纯视觉、不阻塞采集
+    // 粒子发射回调：按风格分发，纯视觉、不阻塞采集
     val emitParticle: (Float, Float) -> Unit = { x, y ->
-        if (particlesOn) particleSystem.emit(
+        if (rippleOn) particleSystem.emit(
             x, y, particleSizeDp * density, particleCount,
             particlePalette, particleRandomColor, particleSpeed, zoneW, zoneH,
         )
+        if (fireworkOn) {
+            fireworkSystem.launchBottomY = zoneH
+            fireworkSystem.launch(x, y, particleSpeed, particlePalette, particleRandomColor)
+        }
     }
     // 轨迹采集回调：每帧把触点坐标喂给轨迹引擎（单指/双指按 pressedCount 着色）
     val feedTrail: (List<Triple<Long, Float, Float>>) -> Unit = { changes ->
@@ -326,7 +336,8 @@ private fun ControlScreen(
                     }
                 }
         ) {
-            ParticleCanvas(particleSystem, enabled = particlesOn, trail = particleTrail)
+            ParticleCanvas(particleSystem, enabled = rippleOn, trail = particleTrail)
+            FireworkCanvas(fireworkSystem, enabled = fireworkOn)
             TouchTrailCanvas(trail = touchTrail, enabled = showTouchTrail, width = trailWidth)
         }
 
@@ -499,21 +510,27 @@ private fun NumericKeypad(
                         val color = keyColor(rowIdx * 3 + colIdx)
                         // 每个键独立粒子列表（坐标=按键内，天然对应点击位置），范围限制在本格子内
                         val keySparks = remember(key) { androidx.compose.runtime.mutableStateListOf<KbSpark>() }
+                        // 帧驱动重绘：粒子字段是可变对象(非State)，改了不触发重组；tick 每帧推进强制 Canvas 重绘
+                        var sparkTick by remember { mutableFloatStateOf(0f) }
                         var keyPressed by remember { mutableStateOf(false) }
                         LaunchedEffect(key) {
+                            var last = withFrameNanos { it }
                             while (true) {
-                                val now = System.nanoTime()
-                                val it = keySparks.iterator()
-                                while (it.hasNext()) {
-                                    val sp = it.next()
-                                    val dt = ((now - sp.lastNs) / 1_000_000_000f).coerceAtMost(0.05f)
-                                    sp.lastNs = now
-                                    sp.x += sp.vx * dt; sp.y += sp.vy * dt
-                                    sp.vx *= 0.965f; sp.vy *= 0.965f
-                                    sp.age += dt
-                                    if (sp.age >= sp.life) it.remove()
+                                withFrameNanos { now ->
+                                    // 跟随设备刷新率：120Hz 设备 120fps、60Hz 设备 60fps
+                                    val dt = ((now - last) / 1_000_000_000f).coerceAtMost(0.05f)
+                                    last = now
+                                    val it = keySparks.iterator()
+                                    while (it.hasNext()) {
+                                        val sp = it.next()
+                                        sp.x += sp.vx * dt; sp.y += sp.vy * dt
+                                        sp.vx *= 0.985f; sp.vy *= 0.985f
+                                        sp.hue?.let { sp.hue = (it + sp.hueSpeed * dt) % 360f }
+                                        sp.age += dt
+                                        if (sp.age >= sp.life) it.remove()
+                                    }
+                                    if (keySparks.isNotEmpty()) sparkTick += 1f
                                 }
-                                delay(16)
                             }
                         }
                         val keyDensity = androidx.compose.ui.platform.LocalDensity.current.density
@@ -573,14 +590,22 @@ private fun NumericKeypad(
                                                 // 直接用按键内坐标，溅射范围限制在一个格子内（低速+短命）
                                                 val cx = down.position.x
                                                 val cy = down.position.y
-                                                repeat(10 + kotlin.random.Random.nextInt(5)) {
+                                                repeat(12 + kotlin.random.Random.nextInt(6)) {
                                                     val angle = kotlin.random.Random.nextFloat() * 6.28318f
-                                                    val speed = 80f + kotlin.random.Random.nextFloat() * 100f
+                                                    // 初速调大→溅射距离远；配合弱阻尼(0.985)缓慢飘移
+                                                    val speed = 180f + kotlin.random.Random.nextFloat() * 140f
+                                                    // random 模式：每粒子随机色相起点+轮转速度→位移中跑马灯渐变
+                                                    // 固定色模式：从鲜亮色板取色，不受呼吸系数影响
+                                                    val sparkHue = if (rainbow) kotlin.random.Random.nextFloat() * 360f else null
+                                                    val sparkSpeed = if (rainbow) 120f + kotlin.random.Random.nextFloat() * 180f else 0f
+                                                    val sparkColor = if (rainbow) Color.Transparent else Color(palette[kotlin.random.Random.nextInt(palette.size)])
                                                     keySparks.add(KbSpark(
                                                         x = cx, y = cy,
                                                         vx = kotlin.math.cos(angle) * speed,
                                                         vy = kotlin.math.sin(angle) * speed,
-                                                        color = color.copy(alpha = 1f),
+                                                        color = sparkColor,
+                                                        hue = sparkHue,
+                                                        hueSpeed = sparkSpeed,
                                                     ))
                                                 }
                                             }
@@ -603,9 +628,14 @@ private fun NumericKeypad(
                             )
                             if (particlesOn) {
                                 Canvas(Modifier.matchParentSize()) {
+                                    @Suppress("UNUSED_EXPRESSION") sparkTick // 读快照：每帧触发重绘
                                     keySparks.forEach { sp ->
+                                        val alpha = ((1f - sp.age / sp.life) * 0.65f).coerceIn(0f, 1f)
+                                        val drawColor = sp.hue?.let { android.graphics.Color.HSVToColor(FloatArray(4) { i ->
+                                            when (i) { 0 -> it; 1 -> 0.85f; 2 -> 1f; else -> alpha }
+                                        }) }?.let { Color(it) } ?: sp.color.copy(alpha = alpha)
                                         drawCircle(
-                                            color = sp.color.copy(alpha = (1f - sp.age / sp.life).coerceIn(0f, 1f)),
+                                            color = drawColor,
                                             radius = 0.6f * keyDensity, // 微小粒子
                                             center = Offset(sp.x, sp.y),
                                         )
@@ -625,9 +655,10 @@ private class KbSpark(
     var x: Float, var y: Float,
     var vx: Float, var vy: Float,
     val color: Color,
+    var hue: Float? = null,      // 非 null=跑马灯渐变（random 模式），null=固定色
+    val hueSpeed: Float = 0f,    // 色相轮转速度（度/秒）
     var age: Float = 0f,
-    val life: Float = 0.7f,
-    var lastNs: Long = System.nanoTime(),
+    val life: Float = 1.1f,
 )
 
 /** 井字形边框：只画内部网格线（非首行的上边、非首列的左边），四周无外框。 */

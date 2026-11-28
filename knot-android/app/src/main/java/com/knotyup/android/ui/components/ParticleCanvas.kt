@@ -17,10 +17,10 @@ import com.knotyup.android.touchpad.ParticleSystem
 
 /**
  * 粒子渲染层（触摸板控制页叠加层）：
- * - 独立协程 60fps（withFrameNanos 不跳帧）更新粒子 + tick 触发重绘，不触发重组；
+ * - 独立帧循环（withFrameNanos 跟随设备刷新率，不跳帧）更新粒子 + tick 触发重绘，不触发重组；
  * - 只读 ParticleSystem 状态，手势采集层直接 emit 坐标——渲染与采集完全解耦；
  * - 亮色小点画在深色底上（OLED 友好），clipToBounds 防越界；
- * - enabled=false 时不启动帧循环、不绘制（省电）。
+ * - 拖尾由 trail 开关控制（沿运动反方向渐隐尾迹，长度 14 段）；enabled=false 时不启动帧循环、不绘制（省电）。
  */
 @Composable
 internal fun ParticleCanvas(
@@ -53,8 +53,8 @@ internal fun ParticleCanvas(
                     val ux = vx / len
                     val uy = vy / len
                     val step = (radius * 0.8f).coerceAtLeast(0.7f)
-                    for (k in 1..9) {
-                        val f = k / 10f
+                    for (k in 1..14) {
+                        val f = k / 15f
                         drawCircle(
                             color = col.copy(alpha = alpha * (1f - f) * 0.85f),
                             radius = radius * density * 0.9f,

@@ -1,5 +1,7 @@
 package com.knotyup.android.touchpad
 
+import android.graphics.Color
+
 import kotlin.random.Random
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -11,8 +13,8 @@ import kotlin.math.sin
  * - 固定风格：涟漪——粒子从触点沿圆周匀速向外扩散，铺满整个容器；
  * - 粒子只在【飞出容器】时回收，不按存活时长消失、也不被新粒子覆盖；
  * - 对象池按需扩容 + 空闲槽复用：永不覆盖存活粒子，也不无限分配；
- * - 60fps 由渲染层（ParticleCanvas）驱动调用 [update]；
- * - 颜色支持随机（每次从色板取）或固定。
+ * - 帧率由渲染层（ParticleCanvas）跟随设备刷新率驱动调用 [update]（dt 为真实帧间隔）；
+ * - 颜色：randomColor 模式每粒子色相独立跑马灯渐变（位移中持续变色）；固定色取色板首色。
  *
  * 同一个类既用于全屏控制页（screenW/H=屏幕），也用于设置弹窗的预览容器
  * （screenW/H=预览容器尺寸）——emit 传入边界即可。
@@ -27,6 +29,8 @@ class ParticleSystem {
         var radius = 4f
         var alpha = 1f
         var argb = 0
+        var hue: Float? = null      // 非 null=跑马灯渐变（randomColor 模式）
+        var hueSpeed: Float = 0f    // 色相轮转速度（度/秒）
     }
 
     // 可扩容池 + 空闲槽栈：新粒子优先复用已回收槽位，否则扩容，绝不覆盖存活粒子
@@ -79,7 +83,15 @@ class ParticleSystem {
         repeat(n) {
             val p = acquire()
             p.alive = true
-            p.argb = if (randomColor) palette[random.nextInt(palette.size)] else palette[0]
+            if (randomColor) {
+                // 跑马灯：每粒子随机色相起点 + 轮转速度，位移中持续渐变
+                p.hue = random.nextFloat() * 360f
+                p.hueSpeed = 120f + random.nextFloat() * 180f
+                p.argb = Color.HSVToColor(floatArrayOf(p.hue!!, 0.85f, 1f))
+            } else {
+                p.hue = null
+                p.argb = palette[0]
+            }
             p.alpha = 1f
             p.x = x
             p.y = y
@@ -101,6 +113,11 @@ class ParticleSystem {
             if (!p.alive) continue
             p.x += p.vx * dt
             p.y += p.vy * dt
+            p.hue?.let { h ->
+                val nh = (h + p.hueSpeed * dt) % 360f
+                p.hue = nh
+                p.argb = Color.HSVToColor(floatArrayOf(nh, 0.85f, 1f))
+            }
             if (p.x < -m || p.x > boundW + m || p.y < -m || p.y > boundH + m) {
                 p.alive = false
                 freeSlots.add(i)

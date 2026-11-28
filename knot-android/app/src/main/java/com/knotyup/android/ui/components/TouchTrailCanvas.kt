@@ -19,7 +19,7 @@ import com.knotyup.android.touchpad.TrailPoint
 
 /**
  * 触摸轨迹渲染层（触摸板控制页叠加层）：
- * - 独立协程 60fps 更新淡出 + tick 触发重绘，不触发重组；
+ * - 独立帧循环（withFrameNanos 跟随设备刷新率）更新淡出 + tick 触发重绘，不触发重组；
  * - 颜色来自轨迹自身（设置决定：固定/随机），粗细由 width 参数控制；
  * - enabled=false 时直接 return，不启动帧循环（省电）。
  */

@@ -279,9 +279,9 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
     val ctx = LocalContext.current
     // 设置开关本地 state（读自持久化；点击同时写回 TouchpadSettings）
     var oled by remember { mutableStateOf(TouchpadSettings.oled) }
-    var particles by remember { mutableStateOf(TouchpadSettings.particles) }
+    var particleStyle by remember { mutableStateOf(TouchpadSettings.particleStyle) }
     var naturalScroll by remember { mutableStateOf(TouchpadSettings.naturalScroll) }
-    // 粒子配置 state（风格固定涟漪，无 style 设置）
+    // 粒子配置 state
     var particleColor by remember { mutableStateOf(TouchpadSettings.particleColor) }
     var particleSize by remember { mutableFloatStateOf(TouchpadSettings.particleSize) }
     var particleCount by remember { mutableIntStateOf(TouchpadSettings.particleCount) }
@@ -370,10 +370,13 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
                     .background(MaterialTheme.colorScheme.surface),
             ) {
-                SettingSwitch(t("touchpad_particles"), t("touchpad_particles_tip"), particles, t, onToggle = {
-                    particles = it; TouchpadSettings.particles = it
-                })
-                if (particles) {
+                SettingClick(t("touchpad_particle_style"), t("touchpad_particle_style_tip"),
+                    when (particleStyle) {
+                        "ripple" -> t("particle_ripple"); "firework" -> t("particle_firework")
+                        else -> t("particle_off")
+                    }
+                ) { particleDialog = "style" }
+                if (particleStyle != "off") {
                     SettingClick(t("touchpad_particle_color"), t("touchpad_particle_color_tip"),
                         when (particleColor) {
                             "white" -> t("pc_white"); "primary" -> t("pc_primary")
@@ -381,18 +384,23 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
                             else -> t("pc_random")
                         }
                     ) { particleDialog = "color" }
-                    SettingClick(t("touchpad_particle_size"), t("touchpad_particle_size_tip"),
-                        "${String.format("%.2f", particleSize)}dp"
-                    ) { particleDialog = "size" }
-                    SettingClick(t("touchpad_particle_count"), t("touchpad_particle_count_tip"),
-                        particleCount.toString()
-                    ) { particleDialog = "count" }
+                    // 烟花模式只开放颜色+扩散速度；涟漪保留全部选项
+                    if (particleStyle == "ripple") {
+                        SettingClick(t("touchpad_particle_size"), t("touchpad_particle_size_tip"),
+                            "${String.format("%.2f", particleSize)}dp"
+                        ) { particleDialog = "size" }
+                        SettingClick(t("touchpad_particle_count"), t("touchpad_particle_count_tip"),
+                            particleCount.toString()
+                        ) { particleDialog = "count" }
+                    }
                     SettingClick(t("touchpad_particle_speed"), t("touchpad_particle_speed_tip"),
                         particleSpeed.toInt().toString()
                     ) { particleDialog = "speed" }
-                    SettingSwitch(t("touchpad_particle_trail"), t("touchpad_particle_trail_tip"), particleTrail, t, onToggle = {
-                        particleTrail = it; TouchpadSettings.particleTrail = it; previewReplayKey++
-                    })
+                    if (particleStyle == "ripple") {
+                        SettingSwitch(t("touchpad_particle_trail"), t("touchpad_particle_trail_tip"), particleTrail, t, onToggle = {
+                            particleTrail = it; TouchpadSettings.particleTrail = it; previewReplayKey++
+                        })
+                    }
                 }
             }
 
@@ -472,8 +480,18 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
         )
     }
 
+    // 粒子风格弹窗
+    if (particleDialog == "style") {
+        ParticleStyleDialog(
+            t = t,
+            current = particleStyle,
+            onSelect = { particleStyle = it; TouchpadSettings.particleStyle = it; particleDialog = null },
+            onClose = { particleDialog = null },
+        )
+    }
     // 粒子设置弹窗（含预览）
     particleDialog?.let { type ->
+        if (type == "style") return@let
         ParticleSettingDialog(
             type = type,
             t = t,
@@ -485,7 +503,7 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
             trailPalette = particlePalette(trailColor),
             trailRandomColor = trailColor == "random",
             trailWidth = trailWidth,
-            particlesEnabled = particles,
+            particlesEnabled = particleStyle != "off",
             touchTrailEnabled = touchTrail,
             replayKey = previewReplayKey,
             onColor = { particleColor = it; TouchpadSettings.particleColor = it; previewReplayKey++ },
@@ -511,7 +529,7 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
             particleCount = particleCount,
             particleSpeed = particleSpeed,
             particleTrail = particleTrail,
-            particlesEnabled = particles,
+            particlesEnabled = particleStyle != "off",
             touchTrailEnabled = touchTrail,
             onColor = { trailColor = it; TouchpadSettings.trailColor = it },
             onWidth = { trailWidth = it; TouchpadSettings.trailWidth = it },
@@ -618,6 +636,54 @@ private fun SettingsEffectPreview(
         particlesEnabled = particlesEnabled,
         touchTrailEnabled = touchTrailEnabled,
     )
+}
+
+/** 粒子风格弹窗：关闭 / 涟漪 / 烟花。 */
+@Composable
+private fun ParticleStyleDialog(
+    t: (String) -> String,
+    current: String,
+    onSelect: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        DialogCard(Modifier.padding(horizontal = 36.dp)) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 0.dp,
+            ) {
+                Column(Modifier.padding(20.dp)) {
+                    Text(t("touchpad_particle_style"), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.height(16.dp))
+                    val options = listOf(
+                        "off" to t("particle_off"),
+                        "ripple" to t("particle_ripple"),
+                        "firework" to t("particle_firework"),
+                    )
+                    options.forEach { (key, label) ->
+                        TextButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onSelect(key) },
+                        ) {
+                            Text(
+                                label,
+                                color = if (key == current) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
+                        Text(t("confirm_ok"))
+                    }
+                }
+            }
+        }
+    }
 }
 
 /** 粒子设置弹窗：上部控件 + 下部预览；值应用后预览播放一次。 */

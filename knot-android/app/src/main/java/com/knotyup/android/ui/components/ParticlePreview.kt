@@ -139,8 +139,8 @@ internal fun ParticlePreview(
                         val ux = vx / len
                         val uy = vy / len
                         val step = (radius * 0.8f).coerceAtLeast(0.7f)
-                        for (k in 1..9) {
-                            val f = k / 10f
+                        for (k in 1..14) {
+                            val f = k / 15f
                             drawCircle(
                                 color = col.copy(alpha = alpha * (1f - f) * 0.85f),
                                 radius = radius * density * previewScale * 0.9f,

@@ -6,7 +6,7 @@ import android.content.Context
 object TouchpadSettings {
     private const val PREF = "knotyup_touchpad"
     private const val KEY_OLED = "oled"
-    private const val KEY_PARTICLES = "particles"
+    private const val KEY_PARTICLE_STYLE = "particle_style"
     private const val KEY_PARTICLE_COLOR = "particle_color"
     private const val KEY_PARTICLE_SIZE = "particle_size"
     private const val KEY_PARTICLE_COUNT = "particle_count"
@@ -32,10 +32,10 @@ object TouchpadSettings {
         get() = prefs?.getBoolean(KEY_OLED, true) ?: true
         set(v) = run { prefs?.edit()?.putBoolean(KEY_OLED, v)?.commit(); Unit }
 
-    /** 触碰粒子特效（默认关）。 */
-    var particles: Boolean
-        get() = prefs?.getBoolean(KEY_PARTICLES, false) ?: false
-        set(v) = run { prefs?.edit()?.putBoolean(KEY_PARTICLES, v)?.commit(); Unit }
+    /** 粒子风格：off(关闭) / ripple(涟漪) / firework(烟花)，默认 off。 */
+    var particleStyle: String
+        get() = prefs?.getString(KEY_PARTICLE_STYLE, "off") ?: "off"
+        set(v) = run { prefs?.edit()?.putString(KEY_PARTICLE_STYLE, v)?.commit(); Unit }
 
     /** 粒子颜色：random / white / primary / red / blue / gold，默认 random。 */
     var particleColor: String
@@ -57,9 +57,9 @@ object TouchpadSettings {
         get() = prefs?.getFloat(KEY_PARTICLE_SPEED, 180f) ?: 180f
         set(v) = run { prefs?.edit()?.putFloat(KEY_PARTICLE_SPEED, v)?.commit(); Unit }
 
-    /** 粒子拖尾（默认关）：沿运动反方向绘制渐隐尾迹。 */
+    /** 粒子拖尾（默认开）：沿运动反方向绘制渐隐尾迹。 */
     var particleTrail: Boolean
-        get() = prefs?.getBoolean(KEY_PARTICLE_TRAIL, false) ?: false
+        get() = prefs?.getBoolean(KEY_PARTICLE_TRAIL, true) ?: true
         set(v) = run { prefs?.edit()?.putBoolean(KEY_PARTICLE_TRAIL, v)?.commit(); Unit }
 
     /** 自然滚动（默认开）：手指下滑内容跟手下移；关闭则方向相反（传统滚动）。 */
