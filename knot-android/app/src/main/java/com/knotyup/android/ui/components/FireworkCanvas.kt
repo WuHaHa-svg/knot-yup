@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import com.knotyup.android.touchpad.FireworkSystem
 
 /**
@@ -41,31 +42,35 @@ internal fun FireworkCanvas(
     }
     Canvas(Modifier.fillMaxSize().clipToBounds()) {
         @Suppress("UNUSED_EXPRESSION") tick
-        system.forEachRenderable { item ->
-            val center = Offset(item.x, item.y)
-            if (item.kind == FireworkSystem.Kind.SPARK) {
-                // 长拖尾：沿历史轨迹点绘制（与烟雾同一路径，下垂时也一致）
-                val tx = item.trailX
-                val ty = item.trailY
-                if (tx != null && ty != null) {
-                    val n = item.trailCount
-                    for (k in 0 until n) {
-                        // 从最新点到最老点
-                        val idx = (item.trailHead - 1 - k + FireworkSystem.TRAIL_LEN) % FireworkSystem.TRAIL_LEN
-                        val f = k.toFloat() / n
-                        drawCircle(
-                            color = Color(item.argb).copy(alpha = item.alpha * (1f - f) * 0.7f),
-                            radius = item.radius * (1f - f * 0.55f),
-                            center = Offset(tx[idx], ty[idx]),
-                        )
-                    }
+        drawFireworks(system, 1f)
+    }
+}
+
+/** 烟花绘制（全屏与预览共用）：scale 为预览缩放系数。 */
+internal fun DrawScope.drawFireworks(system: FireworkSystem, scale: Float = 1f) {
+    system.forEachRenderable { item ->
+        val center = Offset(item.x, item.y)
+        if (item.kind == FireworkSystem.Kind.SPARK) {
+            // 长拖尾：沿历史轨迹点绘制（与烟雾同一路径，下垂时也一致）
+            val tx = item.trailX
+            val ty = item.trailY
+            if (tx != null && ty != null) {
+                val n = item.trailCount
+                for (k in 0 until n) {
+                    val idx = (item.trailHead - 1 - k + FireworkSystem.TRAIL_LEN) % FireworkSystem.TRAIL_LEN
+                    val f = k.toFloat() / n
+                    drawCircle(
+                        color = Color(item.argb).copy(alpha = item.alpha * (1f - f) * 0.7f),
+                        radius = item.radius * (1f - f * 0.55f) * scale,
+                        center = Offset(tx[idx], ty[idx]),
+                    )
                 }
             }
-            drawCircle(
-                color = Color(item.argb).copy(alpha = item.alpha),
-                radius = item.radius,
-                center = center,
-            )
         }
+        drawCircle(
+            color = Color(item.argb).copy(alpha = item.alpha),
+            radius = item.radius * scale,
+            center = center,
+        )
     }
 }

@@ -22,6 +22,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.knotyup.android.touchpad.ParticleSystem
+import com.knotyup.android.touchpad.FireworkSystem
 import com.knotyup.android.touchpad.TouchTrail
 import kotlinx.coroutines.delay
 
@@ -35,6 +36,7 @@ import kotlinx.coroutines.delay
 @Composable
 internal fun ParticlePreview(
     replayKey: Int,
+    style: String = "ripple", // off / ripple / firework
     sizeDp: Float,
     count: Int,
     speedPx: Float,
@@ -53,6 +55,7 @@ internal fun ParticlePreview(
 ) {
     val density = LocalDensity.current.density
     val system = remember { ParticleSystem() }
+    val fireworks = remember { FireworkSystem() }
     val touchTrail = remember { TouchTrail() }
     var wPx by remember { mutableFloatStateOf(0f) }
     var hPx by remember { mutableFloatStateOf(0f) }
@@ -64,6 +67,13 @@ internal fun ParticlePreview(
     // - 粒子关：只画拖尾
     LaunchedEffect(replayKey, wPx, hPx) {
         if (wPx <= 0f || hPx <= 0f) return@LaunchedEffect
+        if (style == "firework") {
+            // 烟花预览：从容器底部发射到中上部
+            fireworks.launchBottomY = hPx
+            fireworks.launch(wPx * 0.5f, hPx * 0.35f, speedPx, palette, randomColor)
+            return@LaunchedEffect
+        }
+        if (style == "off") return@LaunchedEffect
         val showTrail = trailPalette != null && touchTrailEnabled
         if (!showTrail) {
             if (particlesEnabled) {
@@ -108,6 +118,7 @@ internal fun ParticlePreview(
                 val dt = (now - last) / 1_000_000_000f
                 last = now
                 system.update(dt)
+                fireworks.update(dt)
                 if (trailPalette != null && touchTrailEnabled) touchTrail.update(dt)
                 tick += 1f
             }
@@ -131,7 +142,10 @@ internal fun ParticlePreview(
                 }
                 drawTrailSparks(touchTrail)
             }
-            system.forEachAlive { x, y, vx, vy, radius, alpha, argb ->
+            if (style == "firework") {
+                drawFireworks(fireworks, previewScale * 0.8f)
+            }
+            if (style == "ripple") system.forEachAlive { x, y, vx, vy, radius, alpha, argb ->
                 val col = Color(argb)
                 if (trail) {
                     val len = kotlin.math.hypot(vx, vy)

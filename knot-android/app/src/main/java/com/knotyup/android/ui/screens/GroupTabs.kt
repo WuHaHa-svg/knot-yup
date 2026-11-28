@@ -485,7 +485,9 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
         ParticleStyleDialog(
             t = t,
             current = particleStyle,
-            onSelect = { particleStyle = it; TouchpadSettings.particleStyle = it; particleDialog = null },
+            color = particleColor,
+            speed = particleSpeed,
+            onConfirm = { particleStyle = it; TouchpadSettings.particleStyle = it; particleDialog = null },
             onClose = { particleDialog = null },
         )
     }
@@ -494,6 +496,7 @@ internal fun TouchpadTab(t: (String) -> String, members: List<DeviceInfo>) {
         if (type == "style") return@let
         ParticleSettingDialog(
             type = type,
+            style = particleStyle,
             t = t,
             color = particleColor,
             size = particleSize,
@@ -609,6 +612,7 @@ private fun SettingClick(
 private fun SettingsEffectPreview(
     t: (String) -> String,
     replayKey: Int,
+    style: String = "ripple",
     particleColor: String,
     particleSize: Float,
     particleCount: Int,
@@ -624,6 +628,7 @@ private fun SettingsEffectPreview(
     Spacer(Modifier.height(6.dp))
     ParticlePreview(
         replayKey = replayKey,
+        style = style,
         sizeDp = particleSize,
         count = particleCount,
         speedPx = particleSpeed,
@@ -643,9 +648,15 @@ private fun SettingsEffectPreview(
 private fun ParticleStyleDialog(
     t: (String) -> String,
     current: String,
-    onSelect: (String) -> Unit,
+    color: String,
+    speed: Float,
+    onConfirm: (String) -> Unit,
     onClose: () -> Unit,
 ) {
+    // 本地选中态：点选只切预览高亮，确认才应用
+    var selected by remember { mutableStateOf(current) }
+    var replay by remember { mutableIntStateOf(0) }
+    LaunchedEffect(current) { replay++ }
     Dialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false),
@@ -664,20 +675,40 @@ private fun ParticleStyleDialog(
                         "ripple" to t("particle_ripple"),
                         "firework" to t("particle_firework"),
                     )
-                    options.forEach { (key, label) ->
-                        TextButton(
-                            modifier = Modifier.fillMaxWidth(),
-                            onClick = { onSelect(key) },
-                        ) {
-                            Text(
-                                label,
-                                color = if (key == current) MaterialTheme.colorScheme.primary
-                                        else MaterialTheme.colorScheme.onSurface,
-                            )
+                    Column {
+                        for (row in options.chunked(3)) {
+                            Row {
+                                for ((key, label) in row) {
+                                    TextButton(
+                                        modifier = Modifier.weight(1f),
+                                        onClick = { selected = key; replay++ },
+                                    ) {
+                                        Text(
+                                            label,
+                                            color = if (key == selected) MaterialTheme.colorScheme.primary
+                                                    else MaterialTheme.colorScheme.onSurface,
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                     Spacer(Modifier.height(8.dp))
-                    TextButton(onClick = onClose, modifier = Modifier.align(Alignment.End)) {
+                    // 预览：随选中风格实时切换
+                    ParticlePreview(
+                        replayKey = replay,
+                        style = selected,
+                        sizeDp = 6f,
+                        count = 60,
+                        speedPx = speed,
+                        palette = particlePalette(color),
+                        randomColor = color == "random",
+                        particlesEnabled = true,
+                        touchTrailEnabled = false,
+                        height = 100.dp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = { onConfirm(selected) }, modifier = Modifier.align(Alignment.End)) {
                         Text(t("confirm_ok"))
                     }
                 }
@@ -690,6 +721,7 @@ private fun ParticleStyleDialog(
 @Composable
 private fun ParticleSettingDialog(
     type: String,
+    style: String,
     t: (String) -> String,
     color: String,
     size: Float,
@@ -788,6 +820,7 @@ private fun ParticleSettingDialog(
                     SettingsEffectPreview(
                         t = t,
                         replayKey = replayKey,
+                        style = style,
                         particleColor = color,
                         particleSize = size,
                         particleCount = count,
